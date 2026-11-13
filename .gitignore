@@ -1,0 +1,56 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+src-tauri/llamacpp/*
+src-tauri/llamacpp_all_version/*
+src-tauri/tauri/*
+src-tauri/binaries/
+admAgent
+.admAgent
+.agents
+_admagent_new.json
+_admagent*.json
+.catpaw
+.mimocode
+.workbuddy
+.codely*
+tmp
+.vscode
+codely*
+
+# 内置 admAgent 二进制仓库：不入库（本地 clone 由 admAgent 编译产物直写、pnpm agent:push 强制覆盖远端；CI 构建时自动 checkout 到同名目录）
+adm-binaries
+
+# docker 目录：各镜像子目录下的运行时数据（ComfyUI 输出/输入/用户配置）不入库
+docker/*/data
+
+# docker 目录：模型文件不入库（十几 GB；用 export-cache.sh 从已构建的镜像导出，构建时预置给 BuildKit，避免重复下载）
+docker/*/models/*
+!docker/*/models/.gitkeep
+
+# docker 目录：预置源码（ComfyUI 本体 + custom_nodes，几十 MB）同样不入库，export-cache.sh 导出
+docker/*/sources/*
+!docker/*/sources/.gitkeep
+pi-vcc

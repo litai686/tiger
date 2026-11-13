@@ -1,0 +1,1174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tiger</title>
+  <style>
+    /* ===== 主题变量：默认「暗夜紫」，其余主题通过 <html data-theme> 覆盖 =====
+       全部前端视图内联在同一文档中，故 :root 变量对所有视图（含 agent）生效 */
+    :root {
+      --c-bg: #1a1a2e;
+      --c-bg-deep: #0d1117;
+      --c-panel: #16213e;
+      --c-panel-2: #0f3460;
+      --c-raise: #1c2331;
+      --c-raise-2: #21262d;
+      --c-border: #2a2a4e;
+      --c-border-soft: #1a1a3e;
+      --c-border-hi: #3a3a5e;
+      --c-accent: #6c63ff;
+      --c-accent-2: #5a52d5;
+      --c-accent-rgb: 108, 99, 255;
+      --c-text: #e0e0e0;
+      --c-text-2: #a0a0c0;
+      --c-text-3: #8080a0;
+      --c-text-4: #606080;
+      --c-text-hi: #ffffff;
+      --c-overlay: rgba(255, 255, 255, 0.1);
+      --c-overlay-strong: rgba(255, 255, 255, 0.2);
+    }
+    html[data-theme="vscode"] {
+      --c-bg: #1e1e1e; --c-bg-deep: #181818; --c-panel: #252526; --c-panel-2: #2d2d30;
+      --c-raise: #2a2d2e; --c-raise-2: #37373d; --c-border: #3c3c3c; --c-border-soft: #2b2b2b;
+      --c-border-hi: #4e4e52; --c-accent: #4a9eff; --c-accent-2: #3b82d6; --c-accent-rgb: 74, 158, 255;
+      --c-text: #d4d4d4; --c-text-2: #a6a6a6; --c-text-3: #858585; --c-text-4: #6a6a6a; --c-text-hi: #ffffff;
+    }
+    html[data-theme="onedark"] {
+      --c-bg: #282c34; --c-bg-deep: #21252b; --c-panel: #21252b; --c-panel-2: #2c313a;
+      --c-raise: #2c313a; --c-raise-2: #3a3f4b; --c-border: #3a3f4b; --c-border-soft: #21252b;
+      --c-border-hi: #4b5263; --c-accent: #61afef; --c-accent-2: #4d8fce; --c-accent-rgb: 97, 175, 239;
+      --c-text: #abb2bf; --c-text-2: #9da5b4; --c-text-3: #7f848e; --c-text-4: #5c6370; --c-text-hi: #ffffff;
+    }
+    html[data-theme="light"] {
+      --c-bg: #ffffff; --c-bg-deep: #f6f8fa; --c-panel: #f3f3f3; --c-panel-2: #ffffff;
+      --c-raise: #eaeaea; --c-raise-2: #e1e4e8; --c-border: #d0d7de; --c-border-soft: #e1e4e8;
+      --c-border-hi: #bcc4cc; --c-accent: #0066b8; --c-accent-2: #005a9e; --c-accent-rgb: 0, 102, 184;
+      --c-text: #1f2328; --c-text-2: #4b5563; --c-text-3: #6a737d; --c-text-4: #8a94a0; --c-text-hi: #000000;
+      --c-overlay: rgba(0, 0, 0, 0.05); --c-overlay-strong: rgba(0, 0, 0, 0.1);
+    }
+    html[data-theme="sepia"] {
+      --c-bg: #fdf6e3; --c-bg-deep: #f4ecd8; --c-panel: #eee8d5; --c-panel-2: #fbf6e6;
+      --c-raise: #e7dfc6; --c-raise-2: #ddd6bd; --c-border: #ddd2b0; --c-border-soft: #e7ddc4;
+      --c-border-hi: #cabf98; --c-accent: #b5651d; --c-accent-2: #99551a; --c-accent-rgb: 181, 101, 29;
+      --c-text: #586e75; --c-text-2: #657b83; --c-text-3: #839496; --c-text-4: #93a1a1; --c-text-hi: #073642;
+      --c-overlay: rgba(101, 90, 40, 0.08); --c-overlay-strong: rgba(101, 90, 40, 0.16);
+    }
+    html[data-theme="github"] {
+      --c-bg: #0d1117; --c-bg-deep: #010409; --c-panel: #161b22; --c-panel-2: #21262d;
+      --c-raise: #1c2128; --c-raise-2: #21262d; --c-border: #30363d; --c-border-soft: #21262d;
+      --c-border-hi: #444c56; --c-accent: #4493f8; --c-accent-2: #2f81f7; --c-accent-rgb: 68, 147, 248;
+      --c-text: #c9d1d9; --c-text-2: #adbac7; --c-text-3: #8b949e; --c-text-4: #6e7681; --c-text-hi: #ffffff;
+    }
+    html[data-theme="dracula"] {
+      --c-bg: #282a36; --c-bg-deep: #21222c; --c-panel: #21222c; --c-panel-2: #343746;
+      --c-raise: #343746; --c-raise-2: #44475a; --c-border: #44475a; --c-border-soft: #343746;
+      --c-border-hi: #6272a4; --c-accent: #bd93f9; --c-accent-2: #a77bea; --c-accent-rgb: 189, 147, 249;
+      --c-text: #f8f8f2; --c-text-2: #d5d6e0; --c-text-3: #a0a1b8; --c-text-4: #6272a4; --c-text-hi: #ffffff;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: var(--c-bg);
+      color: var(--c-text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      user-select: none;
+    }
+
+    #app {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    #view-root {
+      flex: 1;
+      width: 100%;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      background: var(--c-bg);
+      transition: opacity 0.16s ease-out;
+      will-change: opacity;
+    }
+
+    #hardware-bar {
+      display: flex;
+      align-items: center;
+      gap: 0;
+      background: var(--c-panel-2);
+      padding: 4px 16px;
+      font-size: 12px;
+      color: var(--c-text-2);
+      border-top: 1px solid var(--c-border-soft);
+      flex-shrink: 0;
+    }
+
+    #settings-btn,
+    #agent-btn,
+    #skills-btn {
+      cursor: pointer;
+      font-size: 13px;
+      padding: 2px 10px;
+      border-right: 1px solid var(--c-border);
+      margin-right: 10px;
+      transition: color 0.2s;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1px;
+    }
+
+    .btn-icon {
+      font-size: 20px;
+      line-height: 1;
+    }
+
+    .btn-text {
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    #settings-btn:hover,
+    #agent-btn:hover,
+    #skills-btn:hover {
+      color: var(--c-accent);
+    }
+
+    #settings-btn.active,
+    #agent-btn.active,
+    #skills-btn.active {
+      background: rgba(var(--c-accent-rgb), 0.20);
+      color: var(--c-text-hi);
+      border-radius: 6px;
+      border-right-color: transparent;
+    }
+    #settings-btn.active .btn-icon,
+    #agent-btn.active .btn-icon,
+    #skills-btn.active .btn-icon {
+      color: var(--c-accent);
+    }
+
+    #hw-items {
+      display: flex;
+      align-items: center;
+      margin-left: auto;
+    }
+
+    .hw-item {
+      padding: 0 12px;
+      border-right: 1px solid var(--c-border);
+    }
+
+    .hw-item:last-child {
+      border-right: none;
+    }
+
+    .hw-label {
+      color: var(--c-text-2);
+      margin-right: 4px;
+      white-space: nowrap;
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      display: inline-block;
+      vertical-align: bottom;
+    }
+
+    .hw-value {
+      color: var(--c-text-hi);
+      font-weight: 600;
+    }
+
+    /* 多卡下拉：替代 vram-info 文本显示，允许逐卡查看（放宽宽度尽量显示完整卡名） */
+    #gpu-select {
+      color: var(--c-text-hi);
+      font-weight: 600;
+      font-size: 12px;
+      height: 18px;
+      line-height: 18px;
+      padding: 0 2px;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      max-width: 260px;
+      outline: none;
+      text-align: right;
+      vertical-align: bottom;
+    }
+    #gpu-select option {
+      background: var(--c-panel-2);
+      color: var(--c-text);
+    }
+
+    /* 更新弹窗样式 */
+    #update-overlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.6);
+      z-index: 9999;
+      justify-content: center;
+      align-items: center;
+    }
+    #update-overlay.show {
+      display: flex;
+    }
+    #update-dialog {
+      background: var(--c-panel);
+      border: 1px solid var(--c-border);
+      border-radius: 12px;
+      padding: 28px 32px;
+      max-width: 460px;
+      width: 90%;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    #update-dialog .update-icon { font-size: 40px; text-align: center; margin-bottom: 12px; }
+    #update-dialog .update-title { font-size: 20px; font-weight: 600; color: var(--c-text-hi); text-align: center; margin-bottom: 8px; }
+    #update-dialog .update-desc { font-size: 14px; color: var(--c-text-2); text-align: center; margin-bottom: 20px; line-height: 1.6; }
+    #update-dialog .update-info-row { display: flex; justify-content: center; gap: 24px; margin-bottom: 20px; font-size: 13px; }
+    #update-dialog .update-info-row .info-item { text-align: center; }
+    #update-dialog .update-info-row .info-label { color: var(--c-text-3); font-size: 11px; }
+    #update-dialog .update-info-row .info-value { color: var(--c-text); font-weight: 500; margin-top: 2px; }
+    #update-dialog .update-buttons { display: flex; gap: 12px; justify-content: center; }
+    #update-dialog .update-btn-primary { background: var(--c-accent); color: #fff; border: none; padding: 10px 28px; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; transition: background 0.2s; }
+    #update-dialog .update-btn-primary:hover { background: var(--c-accent-2); }
+    #update-dialog .update-btn-secondary { background: var(--c-overlay); color: var(--c-text); border: none; padding: 10px 28px; border-radius: 8px; font-size: 14px; cursor: pointer; transition: background 0.2s; }
+    #update-dialog .update-btn-secondary:hover { background: var(--c-overlay-strong); }
+    #update-dialog .checking-text { text-align: center; color: var(--c-text-3); font-size: 14px; padding: 20px 0; }
+    #update-dialog .checking-text .spinner { display: inline-block; width: 20px; height: 20px; border: 2px solid var(--c-border); border-top-color: var(--c-accent); border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 8px; vertical-align: middle; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .update-progress-bar { width: 100%; height: 6px; background: var(--c-border); border-radius: 3px; margin-top: 12px; overflow: hidden; }
+    .update-progress-fill { height: 100%; background: var(--c-accent); border-radius: 3px; transition: width 0.3s ease; }
+    .update-status-text { font-size: 12px; color: var(--c-text-3); margin-top: 6px; text-align: center; }
+
+    /* ===== 视图切换全局过渡 =====
+       流程：fade-out 当前视图（160ms）→ 可选展示顶部进度条 + 居中 spinner →
+       挂载新视图（opacity:0）→ fade-in（200ms）。
+       进度条 / spinner 仅在模块加载超过 180ms 才出现，避免瞬时切换闪烁；
+       fade-out / fade-in 始终执行，给用户视觉连续性。
+       注意：这里只用 opacity 做过渡，不用 transform —— view-root 内挂着
+       .modal-overlay 等 position:fixed 元素，transform 会让 root 成为它们的
+       containing block，过渡期间弹窗会错位。 */
+    #view-root.view-leaving {
+      opacity: 0;
+      pointer-events: none;
+    }
+    #view-root.view-entering {
+      opacity: 0;
+      transition: none; /* 挂载后下一帧再加 transition 才会播 */
+    }
+    #view-root.view-active {
+      opacity: 1;
+      transition: opacity 0.2s ease-out;
+    }
+
+    /* 顶部细线进度条（模块加载超阈值时显示） */
+    #view-progress {
+      position: fixed;
+      top: 0; left: 0;
+      height: 2px;
+      width: 0;
+      background: linear-gradient(90deg,
+        rgba(var(--c-accent-rgb), 0.6),
+        var(--c-accent));
+      box-shadow: 0 0 6px rgba(var(--c-accent-rgb), 0.5);
+      z-index: 100;
+      opacity: 0;
+      transition: opacity 0.12s ease-out;
+      pointer-events: none;
+    }
+    #view-progress.show { opacity: 1; }
+    #view-progress.anim { animation: view-progress 1.2s ease-in-out infinite; }
+    @keyframes view-progress {
+      0%   { width: 0%;   margin-left: 0%; }
+      50%  { width: 60%;  margin-left: 20%; }
+      100% { width: 0%;   margin-left: 100%; }
+    }
+
+    /* 视图切换 loading 动画（模块加载超阈值才显示，避免瞬时切换时 spinner 闪烁） */
+    .view-loading {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      gap: 14px;
+    }
+    .view-loading-spinner {
+      width: 36px;
+      height: 36px;
+      border: 3px solid var(--c-border);
+      border-top-color: var(--c-accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    .view-loading-text { font-size: 13px; color: var(--c-text-3); }
+
+    .global-toast {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      background: var(--c-panel);
+      color: var(--c-text-hi);
+      padding: 18px 28px;
+      border-radius: 10px;
+      font-size: 15px;
+      z-index: 9999;
+      border: 1px solid var(--c-border-hi);
+      box-shadow: 0 8px 30px rgba(0,0,0,0.3);
+      cursor: default;
+    }
+
+
+  </style>
+  <script>
+    // 主题：尽早同步应用（在 body 渲染前），避免首屏闪烁
+    // 名称字段为显示文案（设置页主题卡片用），id 才是持久化键；i18n 未就绪时保持中文
+    window.__ADM_THEMES = [
+      { id: "default", name: "暗夜紫",      colors: ["#1a1a2e", "#16213e", "#6c63ff"] },
+      { id: "vscode",  name: "VS Code 深色", colors: ["#1e1e1e", "#252526", "#4a9eff"] },
+      { id: "onedark", name: "One Dark",     colors: ["#282c34", "#21252b", "#61afef"] },
+      { id: "github",  name: "GitHub 深色",  colors: ["#0d1117", "#161b22", "#4493f8"] },
+      { id: "dracula", name: "Dracula",      colors: ["#282a36", "#44475a", "#bd93f9"] },
+      { id: "light",   name: "白色亮色",    colors: ["#ffffff", "#f3f3f3", "#0066b8"] },
+      { id: "sepia",   name: "淡黄护眼",    colors: ["#fdf6e3", "#eee8d5", "#b5651d"] }
+    ];
+    window.getTheme = function () {
+      try { return localStorage.getItem("adm-theme") || "vscode"; } catch (_) { return "vscode"; }
+    };
+    window.applyTheme = function (id) {
+      var valid = window.__ADM_THEMES.some(function (t) { return t.id === id; });
+      var theme = valid ? id : "default";
+      if (theme === "default") document.documentElement.removeAttribute("data-theme");
+      else document.documentElement.setAttribute("data-theme", theme);
+      try { localStorage.setItem("adm-theme", theme); } catch (_) {}
+    };
+    window.applyTheme(window.getTheme());
+  </script>
+</head>
+<body>
+  <!-- 更新弹窗 -->
+  <div id="update-overlay">
+    <div id="update-dialog">
+      <div id="update-content"></div>
+    </div>
+  </div>
+
+  <div id="view-progress"></div>
+
+  <div id="app">
+    <div id="view-root"></div>
+    <div id="hardware-bar">
+      <div id="agent-btn" onclick="goAgent()">
+        <span class="btn-icon">&#129302;</span>
+        <span class="btn-text" data-i18n="Agent">Agent</span>
+      </div>
+      <div id="skills-btn" onclick="navigateTo('/skills')">
+        <span class="btn-icon">🧩</span>
+        <span class="btn-text" data-i18n="技能管理">技能管理</span>
+      </div>
+      <div id="settings-btn" onclick="navigateTo('/settings')">
+        <span class="btn-icon">&#9881;</span>
+        <span class="btn-text" data-i18n="设置">设置</span>
+      </div>
+      <div id="hw-items">
+        <div class="hw-item">
+          <span class="hw-label" data-i18n="内存">内存</span>
+          <span class="hw-value" id="ram-info">--</span>
+        </div>
+        <div class="hw-item">
+          <span class="hw-label" id="gpu-label" data-i18n="显存">显存</span>
+          <select id="gpu-select" class="hw-value" style="display:none;"></select>
+          <span class="hw-value" id="vram-info">--</span>
+        </div>
+        <div class="hw-item">
+          <span class="hw-label">CPU</span>
+          <span class="hw-value" id="cpu-info">--</span>
+        </div>
+      </div>
+
+    </div>
+
+
+  </div>
+
+  <script type="module">
+    // ===== 全局基础设施 =====
+    const invoke = window.__TAURI__?.core?.invoke || window.__TAURI_INTERNALS__?.invoke;
+    const listen = window.__TAURI__?.event?.listen || window.__TAURI_INTERNALS__?.listen;
+    window.__adm_invoke = invoke;
+    window.__adm_listen = listen;
+
+    // 预加载 i18n 模块并同步绑定 t()（顶层 await，后续所有动态文本走 t）
+    const _i18n = await import("./i18n.js");
+    const t = _i18n.t;
+    // 统一错误友好提示（语言感知：中文界面全中文，英文界面英文提示+原文）
+    const _errMod = await import("./views/agent/error.js");
+    let _settingsLang = null;
+    try { _settingsLang = (await invoke("load_settings")).language; } catch (_) {}
+    _i18n.syncLanguageFromSettings({ language: _settingsLang });
+    _i18n.applyToDOM(document);
+
+    // 底部硬件栏（壳层常驻）禁用右键，屏蔽浏览器默认菜单
+    document.getElementById("hardware-bar").addEventListener("contextmenu", function(e) { e.preventDefault(); });
+
+    // 共享状态（跨视图共享）
+    window.__adm_state = {
+      // agent 是否正在工作（由 agent 视图 store.js syncAgentBusy 维护，用于导航拦截）
+      agentBusy: false,
+    };
+
+    let systemInfo = null;
+    let hwinfo = { cpu: null, ram: null, gpu: null, os: null };
+
+    function formatBytes(bytes) {
+      if (bytes === 0) return "0 B";
+      const k = 1024;
+      const sizes = ["B", "KB", "MB", "GB", "TB"];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + sizes[i];
+    }
+
+    // HTML 转义：远端 update.json 下发的版本号 / 地址会拼进弹窗 innerHTML，需真实转义防注入
+    function escHtml(s) {
+      if (s == null) return "";
+      return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    }
+
+
+
+    // ===== 导航激活态 =====
+    function setActiveNav(id) {
+      ["agent-btn", "skills-btn", "settings-btn"].forEach(function (b) {
+        const el = document.getElementById(b);
+        if (el) el.classList.toggle("active", b === id);
+      });
+    }
+
+    // ===== 更新弹窗 =====
+    // owner 用于区分弹窗归属：当前只区分 'app-update' 与其它弹窗，升级提示需等其它弹窗关闭后再出现
+    let updateDialogOwner = null;
+
+    function showUpdateDialog(html, owner) {
+      updateDialogOwner = owner || "other";
+      document.getElementById("update-content").innerHTML = html;
+      document.getElementById("update-overlay").classList.add("show");
+    }
+
+    function hideUpdateDialog() {
+      document.getElementById("update-overlay").classList.remove("show");
+      updateDialogOwner = null;
+      // 升级提示被其它弹窗推迟过：等当前弹窗关闭后补一次
+      if (appUpdatePromptPending) {
+        appUpdatePromptPending = false;
+        setTimeout(function () { tryShowAppUpdateReady(); }, 400);
+      }
+    }
+
+    function openUrl(url) {
+      // 仅允许 http(s)，防止远端下发的 download_url 被注入 javascript:/file: 等危险协议
+      if (!/^https?:\/\//i.test(String(url || "").trim())) {
+        console.warn("[index] 拒绝打开非 http(s) 链接:", url);
+        return;
+      }
+      if (window.__TAURI__?.core) {
+        window.__TAURI__.core.invoke("plugin:opener|open_url", { url: url });
+      } else if (window.__TAURI_INTERNALS__?.invoke) {
+        window.__TAURI_INTERNALS__.invoke("plugin:opener|open_url", { url: url });
+      } else {
+        window.open(url, "_blank");
+      }
+    }
+
+    async function checkForUpdate(silent) {
+      silent = silent || false;
+      try {
+        if (!silent) {
+          showUpdateDialog('<div class="checking-text"><span class="spinner"></span>' + t("正在检查更新...") + '</div>');
+        }
+        const result = await invoke("check_update");
+
+        if (result.has_update && result.download_url) {
+          // 新版本：启动时静默后台下载（不打扰用户），下载完成后才弹窗询问是否升级；
+          // 用户主动点「检查新版本」时（silent=false）跟随弹窗展示下载进度
+          if (silent) {
+            startAppUpdateDownload(result);
+          } else {
+            startAppUpdate(result, { manual: true });
+            return;
+          }
+        } else if (result.has_update) {
+          // 平台未提供安装包地址（update.json 无对应平台字段）时维持旧行为：
+          // 只提示版本、不渲染会点空的下载按钮；静默检查则完全不打扰用户
+          if (!silent) {
+            const html = `
+              <div class="update-icon">📥</div>
+              <div class="update-title">${t("发现新版本")}</div>
+              <div class="update-desc">${t("有新版本可用，是否前往下载？")}</div>
+              <div class="update-info-row">
+                <div class="info-item"><div class="info-label">${t("当前版本")}</div><div class="info-value">v${escHtml(result.current_version)}</div></div>
+                <div class="info-item"><div class="info-label">${t("最新版本")}</div><div class="info-value">v${escHtml(result.remote_version)}</div></div>
+              </div>
+              <div class="update-buttons">
+                <button class="update-btn-secondary" onclick="onSystemUpdateDismiss()">${t("稍后再说")}</button>
+              </div>`;
+            showUpdateDialog(html);
+            return;
+          }
+        }
+
+        if (!silent) {
+          showUpdateDialog(`
+            <div class="update-icon">✅</div>
+            <div class="update-title">${t("已是最新版本")}</div>
+            <div class="update-desc">${t("当前版本 v")}${result.current_version} ${t("已是最新")}</div>
+            <div class="update-buttons" style="margin-top:16px;">
+              <button class="update-btn-secondary" onclick="hideUpdateDialog()">${t("确定")}</button>
+            </div>`);
+        }
+      } catch (e) {
+        if (!silent) {
+          showUpdateDialog(`
+            <div class="update-icon">❌</div>
+            <div class="update-title">${t("检查更新失败")}</div>
+            <div class="update-desc">${e}</div>
+            <div class="update-buttons" style="margin-top:16px;">
+              <button class="update-btn-secondary" onclick="hideUpdateDialog()">${t("确定")}</button>
+            </div>`);
+        }
+      }
+    }
+
+    function onSystemUpdateDismiss() {
+      hideUpdateDialog();
+    }
+
+    // ===== 应用自升级（静默下载安装包 → 下载完成后提示升级）=====
+    // 启动时的更新检查只做后台静默下载，不打断用户；安装包落盘后才弹窗询问是否立即升级。
+    // 安装包保留在本地（get_base_dir/updates），用户「稍后再说」后重启即已就绪、无需重下。
+    const APP_UPDATE_SKIP_KEY = "adm_skip_update_version";
+    let appUpdate = null;              // { version, currentVersion, path, status: downloading|ready|error, progress, error, manual, prompted }
+    let appUpdatePromptPending = false; // 升级提示被其它弹窗推迟
+
+    function skippedAppUpdateVersion() {
+      try { return localStorage.getItem(APP_UPDATE_SKIP_KEY) || ""; } catch (_) { return ""; }
+    }
+
+    function renderAppUpdateDialog() {
+      if (!appUpdate) return;
+      const versionRow = `
+        <div class="update-info-row">
+          <div class="info-item"><div class="info-label">${t("当前版本")}</div><div class="info-value">v${escHtml(appUpdate.currentVersion || "")}</div></div>
+          <div class="info-item"><div class="info-label">${t("最新版本")}</div><div class="info-value">v${escHtml(appUpdate.version || "")}</div></div>
+        </div>`;
+
+      if (appUpdate.status === "ready") {
+        appUpdate.prompted = true;
+        showUpdateDialog(`
+          <div class="update-icon">🚀</div>
+          <div class="update-title">${t("新版本已下载完成")}</div>
+          <div class="update-desc">${t("新版本安装包已在后台下载完成，是否立即升级？升级会自动启动安装包并关闭当前软件。")}</div>
+          ${versionRow}
+          <div class="update-buttons">
+            <button class="update-btn-primary" onclick="onAppUpdateInstall()">${t("立即升级")}</button>
+            <button class="update-btn-secondary" onclick="onSystemUpdateDismiss()">${t("稍后再说")}</button>
+          </div>
+          <div class="update-buttons" style="margin-top:10px;">
+            <button class="update-btn-secondary" style="font-size:12px;padding:6px 18px;" onclick="onAppUpdateSkipVersion()">${t("跳过此版本")}</button>
+          </div>`, "app-update");
+        return;
+      }
+
+      if (appUpdate.status === "error") {
+        // 安装阶段失败时给一个「打开安装包所在目录」入口：Linux 的 deb 自动安装失败
+        // 需要用户按提示手动执行命令，能直接看到安装包更省事
+        const revealBtn = (appUpdate.phase === "install" && appUpdate.path)
+          ? `<button class="update-btn-secondary" onclick="onAppUpdateReveal()">${t("打开安装包所在目录")}</button>`
+          : "";
+        showUpdateDialog(`
+          <div class="update-icon">❌</div>
+          <div class="update-title">${escHtml(appUpdate.errorTitle || t("下载更新失败"))}</div>
+          <div class="update-desc" style="white-space:pre-wrap;text-align:left;word-break:break-all;">${escHtml(appUpdate.error || "")}</div>
+          ${versionRow}
+          <div class="update-buttons">
+            <button class="update-btn-primary" onclick="onAppUpdateRetry()">${t("重试")}</button>
+            <button class="update-btn-secondary" onclick="onSystemUpdateDismiss()">${t("稍后再说")}</button>
+            ${revealBtn}
+          </div>`, "app-update");
+        return;
+      }
+
+      // downloading：用户主动检查时展示进度（启动时的静默下载不会走到这里）
+      showUpdateDialog(`
+        <div class="update-icon">📥</div>
+        <div class="update-title">${t("发现新版本")}</div>
+        <div class="update-desc">${t("正在后台下载新版本，下载完成后会提示您升级。")}</div>
+        ${versionRow}
+        <div class="update-progress-bar"><div class="update-progress-fill" id="app-update-progress-fill" style="width: ${Number(appUpdate.progress) || 0}%"></div></div>
+        <div class="update-status-text" id="app-update-status-text">${t("正在下载... ")}${Number(appUpdate.progress) || 0}%</div>
+        <div class="update-buttons" style="margin-top:16px;">
+          <button class="update-btn-secondary" onclick="hideUpdateDialog()">${t("后台下载，稍后再说")}</button>
+        </div>`, "app-update");
+    }
+
+    // 安装包就绪：无人打扰时就弹窗，弹窗被其它提示占用则等它关闭后补弹
+    function tryShowAppUpdateReady() {
+      if (!appUpdate || appUpdate.status !== "ready" || appUpdate.prompted) return;
+      // 用户点过「跳过此版本」：静默检查不再打扰（手动点「检查新版本」时仍照常提示）
+      if (skippedAppUpdateVersion() === appUpdate.version && !appUpdate.manual) return;
+      if (document.getElementById("update-overlay").classList.contains("show") && updateDialogOwner !== "app-update") {
+        appUpdatePromptPending = true;
+        return;
+      }
+      renderAppUpdateDialog();
+    }
+
+    // 后台静默下载安装包；返回是否新发起了一次下载
+    function startAppUpdateDownload(result, opts) {
+      opts = opts || {};
+      if (!result || !result.has_update || !result.download_url) return false;
+      // 已跳过该版本的静默下载不再重跑；手动检查（manual）时忽略跳过记录
+      if (opts.manual !== true && skippedAppUpdateVersion() === result.remote_version) return false;
+      if (appUpdate && appUpdate.version === result.remote_version
+        && (appUpdate.status === "downloading" || appUpdate.status === "ready")) {
+        if (opts.manual) appUpdate.manual = true;
+        return false;
+      }
+      appUpdate = {
+        version: result.remote_version,
+        currentVersion: result.current_version,
+        downloadUrl: result.download_url,
+        path: null,
+        status: "downloading",
+        progress: 0,
+        error: "",
+        errorTitle: "",
+        phase: "download",     // download | install（决定失败弹窗标题与重试方式）
+        manual: !!opts.manual,
+        prompted: false,
+      };
+      invoke("download_app_update", {
+        version: result.remote_version,
+        url: result.download_url,
+      }).then(function (path) {
+        if (!appUpdate || appUpdate.version !== result.remote_version) return;
+        appUpdate.path = path;
+        appUpdate.progress = 100;
+        appUpdate.status = "ready";
+        tryShowAppUpdateReady();
+      }).catch(function (e) {
+        if (!appUpdate || appUpdate.version !== result.remote_version) return;
+        appUpdate.status = "error";
+        appUpdate.phase = "download";
+        appUpdate.errorTitle = t("下载更新失败");
+        appUpdate.error = _errMod.friendlyError(e, { prefix: "下载更新失败: " });
+        // 静默下载失败不弹窗（不打扰用户），仅用户主动查看过进度时把失败原因显示出来
+        if (appUpdate.manual && updateDialogOwner === "app-update") renderAppUpdateDialog();
+      });
+      return true;
+    }
+
+    // 对外统一入口（settings 页「检查新版本」复用）：manual=true 时展示下载进度
+    function startAppUpdate(result, opts) {
+      opts = opts || {};
+      startAppUpdateDownload(result, { manual: opts.manual });
+      if (opts.manual) renderAppUpdateDialog();
+    }
+
+    async function onAppUpdateInstall() {
+      if (!appUpdate || appUpdate.status !== "ready") return;
+      const installerPath = appUpdate.path;
+      if (!installerPath) { onAppUpdateRetry(); return; }
+      // Linux 的 deb 交给包管理器提权安装（弹系统授权框 -> 等安装结束），
+      // 与 Windows/macOS 拉起安装向导后立刻退出不同，这里的文案要分开
+      const isDeb = /\.deb$/i.test(installerPath);
+      appUpdate.phase = "install";
+      appUpdate.errorTitle = "";
+      showUpdateDialog(`
+        <div class="update-icon">⚙️</div>
+        <div class="update-title">${t(isDeb ? "正在安装新版本" : "正在启动安装程序")}</div>
+        <div class="update-desc">${t(isDeb ? "请在系统授权弹窗中输入密码；安装完成后 Tiger 会自动关闭。" : "Tiger 即将关闭并完成升级，请按安装程序提示操作。")}</div>
+        <div class="update-status-text">${t("请稍候...")}</div>`, "app-update");
+      try {
+        // 后端拉起安装程序后会直接退出本进程，这里的 Promise 通常不会返回；
+        // deb 安装是例外：失败时后端带着原因返回，需要展示给用户（此时应用仍在运行）
+        await invoke("install_app_update", { path: installerPath });
+      } catch (e) {
+        appUpdate.status = "error";
+        // 这里的错是后端写好的中文指引（含 sudo 命令与 apt 输出），不能再走
+        // friendlyError——它会把夹带英文/路径的细节整段丢掉，只剩"操作失败，任务中断"
+        appUpdate.errorTitle = t("升级失败");
+        appUpdate.error = _errMod.getErrorMessage(e) || t("升级失败");
+        renderAppUpdateDialog();
+      }
+    }
+
+    function onAppUpdateRetry() {
+      if (!appUpdate) return;
+      // 安装阶段失败：安装包已在本地，直接重跑安装，不重新下载
+      if (appUpdate.phase === "install" && appUpdate.path) {
+        appUpdate.status = "ready";
+        appUpdate.error = "";
+        onAppUpdateInstall();
+        return;
+      }
+      const result = {
+        has_update: true,
+        download_url: appUpdate.downloadUrl,
+        remote_version: appUpdate.version,
+        current_version: appUpdate.currentVersion,
+      };
+      if (!result.download_url) { hideUpdateDialog(); return; }
+      // 必须先把状态挪出 downloading/ready：startAppUpdateDownload 对同版本的这两种
+      // 状态会直接返回，预置成 downloading 会让「重试」在没有下载在跑时空转；
+      // 已就绪（ready）时不重置——安装包已在本地，不该再下一遍
+      if (appUpdate.status !== "ready") {
+        appUpdate.status = "error";
+        appUpdate.progress = 0;
+        appUpdate.error = "";
+        appUpdate.errorTitle = "";
+        appUpdate.phase = "download";
+      }
+      startAppUpdateDownload(result, { manual: true });
+      renderAppUpdateDialog();
+    }
+
+    // 在文件管理器中定位安装包（deb 自动安装失败时方便用户手动执行命令）
+    function onAppUpdateReveal() {
+      const target = appUpdate && appUpdate.path;
+      if (!target) return;
+      invoke("plugin:opener|reveal_item_in_dir", { path: target }).catch(function (e) {
+        console.warn("[index] 打开安装包目录失败:", e);
+      });
+    }
+
+    function onAppUpdateSkipVersion() {
+      if (appUpdate && appUpdate.version) {
+        try { localStorage.setItem(APP_UPDATE_SKIP_KEY, appUpdate.version); } catch (_) {}
+      }
+      onSystemUpdateDismiss();
+    }
+
+    function setupAppUpdateProgressListener() {
+      if (typeof listen !== "function") return;
+      try {
+        listen("app-update-progress", function (event) {
+          if (!appUpdate) return;
+          const payload = event.payload || {};
+          if (payload.status === "downloading") {
+            appUpdate.progress = payload.progress || 0;
+            if (updateDialogOwner === "app-update") {
+              const fill = document.getElementById("app-update-progress-fill");
+              const text = document.getElementById("app-update-status-text");
+              if (fill) fill.style.width = appUpdate.progress + "%";
+              if (text) text.textContent = t("正在下载... ") + appUpdate.progress + "%";
+            }
+          }
+        });
+      } catch (_) {}
+    }
+
+    // ===== Agent 入口 =====
+    async function goAgent() {
+      try {
+        const osName = String(await invoke("get_platform_os")).toLowerCase();
+        const supported = osName === "windows" || osName === "macos" || osName === "linux";
+        if (!supported) { showComingSoon(); return; }
+        if (osName === "macos") {
+          const arch = String(await invoke("get_platform_arch")).toLowerCase();
+          if (arch !== "aarch64" && arch !== "arm64") {
+            showComingSoon(t("当前仅支持 Apple Silicon (M 系列) Mac"));
+            return;
+          }
+        }
+        location.hash = "#/agent";
+      } catch (e) {
+        showComingSoon(_errMod.friendlyError(e, { prefix: "操作失败: " }));
+      }
+    }
+
+    function showComingSoon(msg) {
+      let tip = document.getElementById("os-tip");
+      if (!tip) {
+        tip = document.createElement("div");
+        tip.id = "os-tip";
+        tip.className = "global-toast";
+        document.body.appendChild(tip);
+      }
+      tip.textContent = msg || t("该功能即将开放，敬请期待");
+      tip.style.display = "block";
+      clearTimeout(showComingSoon._t);
+      showComingSoon._t = setTimeout(function () { tip.style.display = "none"; }, 2500);
+    }
+
+    // ===== 导航拦截 =====
+    // Agent 正在工作时禁止切换到其它页面（壳层底部导航统一入口）。
+    // agentBusy 由 agent 视图 store.js syncAgentBusy 维护（startRun/completeRun/cancelRun 时更新）。
+    function navigateTo(path) {
+      if (window.__adm_state && window.__adm_state.agentBusy) {
+        showAgentBusyTip();
+        return;
+      }
+      location.hash = "#" + path;
+    }
+
+    let _agentBusyTipTimer = null;
+    function showAgentBusyTip() {
+      let tip = document.getElementById("agent-busy-tip");
+      if (!tip) {
+        tip = document.createElement("div");
+        tip.id = "agent-busy-tip";
+        tip.className = "global-toast";
+        document.body.appendChild(tip);
+      }
+      tip.textContent = t("大模型正在工作，请勿切换页面");
+      tip.style.display = "block";
+      clearTimeout(_agentBusyTipTimer);
+      _agentBusyTipTimer = setTimeout(function () { tip.style.display = "none"; }, 2500);
+    }
+
+    // 暴露给视图模块（如 settings 调用）
+    window.ADM = {
+      showUpdateDialog,
+      hideUpdateDialog,
+      checkForUpdate,
+      // 应用自升级：下载/升级状态查询与触发（settings 页「检查新版本」复用同一流程）
+      startAppUpdate,
+      getAppUpdate: function () { return appUpdate; },
+    };
+    window.hideUpdateDialog = hideUpdateDialog;
+    window.goAgent = goAgent;
+    window.navigateTo = navigateTo;
+    window.openUrl = openUrl;
+    window.onSystemUpdateDismiss = onSystemUpdateDismiss;
+    window.onAppUpdateInstall = onAppUpdateInstall;
+    window.onAppUpdateRetry = onAppUpdateRetry;
+    window.onAppUpdateReveal = onAppUpdateReveal;
+    window.onAppUpdateSkipVersion = onAppUpdateSkipVersion;
+
+    // ===== 硬件栏 =====
+    // 显卡栏：多张显卡时渲染下拉逐卡查看（卡名 + 显存），单卡/无卡维持原文本显示
+    function updateGpuBar() {
+      const select = document.getElementById("gpu-select");
+      const vramEl = document.getElementById("vram-info");
+      const gpuLabel = document.getElementById("gpu-label");
+      const gpus = (systemInfo.gpus || []).filter(function(g) { return g && g.name; });
+
+      if (gpus.length > 1) {
+        // 多卡：下拉选卡（独显排前），右侧显示所选卡的显存用量（已用 / 总量）
+        select.style.display = "";
+        const prev = select.value;
+        const ordered = gpus.slice().sort(function(a, b) {
+          return (a.is_integrated ? 1 : 0) - (b.is_integrated ? 1 : 0);
+        });
+        select.innerHTML = "";
+        ordered.forEach(function(g, i) {
+          const opt = document.createElement("option");
+          opt.value = String(i);
+          // 核显显存是共享内存占位值（专用显存常为一两百 MB），不可信，只标注不显示数字
+          opt.textContent = g.name + (g.is_integrated ? " (" + t("集成显卡") + ")" : "");
+          opt.title = g.name;
+          select.appendChild(opt);
+        });
+        if (prev !== "" && ordered[Number(prev)]) select.value = prev;
+        const showVram = function(g) {
+          if (!g) { vramEl.textContent = ""; return; }
+          vramEl.textContent = g.total_vram > 0 ? formatBytes(g.total_vram) : "";
+        };
+        select.onchange = function() { showVram(ordered[Number(select.value)]); };
+        vramEl.style.display = "";
+        showVram(ordered[Number(select.value)]);
+        if (gpuLabel.getAttribute("data-i18n") !== "显存") {
+          gpuLabel.textContent = t("显存");
+          gpuLabel.setAttribute("data-i18n", "显存");
+        }
+        return;
+      }
+
+      select.style.display = "none";
+      vramEl.style.display = "";
+      if (systemInfo.has_gpu && systemInfo.total_vram > 0) {
+        // 单卡：优先逐卡枚举值（nvidia-smi 准确），只显示总量
+        const one = gpus.length === 1 ? gpus[0] : null;
+        const oneTotal = one && one.total_vram > 0 ? one.total_vram : systemInfo.total_vram;
+        vramEl.textContent = formatBytes(oneTotal);
+        // 型号优先：hwinfo 插件 > 单卡枚举结果 > 默认"显存"
+        const model = (hwinfo.gpu && hwinfo.gpu.model) || (one ? one.name : null);
+        if (model) {
+          gpuLabel.textContent = one && one.is_integrated ? model + " (" + t("集成显卡") + ")" : model;
+          gpuLabel.removeAttribute("data-i18n"); // 型号优先，语言切换不再覆盖
+        }
+      } else {
+        vramEl.textContent = t("无显卡");
+      }
+    }
+
+    function updateHardwareBar() {
+      if (!systemInfo) return;
+      try {
+        document.getElementById("ram-info").textContent = formatBytes(systemInfo.total_ram);
+        updateGpuBar();
+        const cpuCores = systemInfo.cpu_physical_cores;
+        const cpuThreads = systemInfo.cpu_logical_cores;
+        if (hwinfo.cpu && hwinfo.cpu.model) {
+          document.getElementById("cpu-info").textContent = hwinfo.cpu.model + " " + cpuCores + "C/" + cpuThreads + "T";
+        } else {
+          document.getElementById("cpu-info").textContent = cpuCores + "C/" + cpuThreads + "T";
+        }
+      } catch (e) {
+        console.error("更新硬件栏失败:", e);
+        document.getElementById("ram-info").textContent = t("加载失败");
+      }
+    }
+
+    // ===== 路由器 =====
+    const routes = {
+      "/settings": { load: () => import("./views/settings.js"),       nav: "settings-btn" },
+      "/agent":    { load: () => import("./views/agent.js"),          nav: "agent-btn" },
+      "/skills":   { load: () => import("./views/skills.js"),         nav: "skills-btn" },
+    };
+
+    let currentView = null;
+    let renderSeq = 0;
+    // 当前已渲染路由的 path 与 path+query：用于识别「同一路由的重复渲染请求」——
+    // Agent 运行中被浏览器级导航带离页面时，会把 hash 纠正回 #/agent 并再次触发
+    // hashchange，此时视图仍在位，直接跳过可避免无谓的卸载重挂（重拉会话/消息）。
+    let currentRoutePath = null;
+    let currentRouteKey = null;
+    const TRANSITION_FADE_OUT_MS = 160;
+    const TRANSITION_FADE_IN_MS = 200;
+    const TRANSITION_LOADING_THRESHOLD_MS = 180;
+
+    function setProgress(active) {
+      const bar = document.getElementById("view-progress");
+      if (!bar) return;
+      if (active) { bar.classList.add("show", "anim"); }
+      else { bar.classList.remove("show", "anim"); bar.style.width = ""; bar.style.marginLeft = ""; }
+    }
+
+    function renderLoadingInto(root) {
+      root.innerHTML =
+        '<div class="view-loading"><div class="view-loading-spinner"></div><div class="view-loading-text">' + t("页面加载中...") + '</div></div>';
+    }
+
+    function renderErrorInto(root, msg) {
+      root.innerHTML = '<div style="padding:40px;color:#ff6b6b;">' + t("页面加载失败: ") + msg + '</div>';
+    }
+
+    // 等待下一帧（保证 transition 真的生效）
+    function nextFrame() {
+      return new Promise(function (resolve) {
+        requestAnimationFrame(function () { requestAnimationFrame(resolve); });
+      });
+    }
+
+    function sleep(ms) {
+      return new Promise(function (resolve) { setTimeout(resolve, ms); });
+    }
+
+    // 路由诊断日志：把 hash 变化与拦截情况写进 adm_api_debug.log（调试模式关闭时
+    // 服务端直接丢弃，无文件开销）。用于复盘「运行中偶发离开 Agent 页」这类浏览器级
+    // 导航问题：对比相邻两行的 href 与 history.length 可判断是历史前进/后退
+    // （href 无 #、len 不增）还是落到空 fragment（href 以 # 结尾）。
+    function logRouteDebug(msg) {
+      try {
+        if (window.__adm_invoke) window.__adm_invoke("agent_debug_log", { line: "[ROUTE] " + msg });
+      } catch (_) {}
+    }
+
+    async function renderRoute() {
+      const seq = ++renderSeq;
+      const hash = location.hash || "#/agent";
+      console.log("[index] renderRoute() hash:", hash);
+      const clean = hash.replace(/^#/, "");
+      const qIndex = clean.indexOf("?");
+      const path = qIndex >= 0 ? clean.substring(0, qIndex) : clean;
+      const queryStr = qIndex >= 0 ? clean.substring(qIndex + 1) : "";
+      const params = {};
+      if (queryStr) {
+        queryStr.split("&").forEach((pair) => {
+          const idx = pair.indexOf("=");
+          const k = decodeURIComponent(pair.substring(0, idx >= 0 ? idx : pair.length));
+          const v = idx >= 0 ? decodeURIComponent(pair.substring(idx + 1)) : "";
+          params[k] = v;
+        });
+      }
+
+      const route = routes[path] || routes["/agent"];
+      logRouteDebug("hashchange href=" + location.href + " len=" + history.length +
+        " busy=" + !!(window.__adm_state && window.__adm_state.agentBusy) +
+        " cur=" + (currentRoutePath || "-"));
+
+      // Agent 运行中禁止离开 Agent 页面：底部导航点击由 navigateTo 拦截，但浏览器级
+      // 历史导航（鼠标侧键 / Alt+← / 触控板横向滑动）与「链接拖放到页面」不经过
+      // navigateTo —— 它们会把 hash 清空或改成未知路由，路由器随后回退到 Agent 页
+      // （routes["/agent"]），表现为运行中界面被卸载重挂。
+      // 这里在卸载旧视图之前拦下：用 replace 纠正 hash（不新增历史记录），视图保持挂载。
+      // 仅在 Agent 视图确实挂载时生效：视图已卸载/渲染失败时不该把用户困在拦截里。
+      if (window.__adm_state && window.__adm_state.agentBusy && currentView &&
+          currentRoutePath === "/agent" && route.nav !== "agent-btn") {
+        logRouteDebug("busy 拦截离开 Agent 页面（hash=" + (location.hash || "空") + "），已回退 #/agent");
+        showAgentBusyTip();
+        if (location.hash !== "#/agent") {
+          try { location.replace("#/agent"); } catch (_) {}
+        }
+        return;
+      }
+
+      // 同一路由（含查询参数）重复请求：视图已在位，跳过渲染（避免卸载重挂与重初始化）
+      const routeKey = path + "?" + queryStr;
+      if (routeKey === currentRouteKey && currentView) return;
+
+      setActiveNav(route.nav);
+
+      const root = document.getElementById("view-root");
+
+      // 初次渲染（还没有任何 view）：跳过 fade-out，直接挂载并 fade-in
+      const isFirstRender = !currentView && !root.querySelector("[data-view-mounted]");
+
+      // ===== Phase 1: fade-out 旧视图 =====
+      if (!isFirstRender) {
+        root.classList.remove("view-active");
+        root.classList.add("view-leaving");
+        await sleep(TRANSITION_FADE_OUT_MS);
+        if (seq !== renderSeq) return; // 期间又路由了，丢弃
+        // 卸载旧视图
+        if (currentView && currentView.unmount) {
+          try { currentView.unmount(); } catch (_) {}
+        }
+        currentView = null;
+        root.classList.remove("view-leaving");
+        // 立即清空旧内容：否则移除 view-leaving 后旧内容会从 opacity:0 淡回 1，
+        // 加载期间用户会看到"淡出→淡入→变 spinner"的闪烁
+        root.innerHTML = "";
+      }
+
+      if (seq !== renderSeq) return;
+
+      // ===== Phase 2: 加载模块 + 可选 loading =====
+      const loadingTimer = setTimeout(function () {
+        if (seq !== renderSeq) return;
+        setProgress(true);
+        renderLoadingInto(root);
+      }, TRANSITION_LOADING_THRESHOLD_MS);
+
+      let mod = null;
+      let loadErr = null;
+      try {
+        mod = await route.load();
+      } catch (e) {
+        loadErr = e;
+      }
+      clearTimeout(loadingTimer);
+      setProgress(false);
+
+      if (seq !== renderSeq) return; // 加载期间路由已切换，本次渲染作废
+
+      // ===== Phase 3: 挂载并 fade-in =====
+      root.innerHTML = "";
+
+      if (loadErr) {
+        console.error("[index] 加载视图失败:", loadErr);
+        renderErrorInto(root, loadErr);
+        return;
+      }
+
+      try {
+        const view = mod.default;
+        console.log("[index] 加载视图模块:", path);
+        // mount 成功后才记账 currentView：mount 抛错时不把坏视图暴露给后续导航
+        view.mount(root, params);
+        currentView = view;
+        currentRoutePath = path;
+        currentRouteKey = routeKey;
+        // 给视图一个标记，便于下次识别 isFirstRender
+        const first = root.firstElementChild;
+        if (first) first.setAttribute("data-view-mounted", "1");
+        // 进入态：先 opacity 0，下一帧加 view-active 触发 transition
+        root.classList.add("view-entering");
+        await nextFrame();
+        if (seq !== renderSeq) return;
+        root.classList.remove("view-entering");
+        root.classList.add("view-active");
+        // fade-in 完成后清理标记（保留 class 让后续切走还能 fade-out）
+        setTimeout(function () {
+          if (seq === renderSeq) root.classList.remove("view-active");
+        }, TRANSITION_FADE_IN_MS + 30);
+        console.log("[index] 视图已挂载:", path);
+      } catch (e) {
+        console.error("[index] 挂载视图失败:", e);
+        renderErrorInto(root, e);
+      }
+    }
+
+    window.addEventListener("hashchange", renderRoute);
+
+    // ===== 初始化 =====
+    async function init() {
+      console.log("[index] init() 开始初始化");
+      try {
+        setupAppUpdateProgressListener();
+        systemInfo = await window.__adm_systemInfoPromise;
+        updateHardwareBar();
+        setActiveNav("agent-btn");
+        console.log("[index] 系统信息获取完成:", systemInfo);
+      } catch (e) {
+        console.error("[index] 获取系统信息失败:", e);
+        document.getElementById("ram-info").textContent = t("加载失败");
+        return;
+      }
+      console.log("[index] init() 完成");
+      // hwinfo 兜底数据（含一次 PowerShell 调用）放后台补齐，不拖住首屏
+      enrichHardwareInfo();
+    }
+
+    async function enrichHardwareInfo() {
+      try {
+        hwinfo.cpu = await invoke("plugin:hwinfo|get_cpu_info");
+        hwinfo.ram = await invoke("plugin:hwinfo|get_ram_info");
+        hwinfo.gpu = await invoke("plugin:hwinfo|get_gpu_info");
+        hwinfo.os = await invoke("plugin:hwinfo|get_os_info");
+
+        if (hwinfo.ram && hwinfo.ram.sizeMb) systemInfo.total_ram = hwinfo.ram.sizeMb * 1024 * 1024;
+        // hwinfo 插件只报单张卡显存，可能低于后端逐卡枚举结果，仅在后端未枚举到显卡时兜底
+        if (hwinfo.gpu && hwinfo.gpu.vramMb && !(systemInfo.gpus && systemInfo.gpus.length > 0)) {
+          systemInfo.total_vram = hwinfo.gpu.vramMb * 1024 * 1024; systemInfo.has_gpu = true;
+        }
+        if (hwinfo.cpu && hwinfo.cpu.threads) systemInfo.cpu_logical_cores = hwinfo.cpu.threads;
+      } catch (hwe) {
+        console.warn("hwinfo 插件获取失败，使用原有数据:", hwe);
+      }
+      // 必须放在 catch 之外：4 个 hwinfo 调用中任一失败时，前面已取到的兜底值同样要刷进硬件栏
+      updateHardwareBar();
+    }
+
+    setTimeout(() => { checkForUpdate(true); }, 3000);
+
+    // 系统信息只探测一次：壳层与视图（模型列表）共用同一个 Promise。
+    // 必须在 init()/renderRoute() 之前同步赋值，否则视图 mount 时会各跑一份重复探测
+    // （后端 AppState.sys 是互斥锁，两份探测会串行排队）。
+    window.__adm_systemInfoPromise = invoke("get_system_info").then(function (info) {
+      window.__adm_state.systemInfo = info;
+      return info;
+    });
+    window.__adm_systemInfoPromise.catch(function () {});
+
+    init();
+    renderRoute();
+  </script>
+</body>
+</html>

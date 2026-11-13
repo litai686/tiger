@@ -1,0 +1,408 @@
+// 发送消息（fire-and-forget，结果经 SSE 返回）
+import { t as _t, tV } from "../../i18n.js";
+import { S, invoke, store } from "./store.js";
+import { api } from "./api.js";
+import { autoResize, generateRunId } from "./utils.js";
+import { log } from "./log.js";
+import { friendlyError } from "./error.js";
+import { updateSendButton, updateStatusBar, startSendSafetyTimer, clearSendSafetyTimer, showError, showWarning, showInfo, showNotice, reportError, updateContextUsage } from "./ui.js";
+import { renderMessages } from "./render.js";
+import { newConversation, renderConversationList } from "./session.js";
+import { refreshAgentInfo, reloadAgentConfig } from "./model.js";
+import { clearPendingFiles } from "./attach.js";
+import { clearAttachedSkillsAfterSend } from "./skill_selector.js";
+import { splitPdfItems, buildPlans, confirmLargePlans, renderPlanBatch, registerPlans } from "./pdf_batch.js";
+import { friendlyPdfError } from "./pdf.js";
+import { isCompacting } from "./compact.js";
+import { getActiveDecisionMode, decisionRequestPayload } from "./decision_mode.js";
+
+// ===== 发送消息 =====
+
+// 发送前模型可用性校验（见 sendMessage 调用点）：
+// - 本地模型：桌面端已移除本地模型部署能力，旧配置残留的 local provider 指向无人
+//   监听的 127.0.0.1 端口，每轮对话都会报连接失败，这里提前拦下并提示切换云端模型
+// - 云端模型：磁盘配置中必须已有 base_url 与 api_key；内置 provider（不在磁盘列表，
+//   配置由 admAgent 内置提供）跳过校验，交给服务端处理
+// 返回错误文案（null = 校验通过）
+function getModelReadiness() {
+  var providerKey = S.settings.agent_default_provider || "";
+  var isLocal = providerKey === "local" || providerKey.indexOf("local:") === 0;
+  // 服务端实际模型为 localModel 也按本地处理（重启后 admAgent.json 恢复 local 的兜底）
+  if (S.agentInfo && S.agentInfo.model && S.agentInfo.model.id === "localModel") isLocal = true;
+
+  if (isLocal) {
+    return _t("当前配置为本地模型，桌面端已不再支持本地模型部署。请点击顶部模型名称选择已配置的云端模型。");
+  }
+
+  // 云端模型：校验磁盘配置（用户添加的 provider）
+  var p = S.providers.find(function(x) { return providerKey === x.key || providerKey.indexOf(x.key + "/") === 0; });
+  if (!p) return null; // 内置 provider / 无法定位：交给服务端报错
+  if (!p.base_url) {
+    return _t("云端模型「") + (p.name || p.key) + _t("」缺少接口地址（Base URL），请到设置中修改。");
+  }
+  if (!p.api_key) {
+    return _t("云端模型「") + (p.name || p.key) + _t("」缺少 API Key，请到设置中填写。");
+  }
+  return null;
+}
+
+// 同目录多会话并行的并发上限：本地模型共享同一推理实例、云端共享额度，
+// 放开会导致互相拖慢与额度挤兑，故按工作区内「正在运行的会话数」设硬上限
+var MAX_CONCURRENT_RUNS = 3;
+
+// 是否允许同一工作目录内多个会话并行运行（Agent 设置「同目录多会话并行」，默认关）。
+// 关闭时在其它会话运行期间拒绝新会话发送，避免多个会话同时改同一目录下的文件
+function allowConcurrentRuns() {
+  return S.settings.agent_concurrent_sessions === true;
+}
+
+// 停止当前会话的运行（独立「停止」按钮调用；发送按钮不再承担取消职责）。
+// 只停止当前会话：同工作区并行运行的其它会话不受影响。
+export async function cancelCurrentRun() {
+  var activeRun = S.activeRun;
+  if (!activeRun || activeRun.sessionId !== S.currentConvId) return;
+  try {
+    await api("POST", "/v1/workspaces/" + activeRun.workspaceId + "/agent/sessions/" + activeRun.sessionId + "/cancel");
+  } catch (e) {
+    reportError(e, { prefix: _t("取消失败: ") });
+    return;
+  }
+  // 取消当前运行前，先清理未落库的折叠插入临时气泡：停止后服务端会丢弃
+  // 排队中的折叠消息，不再产生 message-created 去重替换，残留气泡需就地移除
+  var foldTemps = S.messages.filter(function(m) { return m._fold; });
+  foldTemps.forEach(function(m) { store.deleteMessage(activeRun.workspaceId, m.id); });
+  // 服务端 Cancel 会一并清掉该会话排队中的轮次（admAgent Cancel → clearQueue），
+  // 本地同步注销该会话的运行与排队登记；其它会话的并行运行保持不变
+  store.cancelRun(activeRun.workspaceId, activeRun.sessionId);
+  updateSendButton();
+  // 其它会话仍在运行时保持工作态，否则切回就绪并停掉安全计时器
+  updateStatusBar(S.isSending ? "busy" : "ready", null, S.contextUsage.used);
+  if (!S.isSending) clearSendSafetyTimer();
+  renderMessages();
+  renderConversationList();
+}
+
+/** 发送输入框内容（发送按钮 / Enter 触发） */
+export async function sendMessage() {
+  return sendText();
+}
+
+/** 程序化发送指定文本（如「AI 安装」按钮）：不读取、不清空输入框与待发附件 */
+export async function sendMessageWithText(text) {
+  return sendText(String(text || ""));
+}
+
+/** 程序化发送指定文本 + 指定附件（PDF 批次泵用）：不读取、不清空输入框与待发附件
+ *  @param {string} text
+ *  @param {any[]} files
+ *  @param {{sessionId: string, workspaceId: string}=} target 目标会话/工作区（发送前校验，变则放弃） */
+export async function sendMessageWithFiles(text, files, target) {
+  return sendText(String(text || ""), Array.isArray(files) ? files : [], target || null);
+}
+
+/** @param {string=} overrideText 指定文本；不传则读取输入框
+ *  @param {any[]=} filesOverride 指定附件列表（批次泵用）；overrideText 传参未给附件时为 []
+ *  @param {{sessionId: string, workspaceId: string}|null=} expectedTarget 程序化发送的目标会话/工作区（批次泵用） */
+async function sendText(overrideText, filesOverride, expectedTarget) {
+  log.debug("SEND", "sendMessage: isSending=" + S.isSending + " convId=" + S.currentConvId + " activeRun=" + (S.activeRun ? S.activeRun.sessionId : "null") + " queuedRun=" + (S.queuedRun ? S.queuedRun.sessionId : "null"));
+  // 程序化发送（PDF 批次泵）：批次转换/等待期间用户可能切换会话或工作区，
+  // 目标变化则直接放弃（剩余批次由 pdf_batch 终止），绝不发进当前其它会话
+  if (expectedTarget && (S.currentConvId !== expectedTarget.sessionId ||
+      !!(expectedTarget.workspaceId && S.serverInfo && S.serverInfo.workspace_id && S.serverInfo.workspace_id !== expectedTarget.workspaceId))) {
+    log.debug("SEND", "sendText: 目标会话/工作区已变化，放弃程序化发送");
+    return { ok: false, reason: "target_changed" };
+  }
+  // 当前会话「排队中」（本会话已发出的轮次排在自身/前一轮之后）→ 点击发送 = 取消排队；
+  // 若当前会话并未排队，点击发送 = 正常发新消息（同目录多会话并行时直接并行开跑）
+  var isCurrentQueued = !!(S.queuedRun && S.queuedRun.sessionId === S.currentConvId);
+  if (isCurrentQueued && filesOverride == null) {
+    // 取消排队：清除当前会话已发出、尚未开始执行的轮次；正在执行的运行不受影响
+    try {
+      await api("POST", "/v1/workspaces/" + S.queuedRun.workspaceId + "/agent/sessions/" + S.queuedRun.sessionId + "/prompts/clear");
+    } catch (e) {
+      reportError(e, { prefix: _t("取消排队失败: ") });
+      return;
+    }
+    var cancelWsId = S.queuedRun.workspaceId;
+    var cancelSessionId = S.queuedRun.sessionId;
+    store.clearQueuedRun(cancelWsId, cancelSessionId);
+    // 本工作区已无任何运行在飞时才整体回到就绪态（其它会话可能仍在并行运行）
+    if (!S.isSending) {
+      clearSendSafetyTimer();
+      updateStatusBar("ready", null, S.contextUsage.used);
+    }
+    updateSendButton();
+    renderConversationList();
+    return;
+  }
+  // 当前会话正在手动压缩：压缩会改写会话历史，期间发送会被服务端排队到压缩
+  // 结束之后（消息迟迟不出现），且该轮会被挂在压缩请求上互相连带取消。压缩
+  // 期间禁止发送：发送按钮已由 compact.js 禁用，这里兜住 Enter / 程序化发送
+  // 等入口（上方排队取消分支不受影响）
+  var sendTargetSessionId = expectedTarget ? expectedTarget.sessionId : S.currentConvId;
+  if (isCompacting(sendTargetSessionId)) {
+    showWarning(_t("正在压缩上下文，请稍候再发送"));
+    return { ok: false, reason: "compacting" };
+  }
+  // 折叠插入（中途插入）：当前会话正在运行，再发送 = 不带 run_id 发给服务端，
+  // 服务端在下一步边界把它折叠进当前轮（不是排队等本轮结束、也不取消本轮）；
+  // 不重开 run、不改运行统计、不重设续跑预算，仅新增一条待插入的用户消息。
+  // 决策模式例外：决策轮是服务端的独立单次执行（不能折叠进普通轮），因此
+  // 强制走排队路径（带 run_id），会话忙时排队而不是插入。
+  var decisionMode = filesOverride != null ? "text" : getActiveDecisionMode();
+  if (!S.currentConvId) {
+    var input = /** @type {HTMLTextAreaElement} */ (document.getElementById("agent-input"));
+    var newConvText = (overrideText != null ? String(overrideText) : (input.value || "")).trim();
+    if (!newConvText && S.pendingFiles.length === 0) return;
+    try { await newConversation(); } catch (_) { return; }
+    if (!S.currentConvId) return;
+  }
+  // 发送前固定运行身份（工作区/会话）：折叠判定、并发闸门、运行登记与停止目标
+  // 全部基于这里的快照——后续模型重载（await reloadAgentConfig）、附件落盘、PDF
+  // 转换期间用户切换会话/工作区，都不得改变本条消息的目标。折叠判定尤其必须与
+  // 目标会话取自同一时刻，否则会对着切换后的新会话发出"折叠插入"（无 run_id、
+  // 也不登记运行 → 界面看不到在跑、也无法停止）
+  var workspaceId = S.serverInfo.workspace_id;
+  var sessionId = S.currentConvId;
+  var foldIn = decisionMode === "text" && !!(S.isSending && S.activeRun && S.activeRun.sessionId === sessionId);
+  if (foldIn) log.debug("SEND", "sendMessage: 当前会话运行中 → 折叠插入（无 run_id）");
+  // 运行归属判定：同会话已在运行 → 本条（决策轮 / 分批发送等不可折叠）按会话 FIFO 排队；
+  // 其它会话在运行 → 同目录多会话并行（受设置开关与并发上限约束）。
+  // 与并发闸门紧邻判定：中间不能插入 await，否则闸门会基于过期状态放行/拒绝
+  var sameSessionRunning = !foldIn && store.hasRun(workspaceId, sessionId);
+  var otherRunning = !foldIn && !sameSessionRunning && store.isBusy(workspaceId);
+  // 并发闸门必须在附件/PDF 转换之前判定：达到上限或关闭并行时应尽早拒绝，
+  // 否则已转换好的 PDF 批次会连同剩余页一起被静默丢弃
+  if (otherRunning) {
+    if (!allowConcurrentRuns()) {
+      showWarning(_t("当前工作区已有其它会话在运行。请等它结束，或到 Agent 设置开启「同目录多会话并行」后重试"));
+      return { ok: false, reason: "concurrency_disabled" };
+    }
+    var runningNow = store.runningCount(workspaceId);
+    if (runningNow >= MAX_CONCURRENT_RUNS) {
+      showWarning(tV("同一工作目录最多同时运行 {n} 个会话（当前 {cur} 个），请等某个会话结束后再发送", { n: MAX_CONCURRENT_RUNS, cur: runningNow }));
+      return { ok: false, reason: "concurrency_limit" };
+    }
+  }
+
+  var input = /** @type {HTMLTextAreaElement} */ (document.getElementById("agent-input"));
+  var text = (overrideText != null ? String(overrideText) : input.value).trim();
+  if (!text && S.pendingFiles.length === 0) return;
+
+  // 发送前模型可用性校验：本地模型必须已启动（否则服务端 local provider 指向
+  // 127.0.0.1:1010 无可连服务，每轮对话都报连接失败）；云端模型必须已配置
+  // base_url / api_key。校验失败给出明确引导，而不是等模型请求才报晦涩错误。
+  var readinessMsg = getModelReadiness();
+  if (readinessMsg) {
+    showError(readinessMsg);
+    return;
+  }
+
+  // 若此前切换模型时 /agent/update 未生效（会话繁忙），发送前补一次重载，确保本轮用新模型
+  if (S.pendingModelReload && S.serverInfo && S.serverInfo.workspace_id) {
+    try {
+      await reloadAgentConfig();
+      S.pendingModelReload = false;
+      refreshAgentInfo();
+    } catch (e) {
+      console.warn("[agent] 发送前重载 Agent 配置失败:", e);
+    }
+  }
+
+  // 附件发送策略：
+  // - 图片：统一以 base64 内联传输（content 必带）——服务端负责落盘缓存并
+  //   按主模型能力决定：支持图片 → 当轮 wire 层内联给模型（base64 不落库，
+  //   后续轮次通过本地缓存路径 + admAgent vision 再次识别）；不支持 → 注入
+  //   vision 命令引导。前端不感知模型能力。
+  // - 文本：保持"路径模式"（内容不内联进 prompt，避免内联内容触发 70%
+  //   上下文守卫死循环），统一落盘传路径，由 coordinator 注入 view 读取引导。
+  // 粘贴路径场景图片已持有 path，一并传上（服务端判定磁盘存在则跳过重复写盘）；
+  // 浏览器选择/拖拽的 File 无路径，服务端自动落盘。
+  var filesToSend = filesOverride != null ? filesOverride.slice() : (overrideText != null ? [] : S.pendingFiles.slice());
+
+  // PDF 附件延迟转换 + 分批发送：附加时只登记（解析页数），这里只转换首批；
+  // 其余批次由 pdf_batch 批次泵在本轮 run_complete 后自动转换发送（服务端
+  // view 只读文本、读不了图片，模型无法自行取页，必须客户端推送）。
+  var pdfSplit = splitPdfItems(filesToSend);
+  var otherFiles = pdfSplit.others;
+  var pdfPlans = [];
+  var firstPdfBatch = null;
+  if (pdfSplit.pdfs.length > 0 && decisionMode !== "text") {
+    showWarning(_t("决策输出暂不支持 PDF 分批处理，请切换为普通对话后重试"));
+    return { ok: false, error: "decision_pdf_unsupported" };
+  }
+  if (pdfSplit.pdfs.length > 0) {
+    var otherImages = otherFiles.filter(function(f) { return f.type && f.type.indexOf("image/") === 0; }).length;
+    pdfPlans = buildPlans(pdfSplit.pdfs, otherImages);
+    if (!(await confirmLargePlans(pdfPlans))) {
+      showInfo(_t("已取消 PDF 发送"));
+      return { ok: false };
+    }
+    // 首批转换可能耗时数秒（大页面多）：常驻提示直到转换完成
+    var convertingEl = showNotice(tV("正在转换 PDF《{name}》…", { name: pdfPlans[0].name }), "info", true);
+    try {
+      firstPdfBatch = await renderPlanBatch(pdfPlans[0]);
+    } catch (e) {
+      showError(_t("PDF 转换失败: ") + pdfPlans[0].name + " (" + friendlyPdfError(e) + ")");
+      return { ok: false };
+    } finally {
+      if (convertingEl && convertingEl.parentNode) convertingEl.remove();
+    }
+    if (firstPdfBatch.items.length === 0) {
+      showError(_t("PDF 转换失败: ") + pdfPlans[0].name);
+      return { ok: false };
+    }
+  }
+
+  var attachments = [];
+  if (otherFiles.length > 0) {
+    for (var i = 0; i < otherFiles.length; i++) {
+      var f = otherFiles[i];
+      var isImage = f.type && f.type.indexOf("image/") === 0;
+      if (isImage) {
+        attachments.push({ file_path: f.path || "", file_name: f.name, mime_type: f.type, content: f.base64 });
+        continue;
+      }
+      var realPath = f.path || null;
+      if (!realPath) {
+        try {
+          realPath = await invoke("save_attachment_file", { file_name: f.name, base64_content: f.base64 });
+        } catch (e) {
+          console.warn("[agent] 附件落盘失败:", e);
+          showError(_t("附件保存失败，已取消发送: ") + f.name + " (" + friendlyError(e, { inline: true }) + ")");
+          return { ok: false };
+        }
+      }
+      attachments.push({ file_path: realPath, file_name: f.name, mime_type: f.type || "application/octet-stream", content: "" });
+    }
+  }
+  if (firstPdfBatch) {
+    // PDF 首批页图：与普通图片一致，base64 内联（服务端按主模型能力内联/识别）
+    firstPdfBatch.items.forEach(function(item) {
+      attachments.push({ file_path: "", file_name: item.name, mime_type: item.type, content: item.base64 });
+    });
+  }
+
+  // 折叠插入不带 run_id：服务端把它折叠进当前轮，不产生独立 run 生命周期
+  var runId = foldIn ? null : generateRunId();
+  // 运行登记（并发闸门已在附件/PDF 转换前判定，见上方 otherRunning）
+  if (runId) {
+    if (sameSessionRunning) store.setQueuedRun(workspaceId, sessionId, runId);
+    else store.startRun(workspaceId, sessionId, runId);
+  }
+  updateSendButton();
+
+  // 立即显示用户消息（使用临时 ID，以便 SSE 到来时去重替换）；
+  // 折叠插入的临时气泡标记 _fold + _sessionId，渲染为「插入中」，等待服务端折叠时去重/替换；
+  // _sessionId 用于刷新/切会话合并且只在同一会话内保留（防止待插入气泡串进其它会话）
+  // 分批说明随正文一起发出：模型据此知道当前只拿到部分页面，其余批次自动补发；
+  // 临时气泡用同一文本（服务端消息与临时气泡按正文匹配去重）
+  var promptText = text || _t("（用户发来附件，请查看并处理）");
+  if (firstPdfBatch) {
+    promptText += "\n\n" + tV("（本次附带 PDF《{name}》第 1-{b} 页，共 {total} 页；其余页面将自动分批发送）", {
+      name: pdfPlans[0].name, b: firstPdfBatch.lastPage, total: firstPdfBatch.totalPages,
+    });
+    if (pdfPlans.length > 1) {
+      promptText += "\n" + tV("（另有 {n} 份 PDF 将随后分批发送）", { n: pdfPlans.length - 1 });
+    }
+  }
+  var tempId = "temp-user-" + Date.now();
+  store.appendMessage(workspaceId, { id: tempId, role: "user", content: promptText, _temp: true, _fold: foldIn || undefined, _sessionId: sessionId, _attachments: filesToSend.length > 0 ? filesToSend.map(function(f) { return f.name; }) : null });
+  renderMessages();
+  if (overrideText == null) {
+    input.value = "";
+    autoResize(input);
+    clearPendingFiles();
+  }
+
+  // 更新状态栏：折叠插入不改动运行态（当前轮仍在跑），其余场景切到忙碌
+  if (!foldIn) updateStatusBar("busy", null, S.contextUsage.used);
+
+  try {
+    // POST /v1/workspaces/{id}/agent — fire-and-forget, 返回 202 Accepted (无响应体)
+    // 实际结果通过 SSE 事件流获取
+    // admAgent 要求 prompt 非空（纯图片附件会被 ValidateCall 拒绝："prompt is empty"），
+    // 只发附件不输文字时补默认提示词（能走到这里 text 为空时 filesToSend 必非空）
+    var body = {
+      session_id: sessionId,
+      prompt: promptText,
+    };
+    // 决策模式：规格随请求下发（服务端 decision_turn.go 走独立单次执行）；
+    // 普通对话不传该字段，请求与以前逐字相同
+    var decisionPayload = decisionRequestPayload(decisionMode);
+    if (decisionPayload) body.decision = decisionPayload;
+    // 折叠插入不带 run_id（服务端下一步边界折叠进当前轮）；独立轮次才带 run_id 关联生命周期
+    if (!foldIn) body.run_id = runId;
+    if (attachments.length > 0) body.attachments = attachments;
+    try {
+      await api("POST", "/v1/workspaces/" + workspaceId + "/agent", body);
+    } catch (sendErr) {
+      // coordinator 被失败的 init 置空（如曾切到服务端未加载的 provider）：
+      // 重建后重试一次，避免用户卡在永久性的“agent coordinator not initialized”
+      if (String(sendErr).indexOf("agent coordinator not initialized") < 0) throw sendErr;
+      console.warn("[agent] coordinator 未初始化，尝试 /agent/init 后重发");
+      await api("POST", "/v1/workspaces/" + workspaceId + "/agent/init");
+      await api("POST", "/v1/workspaces/" + workspaceId + "/agent", body);
+    }
+    log.debug("SEND", "sendMessage: 消息已发送, runId=" + (runId || "(fold)") + " wsId=" + workspaceId + " sessionId=" + sessionId);
+    // 独立轮次才初始化本轮运行统计（假完成检测）
+    // 折叠插入复用当前轮的统计，不重开
+    if (!foldIn) {
+      store.setRunStats(workspaceId, {
+        sessionId: sessionId,
+        prompt: promptText,
+        decisionMode: decisionMode,
+        toolCalls: 0,
+        sideEffectCalls: 0,
+        sideEffectSuccess: 0,
+        seenMsgIds: {},
+        startedAt: Date.now(),
+      });
+    } else {
+      showInfo(_t("消息已发送，将在当前对话的下一步插入并继续处理"));
+    }
+    // 并行 / 排队提示：登记已在发送前完成（见上方运行登记），此处仅提示并刷新标识
+    if (otherRunning) {
+      showInfo(tV("已在同目录并行运行（本工作区当前 {n} 个会话同时工作）。注意多个会话修改同一文件时可能相互覆盖", { n: store.runningCount(workspaceId) }));
+      renderConversationList();
+    } else if (sameSessionRunning) {
+      showInfo(_t("当前会话正在运行，本条消息已排队，将在本轮结束后自动执行"));
+      renderConversationList();
+    }
+    startSendSafetyTimer();
+    updateContextUsage();
+    // 发送成功后清理已附加的技能（确保每轮仅附加一次，下次重新选择）
+    clearAttachedSkillsAfterSend();
+    // 登记 PDF 批次计划：剩余页面由批次泵在本轮 run_complete 后自动发送
+    if (pdfPlans.length > 0) {
+      registerPlans(pdfPlans, sessionId, workspaceId, foldIn ? null : runId);
+    }
+    return { ok: true, runId: foldIn ? null : runId, sessionId: sessionId };
+  } catch (e) {
+    if (foldIn) {
+      // 折叠插入失败：不中断正在运行的当前轮，仅移除待插入的临时气泡并提示
+      store.deleteMessage(workspaceId, tempId);
+      renderMessages();
+      showError(friendlyError(e, { prefix: "消息发送失败（未影响当前运行）: " }));
+    } else if (sameSessionRunning) {
+      // 排队登记失败：只清本会话的排队标识，本会话的活动运行与其它会话并行运行不受影响
+      store.clearQueuedRun(workspaceId, sessionId);
+      updateSendButton();
+      renderConversationList();
+    } else {
+      // 本会话的运行未成功发出：只注销该会话（其它会话可能仍在并行运行）
+      store.cancelRun(workspaceId, sessionId);
+      updateSendButton();
+      if (!S.isSending) {
+        clearSendSafetyTimer();
+        updateStatusBar("ready", null, S.contextUsage.used);
+      }
+      renderConversationList();
+    }
+    if (!foldIn) {
+      store.appendMessage(workspaceId, { role: "error", content: friendlyError(e, { prefix: "发送失败: " }), type: "error" });
+      renderMessages();
+    }
+  }
+  return { ok: false };
+}

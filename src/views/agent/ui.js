@@ -1,0 +1,462 @@
+// 通用 UI：状态栏 / 上下文用量 / 错误与确认弹窗 / 滚动模式 / 安全超时 / 右键菜单
+import { t as _t, tV } from "../../i18n.js";
+import { S, store, invoke } from "./store.js";
+import { api } from "./api.js";
+import { formatTokens, isMsgAreaAtBottom, isFullyAtBottom } from "./utils.js";
+import { getErrorMessage, friendlyError } from "./error.js";
+
+// 退出手动滚动模式（切换会话/工作区时调用，避免把旧会话的滚动位置带到新会话）
+export function exitManualScrollMode() {
+  S.manualScrollMode = false;
+  S.lastProgrammaticScroll = 0;
+}
+
+// 更新「回到底部」悬浮圆球的显隐：未滚到底部时显示，到底/无滚动条时隐藏。
+// 轮内独立滚动也算“未到底”——只看 area 不够（isMsgAreaAtBottom）。
+// 注意：不能再用 area.scrollHeight <= area.clientHeight 短路——area 自身无溢出
+// 不代表没有内容在滚：轮容器 .msg-round 是独立滚动容器，单轮会话里 --round-max-h
+// 偏小时内容只在轮内滚动、area 恰好没有溢出，短路会让圆球永不显示。
+// isFullyAtBottom 已把“不可滚动”视为到底（scrollHeight-clientHeight<=4），
+// 因此无滚动条时仍然隐藏，只是不再跳过轮内滚动的判定。
+// rounds 可选：调用方（scrollChatToBottom）刚扫描过展开轮列表时透传，避免重复全量 query。
+export function updateScrollBottomBtn(rounds) {
+  var btn = document.getElementById("agent-scroll-bottom-btn");
+  var area = document.getElementById("agent-msg-area");
+  if (!btn || !area) return;
+  if (isFullyAtBottom(area, rounds)) {
+    btn.classList.remove("show");
+  } else {
+    btn.classList.add("show");
+  }
+}
+
+// ===== isSending 安全超时 =====
+// 计时器仅在收到 message 事件时刷新；本地模型处理大上下文时 prompt 阶段可能
+// 数分钟不产出任何 token（无 message 事件），不能仅凭超时就重置状态，
+// 需先向服务端确认会话是否仍在运行（is_busy），仍忙则续期计时器。
+// 只跟踪「当前打开会话」的活动运行：同工作区并行运行的其它会话与本次收尾无关，
+// 不能用工作区级 is_busy 判定（否则本会话运行早已结束也会被无限续期）
+export function startSendSafetyTimer() {
+  clearSendSafetyTimer();
+  var activeRun = S.activeRun;
+  if (!activeRun) return;
+  S.sendSafetyTimer = setTimeout(async function() {
+    // 只允许为同一运行创建的计时器改变状态；旧计时器不得干扰后续运行
+    if (S.activeRun !== activeRun) return;
+    try {
+      var sess = await api("GET", "/v1/workspaces/" + activeRun.workspaceId + "/sessions/" + activeRun.sessionId);
+      if (S.activeRun === activeRun && sess && sess.is_busy) {
+        console.log("[agent] 安全超时检查：运行会话仍在执行，续期计时器");
+        startSendSafetyTimer();
+        return;
+      }
+    } catch (_) {}
+    if (S.activeRun !== activeRun) return; // 查询期间可能已正常收尾或开始下一轮
+    console.warn("[agent] isSending 安全超时 (3min) 且运行会话已不在执行，自动重置");
+    // 只注销该会话的运行：同工作区其它会话的并行运行不受影响
+    store.cancelRun(activeRun.workspaceId, activeRun.sessionId);
+    updateSendButton();
+    if (!S.isSending) updateStatusBar("ready", null, S.contextUsage.used);
+    showError(_t("运行超时，已自动重置状态"));
+  }, 180000);
+}
+
+export function clearSendSafetyTimer() {
+  if (S.sendSafetyTimer) {
+    clearTimeout(S.sendSafetyTimer);
+    S.sendSafetyTimer = null;
+  }
+}
+
+// ===== 系统剪贴板读写（Web API → 原生命令回退） =====
+// Web 侧 navigator.clipboard 在 Linux（WebKitGTK）不可用：readText 需宿主发放
+// WebKitClipboardPermissionRequest（Tauri/wry 未处理 → 默认拒绝，Promise 以
+// NotAllowedError 收尾），writeText 也要求调用时处于用户手势内；失败被空 catch 吞掉时
+// 表现就是「右键复制/粘贴没反应」。故 Web API 失败、超时或不可用时一律回退到 Rust 命令。
+// 超时兜底不能省：WebKitGTK 上同源回读可能既不 resolve 也不 reject（origin 回读用例超时）。
+const CLIPBOARD_FALLBACK_MS = 800;
+
+/**
+ * 优先 primary（Web API），失败/超时/不可用时改用 native（Tauri 命令）。
+ * @param {() => Promise<any>|null} primary
+ * @param {() => Promise<any>} native
+ * @returns {Promise<any>}
+ */
+function clipboardWithFallback(primary, native) {
+  return new Promise(function(resolve, reject) {
+    var done = false;
+    var timer = 0;
+    var finish = function(fn, v) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      fn(v);
+    };
+    var toNative = function() {
+      clearTimeout(timer);
+      Promise.resolve().then(native).then(
+        function(v) { finish(resolve, v); },
+        function(e) { finish(reject, e); }
+      );
+    };
+    var p = null;
+    try { p = primary(); } catch (_) { p = null; }
+    if (!p || typeof p.then !== "function") { toNative(); return; }
+    p.then(function(v) { finish(resolve, v); }, function() { toNative(); });
+    timer = setTimeout(toNative, CLIPBOARD_FALLBACK_MS);
+  });
+}
+
+/** 写文本到系统剪贴板 @param {string} text @returns {Promise<any>} */
+export function clipboardWriteText(text) {
+  return clipboardWithFallback(
+    function() {
+      var c = navigator.clipboard;
+      return c && c.writeText ? c.writeText(text) : null;
+    },
+    function() { return invoke("clipboard_write_text", { text: text }); }
+  );
+}
+
+/** 读系统剪贴板文本 @returns {Promise<any>} */
+export function clipboardReadText() {
+  return clipboardWithFallback(
+    function() {
+      var c = navigator.clipboard;
+      return c && c.readText ? c.readText() : null;
+    },
+    function() { return invoke("clipboard_read_text"); }
+  );
+}
+
+// ===== 右键菜单（仅复制/粘贴） =====
+export function showCopyPasteMenu(e, targetInput) {
+  e.preventDefault();
+  e.stopPropagation();
+  var old = document.getElementById("agent-ctx-menu");
+  if (old) old.remove();
+  var menu = document.createElement("div");
+  menu.id = "agent-ctx-menu";
+  menu.style.cssText = "position:fixed;background:var(--c-raise);border:1px solid var(--c-border);border-radius:8px;padding:4px 0;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,0.4);min-width:100px;";
+  menu.style.left = e.clientX + "px";
+  menu.style.top = e.clientY + "px";
+
+  // 选区在右键时快照：点击菜单项会让文档选区折叠/失焦，届时再读 getSelection() 会是空
+  var selectedText = "";
+  try { selectedText = window.getSelection().toString(); } catch (_) {}
+  var hasSelection = selectedText.length > 0;
+
+  var items = [];
+  if (hasSelection) {
+    items.push({ label: _t("复制"), action: function() {
+      clipboardWriteText(selectedText).catch(function(err) {
+        reportError(err, { prefix: _t("复制失败: ") });
+      });
+    }});
+  }
+  if (targetInput) {
+    items.push({ label: _t("粘贴"), action: function() {
+      clipboardReadText().then(function(text) {
+        if (text) {
+          var start = targetInput.selectionStart;
+          var end = targetInput.selectionEnd;
+          var val = targetInput.value;
+          targetInput.value = val.substring(0, start) + text + val.substring(end);
+          targetInput.selectionStart = targetInput.selectionEnd = start + text.length;
+          targetInput.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      }).catch(function(err) {
+        reportError(err, { prefix: _t("粘贴失败: ") });
+      });
+    }});
+  }
+
+  if (items.length === 0) return;
+
+  items.forEach(function(it) {
+    var mi = document.createElement("div");
+    mi.textContent = it.label;
+    mi.style.cssText = "padding:6px 16px;font-size:12px;cursor:pointer;color:var(--c-text-2);";
+    mi.addEventListener("mouseenter", function() { mi.style.background = "var(--c-raise-2)"; });
+    mi.addEventListener("mouseleave", function() { mi.style.background = "transparent"; });
+    mi.addEventListener("click", function() {
+      menu.remove();
+      it.action();
+    });
+    menu.appendChild(mi);
+  });
+
+  document.body.appendChild(menu);
+  setTimeout(function() {
+    document.addEventListener("mousedown", function closeHandler(ev) {
+      if (!menu.contains(/** @type {Node} */ (ev.target))) {
+        menu.remove();
+        document.removeEventListener("mousedown", closeHandler);
+      }
+    });
+  }, 0);
+}
+
+export function updateSendButton() {
+  var btn = document.getElementById("agent-send-btn");
+  if (!btn) return;
+  // 按钮语义按会话归属：
+  // - 当前会话「排队中」→ 显示「取消排队」（清除已入队、尚未开始的消息）
+  // - 当前会话「运行中」→ 恢复为「发送」（发送=折叠插入当前轮），停止走独立「停止」按钮
+  // - 其它情况 → 正常「发送」（工作区忙碌时服务端排队等待）
+  var isCurrentRun = S.isSending && S.activeRun && S.activeRun.sessionId === S.currentConvId;
+  var isCurrentQueued = !!(S.queuedRun && S.queuedRun.sessionId === S.currentConvId);
+  if (isCurrentQueued) {
+    btn.textContent = _t("⏹ 取消排队");
+    btn.classList.add("cancel");
+    btn.title = _t("取消当前会话已排队、尚未开始的消息");
+  } else if (isCurrentRun) {
+    btn.textContent = _t("📤 发送");
+    btn.classList.remove("cancel");
+    btn.title = _t("当前会话正在运行：发送的消息将插入当前对话继续处理（可用独立停止按钮中断运行）");
+  } else {
+    btn.textContent = _t("📤 发送");
+    btn.classList.remove("cancel");
+    // 当前会话空闲但同工作区其它会话在跑：按「同目录多会话并行」开关给出不同提示
+    var others = (S.runs || []).filter(function(r) { return r.sessionId !== S.currentConvId && !r.queued; }).length;
+    if (others > 0) {
+      btn.title = S.settings.agent_concurrent_sessions === true
+        ? tV("同工作区另有 {n} 个会话在运行：本条消息将与之并行执行（同目录并行，注意多个会话改同一文件可能相互覆盖）", { n: others })
+        : _t("同工作区另有会话在运行：已关闭「同目录多会话并行」，本条消息会被拒绝，请等其结束后再发送");
+    } else {
+      btn.title = "";
+    }
+    // 「正在思考」指示器只在 renderMessages 内按运行态创建/移除；
+    // 超时/取消/断线等路径重置 isSending 后不会触发重渲染，需在此同步移除，
+    // 否则出现「指示器还在转但按钮已变回发送」的错位状态
+    var indicator = document.getElementById("agent-working-indicator");
+    if (indicator) indicator.remove();
+  }
+  // 独立「停止」按钮：仅当前会话正在运行时显示，用于中断运行（不折叠、不排队）
+  var stopBtn = document.getElementById("agent-stop-btn");
+  if (stopBtn) stopBtn.style.display = isCurrentRun ? "" : "none";
+
+  // 通知其他模块（如手动压缩按钮）同步刷新按钮可用性：
+  // 共享同一组状态（S.isSending / activeRun.sessionId / currentConvId），
+  // 用事件解耦避免 ui.js 反向依赖 agent.js。
+  document.dispatchEvent(new CustomEvent("agent-toolbar-state-changed"));
+}
+
+// ===== 上下文用量 =====
+export function updateContextUsage() {
+  var el = document.getElementById("agent-context-usage");
+  if (!el) return;
+  var currentEl = el.querySelector(".usage-current");
+  var maxEl = el.querySelector(".usage-max");
+
+  var used = S.contextUsage.used || 0;
+  var max = S.contextUsage.max || 0;
+
+  if (max > 0) {
+    var usedStr = (S.contextUsage.estimated && used > 0 ? "~" : "") + formatTokens(used);
+    var maxStr = formatTokens(max);
+    if (currentEl) currentEl.textContent = usedStr;
+    if (maxEl) maxEl.textContent = maxStr;
+
+    // 警告颜色
+    var pct = used / max;
+    el.classList.remove("warning", "danger");
+    if (pct >= 0.95) {
+      el.classList.add("danger");
+    } else if (pct >= 0.8) {
+      el.classList.add("warning");
+    }
+  } else {
+    if (currentEl) currentEl.textContent = "0";
+    if (maxEl) maxEl.textContent = "0";
+  }
+
+  // 更新状态栏 Token
+  var tokenEl = document.getElementById("agent-status-tokens");
+  if (tokenEl) {
+    tokenEl.textContent = "Token: " + (S.contextUsage.estimated && used > 0 ? "~" : "") + formatTokens(used) + (max > 0 ? " / " + formatTokens(max) : "");
+  }
+}
+
+// ===== 底部状态栏 =====
+export function updateStatusBar(state, workdir, tokens) {
+  var stateEl = document.getElementById("agent-status-state");
+  var workdirEl = document.getElementById("agent-status-workdir");
+  var tokenEl = document.getElementById("agent-status-tokens");
+
+  if (stateEl) {
+    var dotClass = "ready";
+    var stateText = _t("就绪");
+    if (state === "busy") { dotClass = "busy"; stateText = _t("运行中"); }
+    else if (state === "error") { dotClass = "error"; stateText = _t("错误"); }
+    stateEl.innerHTML = '<span class="status-state-dot ' + dotClass + '"></span>' + stateText;
+  }
+
+  if (workdir !== null && workdirEl) {
+    workdirEl.textContent = _t("工作区: ") + (workdir || _t("默认"));
+    workdirEl.title = workdir || "";
+  }
+
+  if (tokenEl && tokens !== null) {
+    tokenEl.textContent = "Token: " + formatTokens(tokens);
+  }
+
+  // 更新标题栏状态指示器
+  var headerStatus = document.getElementById("agent-header-status");
+  if (headerStatus) {
+    headerStatus.className = "chat-header-status " + (state === "busy" ? "busy" : state === "error" ? "error" : "");
+  }
+}
+
+// ===== 初始化进度条 =====
+// 首次进入 Agent 页时显示在顶部状态栏正上方的一条薄进度条，给用户「正在做什么」的反馈。
+// 各阶段文案由 init() 在 Phase 切换时调用 showInitProgress 更新；init 完成后调 hideInitProgress 收起。
+// 设计要点：
+// - 不依赖具体阶段顺序：只暴露一个字符串，由调用方决定何时显示/隐藏
+// - 跨阶段并发调用同一函数（多次写同一个 text）无副作用，单调地覆盖
+// - hideInitProgress 必须 idempotent：init 异常分支已多次 return 前都会调用，保证不留挂件
+//   此外还会兜底清掉残留的骨架屏（init 中途失败时 conv-list / tools-list / msg-area
+//   还停在初始骨架），否则用户会看到「加载到一半卡死」的灰色占位。
+export function showInitProgress(text) {
+  var bar = document.getElementById("agent-init-progress");
+  var label = document.getElementById("agent-init-progress-text");
+  if (!bar || !label) return;
+  if (text) label.textContent = text;
+  bar.classList.add("show");
+}
+
+export function hideInitProgress() {
+  var bar = document.getElementById("agent-init-progress");
+  if (bar) bar.classList.remove("show");
+
+  // 兜底清理骨架屏：仅在 init() 中途异常退出时生效（init 正常完成时这里三个容器
+  // 已被 renderMessages / renderConversationList / renderToolsList 重绘，骨架不存在）
+  var msgArea = document.getElementById("agent-msg-area");
+  if (msgArea && msgArea.querySelector(".agent-loading")) {
+    msgArea.innerHTML = '<div class="empty-state"><span class="empty-state-icon">🤖</span><span class="empty-state-text">' + _t("开始一个新的对话") + '</span></div>';
+  }
+  var convList = document.getElementById("agent-conv-list");
+  if (convList && convList.querySelector(".skeleton-conv-item")) {
+    convList.innerHTML = '<div style="padding:12px 14px;color:var(--c-text-4);font-size:12px;">' + _t("暂无会话") + '</div>';
+  }
+  var toolsList = document.getElementById("agent-tools-list");
+  if (toolsList && toolsList.querySelector(".skeleton-tool-item")) {
+    toolsList.innerHTML = '<div class="tool-item"><span class="tool-dot gray"></span><span class="tool-name" style="color:var(--c-text-4);">' + _t("暂无工具") + '</span></div>';
+  }
+}
+
+// ===== 统一错误/提示展示 =====
+// 所有提示（错误/警告/信息）统一走 showNotice 渲染为消息区节点：
+//   error 红 / warn 黄 / info 灰，3 秒后自动消失；render.js 增量渲染时保留 error/warn/info 节点。
+/**
+ * 统一提示入口。
+ * @param {string} msg 提示文本
+ * @param {"error"|"warn"|"info"} [level] 级别，默认 error
+ */
+export function showNotice(msg, level, keep = false) {
+  var area = document.getElementById("agent-msg-area");
+  if (!area || !msg) return null;
+  var cls = level === "warn" ? "warn" : level === "info" ? "info" : "error";
+  var div = document.createElement("div");
+  div.className = "msg " + cls;
+  div.textContent = msg;
+  area.appendChild(div);
+  // 错误/警告/提示节点是 area 的直接子节点，挂在所有轮之外（不影响轮内滚动）
+  S.programmaticScroll = true;
+  S.lastProgrammaticScroll = Date.now();
+  if (!S.manualScrollMode) area.scrollTop = area.scrollHeight;
+  S.programmaticScroll = false;
+  updateScrollBottomBtn();
+  // 默认 3 秒后自动消失（增量渲染会保留提示节点，需自行清理避免堆积）；
+  // keep=true 时保持显示直到调用方手动移除（如压缩进行中的状态提示）
+  if (!keep) {
+    setTimeout(function() { if (div.parentNode) div.remove(); }, 3000);
+  }
+  return div;
+}
+
+// 统一错误展示入口：传入原始错误（字符串 / Error / 结构化对象均可），
+// 内部统一提取文本、分类并按当前 UI 语言生成友好提示（中文界面全中文，
+// 英文界面英文提示 + 原始错误细节），不再把英文错误原文直接暴露给用户。
+/**
+ * @param {*} err 原始错误
+ * @param {{ prefix?: string, hint?: string, level?: "error"|"warn"|"info" }} [opts] prefix 前缀（如"保存设置失败："），hint 补充提示
+ */
+export function reportError(err, opts) {
+  opts = opts || {};
+  var text = friendlyError(err, opts);
+  if (!text) return;
+  // 原始错误只进日志，不进 UI（中文界面不出现英文报错）
+  console.warn("[agent] reportError 原始错误:", getErrorMessage(err));
+  showNotice(text, opts.level || "error");
+}
+
+export function showError(msg) {
+  showNotice(msg, "error");
+}
+
+// 非致命提醒（如"本轮已结束但任务可能未完成"）：样式区别于错误，避免用户误判为故障
+export function showWarning(msg) {
+  showNotice(msg, "warn");
+}
+
+// 普通信息提示（如运行完成）
+export function showInfo(msg) {
+  showNotice(msg, "info");
+}
+
+// 清除消息区内的提示（切换/新建会话、切换工作区时调用，避免旧会话提示残留）
+export function clearErrorNotices() {
+  var area = document.getElementById("agent-msg-area");
+  if (!area) return;
+  area.querySelectorAll(".msg.error, .msg.warn, .msg.info").forEach(function(e) { e.remove(); });
+}
+
+// 应用内选择弹窗（Tauri WebView 中原生 confirm() 非阻塞，不可用）。
+// 通用双按钮决策卡：permission-modal 样式，挂在 .agent-root 下随视图 unmount 销毁。
+/**
+ * @param {{ title?: string, message?: string, okText?: string, cancelText?: string,
+ *           onOk?: function, onCancel?: function }} [opts]
+ */
+export function showChoice(opts) {
+  opts = opts || {};
+  var overlay = document.createElement("div");
+  overlay.className = "permission-overlay show";
+  overlay.innerHTML =
+    '<div class="permission-modal">' +
+      '<div class="permission-header">' +
+        '<span class="permission-icon">⚠️</span>' +
+        '<span class="permission-title"></span>' +
+      '</div>' +
+      '<div class="permission-body"></div>' +
+      '<div class="permission-footer">' +
+        '<button class="settings-btn settings-btn-secondary" data-act="cancel"></button>' +
+        '<button class="settings-btn settings-btn-primary" data-act="ok"></button>' +
+      '</div>' +
+    '</div>';
+  overlay.querySelector(".permission-title").textContent = opts.title || _t("确认操作");
+  overlay.querySelector(".permission-body").textContent = opts.message || "";
+  overlay.querySelector('[data-act="cancel"]').textContent = opts.cancelText || _t("取消");
+  overlay.querySelector('[data-act="ok"]').textContent = opts.okText || _t("确定");
+  function close() { overlay.remove(); }
+  overlay.querySelector('[data-act="cancel"]').addEventListener("click", function() {
+    close();
+    if (opts.onCancel) opts.onCancel();
+  });
+  overlay.querySelector('[data-act="ok"]').addEventListener("click", function() {
+    close();
+    if (opts.onOk) opts.onOk();
+  });
+  // 弹窗内的点击不冒泡到 document，避免触发背后页面"点击外部关闭"的监听
+  // （如下拉列表：用户点"取消"时不应连带关闭下拉）
+  overlay.addEventListener("click", function(e) {
+    e.stopPropagation();
+    if (e.target === overlay) close();
+  });
+  // 挂到视图根节点下，随视图 unmount 一起销毁
+  (document.querySelector(".agent-root") || document.body).appendChild(overlay);
+}
+
+export function showConfirm(message, onOk) {
+  showChoice({ message: message, onOk: onOk });
+}

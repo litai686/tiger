@@ -1,0 +1,838 @@
+// SSE 事件订阅 / 分发 / 断线重连
+import { t as _t } from "../../i18n.js";
+import { S, invoke, listen, store } from "./store.js";
+import { api } from "./api.js";
+import { getErrorMessage, classifyError, friendlyError, ERROR_STEP_CAP, ERROR_CANCEL } from "./error.js";
+import { updateSendButton, updateStatusBar, startSendSafetyTimer, clearSendSafetyTimer, showError, showWarning, showInfo, showNotice, reportError, updateContextUsage } from "./ui.js";
+import { renderMessages, renderTodos, scheduleRenderMessages } from "./render.js";
+import { loadConversations, refreshMessages, renderConversationList, selectConversation, syncWxFollowSession } from "./session.js";
+import { handlePermissionRequest, resetPermissionState } from "./permission.js";
+import { loadTools } from "./tools.js";
+import { onLspStateEvent } from "./lsp_fix.js";
+import { refreshAgentInfo, reloadAgentConfig } from "./model.js";
+import { log } from "./log.js";
+import { onSessionUpdated } from "./compact.js";
+import { onRunComplete as onPdfBatchRunComplete, reconcilePdfBatching } from "./pdf_batch.js";
+import { parseDecisionResult, updateDecisionModeUI } from "./decision_mode.js";
+
+// ===== SSE 事件 =====
+
+// 流式 message updated 增量是调试日志的噪音大户（每条 delta 连打 3 行 debug，
+// 一轮长输出可产生上万行）：聚合降频，每条消息第 1 次与此后每 50 次 updated
+// 才写日志；created/deleted/DROPPED 告警不受影响，仍全量记录。
+var MSG_DELTA_LOG_EVERY = 50;
+var msgDeltaCounts = {};
+function tickMessageDelta(msgId) {
+  if (Object.keys(msgDeltaCounts).length > 500) msgDeltaCounts = {}; // 防长期运行无限增长
+  var n = (msgDeltaCounts[msgId] = (msgDeltaCounts[msgId] || 0) + 1);
+  return n === 1 || n % MSG_DELTA_LOG_EVERY === 0;
+}
+// 当前这条增量事件是否应写日志（由外层监听器 tick 一次，内层 handler 只读）
+var curDeltaLogged = true;
+var lastLspEventLogTs = 0;
+
+// ===== run_complete 丢失兜底 =====
+// 正常运行结束时服务端依序推送 agent_finished → run_complete；若 run_complete 在
+// 转发/投递链路上丢失（日志曾见 "< run_complete" 有、前端 "event: run_complete" 无），
+// 前端 isSending 会卡在 true（"停止"按钮常驻、无法继续发送，只能手动点停止）。
+// 收到 agent_finished 后启动检查：超时未收到对应 run_complete 且服务端已空闲时强制收尾。
+var RUN_COMPLETE_FALLBACK_DELAY_MS = 15000;
+var RUN_COMPLETE_FALLBACK_MAX_TRIES = 4;
+var runCompleteFallbackTimer = null;
+var runCompleteFallbackTries = 0;
+
+function clearRunCompleteFallback() {
+  if (runCompleteFallbackTimer) { clearTimeout(runCompleteFallbackTimer); runCompleteFallbackTimer = null; }
+}
+// 视图卸载时解除布防(agent.js unmount 调用),避免定时器在视图切走后继续收尾
+export function cancelRunCompleteFallback() { clearRunCompleteFallback(); }
+
+function messageDecisionText(message) {
+  if (!message) return "";
+  if (message.content) return String(message.content);
+  if (!Array.isArray(message.parts)) return "";
+  return message.parts.filter(function(part) { return part && part.type === "text" && part.data; }).map(function(part) {
+    return String(part.data.text || "");
+  }).join("\n");
+}
+
+function hasCompletedDecisionResult(messages) {
+  // 本轮起点 = 最后一条用户消息：旧协议在它的正文里带 <adm_decision_request>，
+  // 新协议（服务端契约走系统提示词）用户消息里没有请求块，但起点位置一样。
+  var start = -1;
+  for (var i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") {
+      start = i;
+      break;
+    }
+  }
+  if (start < 0) return false;
+  for (var j = start + 1; j < messages.length; j++) {
+    var m = messages[j];
+    if (m.role !== "assistant") continue;
+    // P2：服务端把结果写成专用 decision part；旧会话仍是正文标签。
+    if (Array.isArray(m.parts) && m.parts.some(function(p) { return p && p.type === "decision"; })) return true;
+    if (parseDecisionResult(messageDecisionText(m))) return true;
+  }
+  return false;
+}
+
+function verifyDecisionRun(sessionId, mode) {
+  if (!S.currentConvId) return;
+  var sameSession = sessionId === S.currentConvId;
+  refreshMessages().then(function() {
+    if (sameSession && mode && mode !== "text" && S.currentConvId === sessionId && !hasCompletedDecisionResult(S.messages)) {
+      showWarning(_t("模型未返回有效的 Choice / Bool / Score 决策结果，请重试或切换普通对话"));
+    }
+  });
+}
+
+// 只对"当前正在运行的会话"布防，且排除子 Agent（含 $$ 的复合 session_id）事件。
+// 同工作区多会话并行时，其它会话的 agent_finished 不得解除当前会话已布防的兜底，
+// 因此"是否属于当前运行"的判断必须放在 clearRunCompleteFallback 之前。
+function armRunCompleteFallback(wsId, sessionId, runId) {
+  if (!sessionId || sessionId.indexOf("$$") !== -1) return;
+  if (!S.isSending || !S.activeRun || S.activeRun.sessionId !== sessionId) return;
+  clearRunCompleteFallback();
+  runCompleteFallbackTries = 0;
+  log.debug("SSE", "run_complete 兜底布防 session=" + sessionId.slice(0, 8));
+  scheduleRunCompleteFallbackCheck(wsId, sessionId, runId);
+}
+
+function scheduleRunCompleteFallbackCheck(wsId, sessionId, runId) {
+  runCompleteFallbackTimer = setTimeout(async function() {
+    runCompleteFallbackTimer = null;
+    var currentRun = S.activeRun;
+    if (!S.isSending || !currentRun || currentRun.sessionId !== sessionId) return; // 正常收尾或已取消
+    if (runCompleteFallbackTries >= RUN_COMPLETE_FALLBACK_MAX_TRIES) {
+      log.warn("SSE", "run_complete 兜底重试耗尽，交给 180s 安全计时器 session=" + sessionId.slice(0, 8));
+      return;
+    }
+    runCompleteFallbackTries++;
+    try {
+      // 只看本会话是否仍忙：同工作区其它会话的并行运行与本会话的收尾无关，
+      // 不能像旧版那样用工作区级 is_busy 判定（会无限续期）
+      var sess = await api("GET", "/v1/workspaces/" + wsId + "/sessions/" + sessionId);
+      if (sess && sess.is_busy) { scheduleRunCompleteFallbackCheck(wsId, sessionId, runId); return; }
+    } catch (_) {
+      // 查询失败不认定为空闲，稍后重试
+      scheduleRunCompleteFallbackCheck(wsId, sessionId, runId);
+      return;
+    }
+    if (!S.isSending || !S.activeRun || S.activeRun.sessionId !== sessionId) return;
+    log.warn("SSE", "run_complete 未到达且服务端已空闲，兜底收尾 session=" + sessionId + " run=" + (runId || ""));
+    var fallbackDecisionMode = S.runStats && S.runStats.sessionId === sessionId ? S.runStats.decisionMode : null;
+    store.completeRun(wsId, sessionId);
+    // run_complete 丢失的兜底收尾同样要推进 PDF 批次泵（见 pdf_batch.js）
+    reconcilePdfBatching();
+    updateSendButton();
+    // 其它会话可能仍在并行运行，只有全部结束才切回就绪
+    if (!S.isSending) updateStatusBar("ready", null, S.contextUsage.used);
+    loadConversations();
+    if (S.currentConvId === sessionId) verifyDecisionRun(sessionId, fallbackDecisionMode);
+    else refreshMessages();
+    refreshAgentInfo();
+  }, RUN_COMPLETE_FALLBACK_DELAY_MS);
+}
+
+// 工具状态事件（lsp/mcp/skills）合并刷新：1s 窗口内最多执行一次 loadTools，
+// 窗口结束时有新事件则补执行一次（尾随），连续事件流下既不超频也不漏掉最后一次。
+// 诊断事件是编辑文件期间的噪音大户（每次保存一次），而工具面板不显示诊断计数，
+// diagnostics_changed 在 case 分支里直接忽略，只有 state_changed 才需要刷新。
+var TOOLS_REFRESH_THROTTLE_MS = 1000;
+var toolsRefreshLast = 0;
+var toolsRefreshPending = false;
+var toolsRefreshTimer = null;
+
+function scheduleLoadTools() {
+  var now = Date.now();
+  if (now - toolsRefreshLast >= TOOLS_REFRESH_THROTTLE_MS) {
+    toolsRefreshLast = now;
+    toolsRefreshPending = false;
+    clearTimeout(toolsRefreshTimer);
+    toolsRefreshTimer = null;
+    loadTools();
+  } else {
+    toolsRefreshPending = true;
+    if (!toolsRefreshTimer) {
+      toolsRefreshTimer = setTimeout(function() {
+        toolsRefreshTimer = null;
+        if (toolsRefreshPending) {
+          toolsRefreshPending = false;
+          toolsRefreshLast = Date.now();
+          loadTools();
+        }
+      }, TOOLS_REFRESH_THROTTLE_MS - (now - toolsRefreshLast));
+    }
+  }
+}
+
+// 视图卸载时取消挂起的工具列表刷新（agent.js unmount 调用）
+export function cancelScheduledLoadTools() {
+  if (toolsRefreshTimer) { clearTimeout(toolsRefreshTimer); toolsRefreshTimer = null; }
+  toolsRefreshPending = false;
+}
+
+function onSSEEventReceived(event) {
+  var payload = event.payload;
+  var eventWsId = payload && payload.workspace_id;
+  var rawData0 = payload.data || payload;
+  var evType0 = rawData0.type || payload.type || "";
+  var isDelta = evType0 === "message" && rawData0.payload && rawData0.payload.type === "updated";
+  var skipLog = false;
+  if (isDelta) {
+    curDeltaLogged = tickMessageDelta(((rawData0.payload || {}).payload || {}).id || "");
+    skipLog = !curDeltaLogged;
+  } else if (evType0 === "lsp_event") {
+    // LSP 诊断事件常成串爆发（编辑文件期间每秒多条），同样节流：5 秒最多 1 条
+    skipLog = Date.now() - lastLspEventLogTs < 5000;
+    if (!skipLog) lastLspEventLogTs = Date.now();
+  }
+  if (!skipLog) {
+    log.debug("SSE", "event: " + evType0 + " ws: " + eventWsId + " activeWs: " + S.activeWsId + " currentConv: " + S.currentConvId);
+  }
+
+  // 统一走 Store：自动处理跨 workspace 一致性
+  // 非当前 tab 的事件更新对应 workspace 状态池
+  // 当前 tab 的事件数据已在 store 更新，下方 handleSSEEvent 只做 UI 副作用
+  //
+  // store.handleSSEEvent 会注销/接管运行登记（run_complete → completeRun），
+  // 因此必须在处理前快照状态：UI 收尾判定要用"处理前"的登记，否则会把刚完成的
+  // 运行误判为不存在，或把并行运行的其它会话误判为当前会话
+  var prevRunStats = S.runStats;
+  var prevCurrentConvId = S.currentConvId;
+  var prevRuns = (S.runs || []).slice();
+  var storeRes = store.handleSSEEvent(eventWsId, payload);
+
+  // 后台 workspace 运行出错时通知用户（active workspace 的错误由下方 handleSSEEvent 处理）
+  if (eventWsId !== S.activeWsId) {
+    notifyBackgroundRunError(payload, eventWsId);
+    // 压缩完成信号不依赖当前 tab：用户在压缩中切走工作区时，非当前 tab 的会话
+    // 更新不会进入 handleSSEEvent，但 summary_message_id 的落库事件仍需送达
+    // compact.js 收尾（否则压缩态一直挂到 HTTP 返回或兜底超时）
+    notifyBackgroundCompactFinished(payload);
+  }
+
+  // 当前 tab 的事件继续走原有 UI 处理逻辑
+  if (eventWsId === S.activeWsId) {
+    handleSSEEvent(payload, {
+      prevRunStats: prevRunStats,
+      prevCurrentConvId: prevCurrentConvId,
+      prevRuns: prevRuns,
+      storeRes: storeRes,
+    });
+  }
+}
+
+function notifyBackgroundRunError(payload, eventWsId) {
+  var bgRaw = payload.data || payload;
+  var bgType = bgRaw.type || payload.type || "";
+  if (bgType !== "run_complete") return;
+  var bgInner = (bgRaw.payload || {}).payload || bgRaw.payload || {};
+  if (!bgInner.error) return;
+  // 与 active workspace 的错误展示一致：气泡写进该后台 workspace 的消息池，
+  // 切回时可见，不打扰当前 tab。触顶非故障，用独立文案避免误导为"运行出错"。
+  if (classifyError(bgInner.error) === ERROR_STEP_CAP) {
+    appendErrorBubble(bgInner.error, { prefix: _t("后台工作区步数触顶: "), wsId: eventWsId, sessionId: bgInner.session_id });
+  } else if (bgInner.cancelled || classifyError(bgInner.error) === ERROR_CANCEL) {
+    // 取消不是运行故障：跳过气泡（与 active workspace「本轮对话已取消」分支同语义）
+    console.log("[agent] 后台工作区运行取消，跳过错误气泡:", bgInner.session_id || "");
+  } else {
+    appendErrorBubble(bgInner.error, { prefix: _t("后台工作区运行出错: "), wsId: eventWsId, sessionId: bgInner.session_id });
+  }
+}
+
+// 非当前 tab 的 session updated：转交压缩完成信号（onSessionUpdated 内部按会话
+// id 匹配进行中的压缩，跨工作区安全；其它会话的更新会被它直接忽略）。
+function notifyBackgroundCompactFinished(payload) {
+  var ev = normalizeSSEPayload(payload);
+  if (ev.eventType !== "session" || ev.innerType !== "updated") return;
+  onSessionUpdated(ev.actualData);
+}
+
+export async function setupSSEListener() {
+  console.log("[agent] setupSSEListener() workspace:", S.serverInfo ? S.serverInfo.workspace_id : "unknown");
+  clearRunCompleteFallback();
+  if (S.sseListener) { try { S.sseListener(); } catch (_) {} S.sseListener = null; }
+  if (typeof listen !== "function") { console.warn("[agent] listen 不是函数"); return; }
+
+  // 通知后端开始订阅 SSE（必须等待完成，否则消息发出后 SSE 还没连上）
+  try {
+    await invoke("agent_subscribe_events", {
+      workspaceId: S.serverInfo.workspace_id,
+      clientId: S.clientId
+    });
+    console.log("[agent] agent_subscribe_events 完成");
+  } catch (e) {
+    console.warn("[agent] agent_subscribe_events 失败:", e);
+  }
+
+  try {
+    // 必须 await：listen() 返回 Promise，不 await 会导致 sseListener 存的是 Promise，
+    // 下次注销时调用失败被吞掉，旧监听器永远无法移除 → 事件重复处理
+    S.sseListener = await listen("agent-sse-event", function(event) {
+      try {
+        onSSEEventReceived(event);
+      } catch (e) {
+        reportError(e, { prefix: _t("SSE 事件转发失败: ") });
+      }
+    });
+
+    // 监听 SSE 错误事件（断线重连）—— 用单独的变量保存 unlisten，避免重复注册
+    if (S.sseErrorUnlisten) { try { S.sseErrorUnlisten(); } catch (_) {} S.sseErrorUnlisten = null; }
+    S.sseErrorUnlisten = await listen("agent-sse-error", function() {
+      reconnectSSE();
+    });
+  } catch (_) {}
+}
+
+// SSE 断线重连
+function reconnectSSE() {
+  if (S.sseReconnectTimer) return;
+  // SSE 短暂断线不代表运行已结束；保留 activeRun，重连后继续按原运行会话检查
+  clearSendSafetyTimer();
+  updateStatusBar("error", null, S.contextUsage.used);
+  showError(_t("SSE 连接断开，3 秒后重连..."));
+  S.sseReconnectTimer = setTimeout(async function() {
+    S.sseReconnectTimer = null;
+    try {
+      // 重连前必须确保 server/workspace 身份仍有效（断线期间 server 状态可能丢失），
+      // 否则后续直接用 S.serverInfo.workspace_id 拼 URL 会抛错被吞、重连假死
+      if (!S.serverInfo || !S.serverInfo.workspace_id) {
+        console.warn("[agent] 重连中止：serverInfo/workspace_id 缺失，状态退回就绪");
+        store.cancelRun(store.activeWsId);
+        clearSendSafetyTimer();
+        updateStatusBar("ready", null, S.contextUsage.used);
+        return;
+      }
+      // 重新订阅 SSE
+      await setupSSEListener();
+      // 刷新会话列表
+      await loadConversations();
+      // 刷新当前会话消息
+      if (S.currentConvId) {
+        await refreshMessages();
+        // 刷新会话信息
+        var reconnectedConv = await api("GET", "/v1/workspaces/" + S.serverInfo.workspace_id + "/sessions/" + S.currentConvId);
+        store.setCurrentConv(store.activeWsId, reconnectedConv);
+        renderTodos(S.currentConv.todos);
+      }
+      if (S.isSending && S.activeRun) startSendSafetyTimer();
+      updateStatusBar(S.isSending ? "busy" : "ready", null, S.contextUsage.used);
+    } catch (e) {
+      reportError(e, { prefix: _t("重连失败: ") });
+    }
+  }, 3000);
+}
+
+// 错误格式化 / 分类统一收口到 error.js（getErrorMessage / classifyError），
+// 展示统一走 ui.js 的 reportError（quota 类错误自动提示"余额不足，任务中断"）。
+
+// 常驻错误气泡：错误以本地消息形式追加进聊天列表（不落库 → 下次请求不会
+// 跟随上下文提交给 LLM），替代 3s 自动消失的弹窗；切会话/刷新页面后随会话
+// 状态清理。文本统一走 error.js 的 friendlyError（按当前 UI 语言生成友好提示，
+// 中文界面不出现英文报错）；quota 类错误沿用"余额不足"文案；同一会话 3 秒内
+// 相同错误去重（输出退化场景服务端会同时发 agent_event error + run_complete error）。
+var lastErrorBubble = null;
+// 任务清单未完成提示的常驻节点：incomplete_todos 统计的是会话累积清单，
+// 旧清单未清掉时每轮都会触发；复用同一节点改写文案，避免每轮叠一条相同黄条。
+var todosNoticeEl = null;
+function appendErrorBubble(err, opts) {
+  opts = opts || {};
+  var wsId = opts.wsId || S.serverInfo.workspace_id;
+  var sid = opts.sessionId || S.currentConvId;
+  var base = getErrorMessage(err);
+  if (!base) return;
+  var text = friendlyError(err, { prefix: opts.prefix, hint: opts.hint });
+  if (!text) return;
+  var now = Date.now();
+  // 同一会话 3s 内相同核心错误只显示一次（agent_event 与 run_complete 的
+  // prefix 不同，用 base 而非最终文本比较，避免同一次失败双气泡）
+  if (lastErrorBubble && lastErrorBubble.wsId === wsId && lastErrorBubble.sid === sid && lastErrorBubble.base === base && now - lastErrorBubble.ts < 3000) return;
+  lastErrorBubble = { wsId: wsId, sid: sid, base: base, ts: now };
+  store.appendMessage(wsId, {
+    id: "local-error-" + now,
+    role: "error",
+    content: text,
+    _temp: true,
+    _error: true,
+    _sessionId: sid,
+  });
+  // 仅当前 tab 需要 DOM 渲染；后台 workspace 的气泡在切回时由 renderMessages 呈现
+  if (wsId === S.activeWsId) renderMessages();
+}
+
+// 步数触顶提示：模型已用完本轮 256 步预算但仍在干活，不再自动续跑，提示用户手动继续。
+function showStepCapDialog(sessionId) {
+  if (!sessionId) return;
+  showInfo(_t("模型已用完本轮预算，您可手动发送“继续”让它继续干活，或先查看中间结果再决定"));
+}
+
+function normalizeSSEPayload(payload) {
+  // 后端 emit 格式: { "type": event_type, "data": parsed_sse_json }
+  // parsed_sse_json 结构: { "type": "message"|"session"|"run_complete"|..., "payload": { "type": "created"|"updated"|"deleted", "payload": {...} } }
+  var rawData = payload.data || payload;
+  var eventType = rawData.type || payload.type || "";
+  var eventPayload = rawData.payload || {};
+  var innerType = eventPayload.type || ""; // "created" | "updated" | "deleted"
+  var actualData = eventPayload.payload || eventPayload || {};
+  return { eventType: eventType, innerType: innerType, actualData: actualData };
+}
+
+function handleSSEEvent(payload, ctx) {
+  ctx = ctx || {};
+  if (!payload) return;
+  console.log("[agent] SSE 事件:", payload.type || payload?.data?.type, "数据:", JSON.stringify(payload).substring(0, 150));
+  var ev = normalizeSSEPayload(payload);
+  var handler = sseEventHandlers.get(ev.eventType) || onUnknownSSEEvent;
+  try {
+    handler(ev, ctx);
+  } catch (e) {
+    reportError(e, { prefix: _t("SSE 事件处理失败: ") + (ev.eventType || "unknown") });
+  }
+}
+
+function onMessageSSEEvent(ev) {
+  var innerType = ev.innerType;
+  var actualData = ev.actualData;
+  if (innerType !== "updated" || curDeltaLogged) {
+    log.debug("SSE", "message: " + innerType + " role: " + actualData.role + " session: " + actualData.session_id + " currentConv: " + S.currentConvId + " match: " + (!actualData.session_id || actualData.session_id === S.currentConvId));
+  }
+  // 只有实际运行会话的消息才能续期其安全计时器，其他会话事件不得干扰
+  if (S.isSending && S.activeRun && (!actualData.session_id || actualData.session_id === S.activeRun.sessionId)) {
+    startSendSafetyTimer();
+  }
+  // 排队结束信号：本会话排队中的轮次开始产出消息 → 已从「排队中」转入「运行中」，
+  // 清除排队标识并接管为本会话的活动运行（前一轮的 run_complete 可能晚到，
+  // 有 run_id 匹配校验兜底，不会因此误清状态）
+  if (S.queuedRun && actualData.session_id && actualData.session_id === S.queuedRun.sessionId) {
+    console.log("[agent] 排队轮次开始产出，接管运行:", actualData.session_id);
+    store.promoteQueuedRun(S.queuedRun.workspaceId, S.queuedRun.sessionId);
+    renderConversationList();
+  }
+  // 未打开任何会话时，后台会话（如微信 Bot）来消息 → 自动打开该会话实时跟踪
+  if (!S.currentConvId && actualData.session_id) {
+    selectConversation(actualData.session_id);
+    return; // selectConversation 会拉取全量消息，本条事件无需重复处理
+  }
+  // SSE 是工作区级广播：非当前打开会话的消息（如微信 Bot 会话的运行）不得进入当前消息列表，
+  // 否则先被 push 显示、run_complete 后 refreshMessages 按当前会话拉取又被清掉（表现为消息闪现后消失）
+  if (actualData.session_id && actualData.session_id !== S.currentConvId) {
+    log.warn("SSE", "message DROPPED (session mismatch): " + actualData.session_id + " vs " + S.currentConvId);
+    return;
+  }
+  if (innerType !== "updated" || curDeltaLogged) {
+    log.debug("SSE", "message PASSED to handler: " + innerType + " role: " + actualData.role + " id: " + actualData.id);
+  }
+  handleMessageSSEEvent(innerType, actualData);
+}
+
+function onSessionSSEEvent(ev, ctx) {
+  handleSessionSSEEvent(ev.innerType, ev.actualData, ctx);
+}
+
+function onRunCompleteSSEEvent(ev, ctx) {
+  var actualData = ev.actualData;
+  if (isChildAgentRunComplete(actualData)) return;
+  // 本次完成的是哪个会话的运行：store 处理时已注销登记，必须用处理前的快照判定。
+  // 同工作区多会话并行下，这里决定了是「本会话收尾」还是「其它会话收尾」。
+  var completedRun = findCompletedRun(ctx, actualData);
+  var sid = (completedRun && completedRun.sessionId) || actualData.session_id || "";
+  var belongsToCurrent = completedRun
+    ? completedRun.sessionId === S.currentConvId
+    : (!sid || sid === S.currentConvId);
+  // 迟到的旧运行完成事件（同会话已开始新一轮，run_id 不匹配）：store 已拒绝注销，
+  // 此处同样不得收尾界面态，否则会把新运行的状态一起清掉
+  if (ctx.storeRes && ctx.storeRes.ignored) {
+    console.log("[agent] 忽略迟到的 run_complete:", actualData.run_id || sid);
+    return;
+  }
+  // 非子 Agent 的当前会话 run_complete 到达：解除丢失兜底。
+  // 注意必须放在 $$ 判断之后：子 Agent 完成事件可能晚于父 agent_finished 到达，
+  // 若提前解除，父运行的布防会被误清，本轮完成事件丢失时将失去兜底。
+  if (belongsToCurrent) clearRunCompleteFallback();
+  if (!belongsToCurrent) {
+    // 其它会话（并行运行 / 微信 Bot 会话）完成：只刷新本工作区的列表与运行标识，
+    // 当前会话的运行态/安全计时器/决策轮校验一概不动
+    console.log("[agent] 其它会话运行完成，仅刷新列表: session=" + (sid || "").slice(0, 8));
+    onPdfBatchRunComplete(sid, classifyRunComplete(actualData, false).kind, actualData.run_id || "", false);
+    renderConversationList();
+    loadConversations();
+    updateSendButton();
+    // 本工作区已无任何运行在飞时才切回就绪
+    if (!S.isSending) {
+      clearSendSafetyTimer();
+      updateStatusBar("ready", null, S.contextUsage.used);
+    }
+    maybeReloadPendingModel();
+    return;
+  }
+  // 队列接管：store.completeRun 已把该会话排队的下一轮提升为活动运行
+  var tookOverQueued = !!(ctx.storeRes && ctx.storeRes.tookOver);
+  if (tookOverQueued) {
+    console.log("[agent] 本轮完成，同会话排队轮次接管: " + sid);
+  }
+  // 接管后该会话仍在运行（服务端队列 FIFO），重启安全计时器保护新运行；
+  // 非接管：本会话运行已结束，停掉安全计时器（它只服务当前会话的运行）
+  if (tookOverQueued) startSendSafetyTimer();
+  else clearSendSafetyTimer();
+  updateSendButton();
+  console.log("[agent] run_complete 收尾发送态: run_id=" + (actualData.run_id || "") + " session=" + (actualData.session_id || "") + " error=" + getErrorMessage(actualData.error) + " cancelled=" + !!actualData.cancelled);
+  // 本轮运行出错/被取消时明确提示（error 非空表示运行出错），
+  // 否则服务端中断本轮时 UI 静默停止，表现为"会话突然中断"却无任何说明
+  if (actualData && actualData.error) {
+    console.warn("[agent] run_complete 携带错误:", JSON.stringify(actualData));
+  }
+  var action = classifyRunComplete(actualData, tookOverQueued);
+  // PDF 分批发送：本会话批次运行结束后自动转换并发送下一批
+  // （出错/取消/步数触顶/切会话会终止剩余批次，见 pdf_batch.js）
+  onPdfBatchRunComplete(sid, action.kind, actualData.run_id || "", tookOverQueued);
+  if (action.kind === "step_cap") {
+    // 步数触顶：模型仍在干活但本轮 256 步预算耗尽，不是故障。弹决策卡让用户查看或手动续跑
+    setReadyIfIdle();
+    showStepCapDialog(sid);
+  } else if (action.kind === "cancelled") {
+    // 服务端取消时会把 context.Canceled 错误放进 error 字段（error="context canceled" cancelled=true），
+    // 不能当成运行失败：按用户主动取消走「本轮对话已取消」分支，避免误标"中断"
+    showError(_t("本轮对话已取消"));
+    // 取消后状态栏切回就绪（排队接管时新运行即将开始，保持 busy 由 run_start 接管）
+    if (action.status === "ready") setReadyIfIdle();
+  } else if (action.kind === "error") {
+    var ctxHint = (S.contextUsage.max > 0 && S.contextUsage.used >= S.contextUsage.max * 0.9)
+      ? _t("（上下文已接近上限 ") + S.contextUsage.used + "/" + S.contextUsage.max + _t("，建议新建会话继续）") : "";
+    // 统一错误展示：quota（余额不足/401）类自动提示"余额不足，任务中断"，其余显示原始错误
+    // 常驻错误气泡写进聊天列表（不弹窗、不进 LLM 上下文）
+    appendErrorBubble(actualData.error, { prefix: _t("本轮对话中断: "), hint: ctxHint });
+    updateStatusBar("error", null, S.contextUsage.used);
+  } else if (action.kind === "empty_output") {
+    // 服务端标记：本轮正常结束但没有任何实际输出（正文/工具调用全无）→ 明确提示而非静默消失。
+    // 两种成因给出不同指引，见 emptyOutputHint。keep=true：提示含操作指引，3 秒自动消失读不完
+    // （切换会话/工作区时由 clearErrorNotices 统一清理）
+    console.warn("[agent] run_complete empty_output:", JSON.stringify(actualData));
+    showNotice(emptyOutputHint(), "warn", true);
+    updateStatusBar("error", null, S.contextUsage.used);
+  } else if (action.status === "ready") {
+    // 排队接管时仍有运行在队列中，状态栏保持运行中，不切回就绪；
+    // empty_output 分支上面已置 error 态（模型未产生有效输出），此处不得覆盖
+    setReadyIfIdle();
+  }
+  // 正常结束但任务清单仍有未完成项：模型把「做完了」写进正文却没回写 todos，
+  // 面板会一直停在 0/N（服务端用完未完成 nudge 预算后结束本轮）。
+  // 这里明确提示，避免终稿与清单互相矛盾。清单是会话累积的，旧清单未清掉时
+  // 后续每轮都会再次触发，因此复用同一常驻节点改写文案（见 todosNoticeEl）。
+  if (action.kind === "ok" && actualData && actualData.incomplete_todos > 0) {
+    console.warn("[agent] run_complete 任务清单仍有未完成项: " + actualData.incomplete_todos);
+    var todosMsg = _t("任务清单还有 ") + actualData.incomplete_todos + _t(" 项未完成，本轮已结束；可发送“继续”让模型收尾");
+    if (todosNoticeEl && todosNoticeEl.parentNode) todosNoticeEl.textContent = todosMsg;
+    else todosNoticeEl = showNotice(todosMsg, "warn", true);
+  }
+  maybeReloadPendingModel();
+  // 运行完成后刷新会话列表和消息
+  loadConversations();
+  if (S.currentConvId) {
+    var completedStats = ctx.prevRunStats;
+    var completedDecisionSession = sid || (completedStats && completedStats.sessionId) || "";
+    var completedDecisionMode = completedStats && completedStats.sessionId === completedDecisionSession ? completedStats.decisionMode : null;
+    if (action.kind === "ok") verifyDecisionRun(completedDecisionSession, completedDecisionMode);
+    else refreshMessages();
+  }
+}
+
+// 本工作区已无运行在飞时才把状态栏切回就绪：同工作区多会话并行时，
+// 单个会话收尾不代表整个工作区空闲（否则状态栏会误显示就绪）
+function setReadyIfIdle() {
+  if (!S.isSending) updateStatusBar("ready", null, S.contextUsage.used);
+}
+
+// 切换模型时会话繁忙导致 /agent/update 未生效时置位 pendingModelReload：
+// 必须等工作区彻底空闲（并行运行的其它会话也都结束）再重试，否则重载依旧会被拒；
+// 工作区仍忙时保留标志，由后续 run_complete 再次调用本函数处理
+function maybeReloadPendingModel() {
+  if (S.pendingModelReload && !S.isSending) {
+    S.pendingModelReload = false;
+    reloadAgentConfig()
+      .then(function() { refreshAgentInfo(); })
+      .catch(function() { S.pendingModelReload = true; });
+    return;
+  }
+  // 运行完成后刷新 Agent 信息（模型可能已变更）并更新模型按钮显示（带序号防旧响应覆盖）
+  refreshAgentInfo();
+}
+
+// 定位 run_complete 对应的运行登记：ctx.prevRuns 是 store 处理前的本工作区登记快照。
+// 先按 session_id 匹配（服务端始终携带），再按 run_id 兜底（会话删改等异常场景）
+function findCompletedRun(ctx, actualData) {
+  var prev = (ctx && ctx.prevRuns) || [];
+  var sid = actualData.session_id || "";
+  var i;
+  if (sid) {
+    for (i = 0; i < prev.length; i++) {
+      if (prev[i].sessionId === sid && !prev[i].queued) return prev[i];
+    }
+    for (i = 0; i < prev.length; i++) {
+      if (prev[i].sessionId === sid) return prev[i];
+    }
+  }
+  if (actualData.run_id) {
+    for (i = 0; i < prev.length; i++) {
+      if (prev[i].runId === actualData.run_id) return prev[i];
+    }
+  }
+  return null;
+}
+
+// empty_output 的可操作提示：绝大多数是输出全部消耗在思考里，指引用户关闭思考模式
+function emptyOutputHint() {
+  return _t("模型未产生有效输出，本轮已结束：输出可能全部消耗在思考中。请在 Agent 设置中关闭思考模式，或新建会话后重试");
+}
+
+// run_complete 的收尾决策表（纯函数，便于单独验证各组合）
+function classifyRunComplete(actualData, tookOverQueued) {
+  var ad = actualData || {};
+  if (ad.error) {
+    if (ad.cancelled || classifyError(ad.error) === ERROR_CANCEL) {
+      return { kind: "cancelled", status: tookOverQueued ? "none" : "ready" };
+    }
+    if (classifyError(ad.error) === ERROR_STEP_CAP) {
+      return { kind: "step_cap", status: "ready" };
+    }
+    return { kind: "error", status: "error" };
+  }
+  if (ad.empty_output) {
+    return { kind: "empty_output", status: "error" };
+  }
+  if (ad.cancelled) {
+    return { kind: "cancelled", status: tookOverQueued ? "none" : "ready" };
+  }
+  return { kind: "ok", status: tookOverQueued ? "none" : "ready" };
+}
+
+// 防御：子 Agent（agent 工具嵌套调用）的 run_complete 携带复合 session_id
+//（格式 `{parentMsgId}$${toolCallId}`，tool call id 前缀随 provider 不同，
+// 如 OpenAI `call_`、Qwen `chatcmpl-tool-`），且 run_id 继承父运行，
+// 绝不能让它误触发父运行的收尾逻辑（正常会话 id 为纯 UUID，不含 `$$`）。
+function isChildAgentRunComplete(actualData) {
+  if (typeof actualData.session_id === "string" && actualData.session_id.indexOf("$$") !== -1) {
+    console.log("[agent] 忽略子 Agent 的 run_complete:", actualData.session_id);
+    return true;
+  }
+  return false;
+}
+
+function onPermissionRequestSSEEvent(ev) {
+  // 审批弹窗已移除：skip=true 下正常不会收到，竞态到达时自动放行
+  handlePermissionRequest(ev.actualData);
+}
+
+function onPermissionNotificationSSEEvent() {
+  // 权限处理结果通知，可忽略或更新 UI
+}
+
+function onConfigChangedSSEEvent() {
+  // 配置变更，刷新 Agent 信息
+}
+
+// 服务端「丢弃半成品并重试」的通知 token（admAgent agent_loop_llm.go 的 notifyDiscard）：
+// 与 message deleted 事件属于同一次丢弃（token 先发出，但两者走不同 broker，到达顺序不保证），
+// 按 token 出本地化文案，并以此抑制下方按消息内容猜测的兜底提示，避免双提示。
+// 取值须与 admAgent 的 discardReasoningOverrun / discardStreamInterrupted 常量保持一致。
+// discard_reasoning_timeout 已不由新服务端发出（300s 无可见输出看门狗已删除），但保留一个
+// 版本周期：桌面端与内置 sidecar 分别发布，仍可能跑着旧 admAgent，而删掉该映射会让用户
+// 在提示里直接看到未翻译的英文 token 原文。
+var DISCARD_NOTICE_TEXT = {
+  discard_reasoning_overrun: "模型思考量超出本轮上限，已丢弃该段思考并重新生成",
+  discard_reasoning_timeout: "模型思考超过 300 秒仍无输出，已丢弃该段思考并重新生成",
+  discard_stream_interrupted: "生成流被中断，已丢弃该段内容并重试",
+};
+// 最近一次收到服务端丢弃 token 通知的时刻（用于抑制内容兜底提示）
+var lastDiscardNoticeAt = 0;
+// 内容兜底提示的延迟句柄（等 token 通知先到）
+var discardFallbackTimer = null;
+
+function onAgentEventSSEEvent(ev) {
+  var actualData = ev.actualData;
+  // Agent 事件（错误/响应/摘要/思考中）：error 可能是字符串或对象，统一展示并留完整日志便于排查
+  // agent_finished = 运行正常收尾信号，通常其后紧跟 run_complete；布防兜底防其丢失
+  if (actualData && actualData.type === "agent_finished") {
+    armRunCompleteFallback((S.activeRun && S.activeRun.workspaceId) || S.activeWsId, actualData.session_id || "", actualData.run_id || "");
+  }
+  if (actualData && actualData.error) {
+    if (classifyError(actualData.error) === ERROR_STEP_CAP) {
+      // 步数触顶：服务端会同时发 agent_event error + run_complete error（与输出退化
+      // 场景同机制），提示统一由 run_complete 分支的决策卡呈现，这里不弹错误气泡
+      return;
+    }
+    console.warn("[agent] agent_event 错误:", JSON.stringify(actualData).substring(0, 500));
+    appendErrorBubble(actualData.error, { prefix: _t("Agent 错误: ") });
+  } else if (actualData && actualData.type === "thinking" && actualData.progress) {
+    // 模型长时间思考仍未产出可见内容：仅提示当前正在查看的会话，避免其它会话打扰
+    if (!actualData.session_id || actualData.session_id === S.currentConvId) {
+      log.debug("SSE", "agent_event thinking: " + actualData.progress);
+      var discardText = Object.prototype.hasOwnProperty.call(DISCARD_NOTICE_TEXT, actualData.progress)
+        ? DISCARD_NOTICE_TEXT[actualData.progress]
+        : "";
+      if (discardText) {
+        // 服务端明确告知了丢弃原因（推理超量/思考超时/流式中断），文案比内容兜底更准确
+        lastDiscardNoticeAt = Date.now();
+        showInfo(_t(discardText));
+      } else {
+        showInfo(actualData.progress);
+      }
+    }
+  }
+}
+
+function onFileSSEEvent() {
+  // 文件变更，可忽略
+}
+
+function onToolStatusSSEEvent(ev) {
+  // 工具状态变更，节流合并刷新工具列表（1s 窗口）；
+  // lsp 诊断计数变化（每次编辑/保存触发）对工具面板无意义，直接忽略
+  if (ev.eventType === "lsp_event") {
+    var d = ev.actualData || {};
+    if (d.type === "diagnostics_changed") return;
+    if (d.type === "state_changed") onLspStateEvent(d.name, d.state, d.error, d.error_type);
+  }
+  scheduleLoadTools();
+}
+
+function onUnknownSSEEvent(ev) {
+  log.warn("SSE", "未知事件类型: " + (ev.eventType || "(empty)"));
+}
+
+/** @type {Map<string, (ev: any, ctx?: any) => void>} */
+var sseEventHandlers = new Map([
+  ["message", onMessageSSEEvent],
+  ["session", onSessionSSEEvent],
+  ["run_complete", onRunCompleteSSEEvent],
+  ["permission_request", onPermissionRequestSSEEvent],
+  ["permission_notification", onPermissionNotificationSSEEvent],
+  ["config_changed", onConfigChangedSSEEvent],
+  ["agent_event", onAgentEventSSEEvent],
+  ["file", onFileSSEEvent],
+  ["skills_event", onToolStatusSSEEvent],
+  ["mcp_event", onToolStatusSSEEvent],
+  ["lsp_event", onToolStatusSSEEvent],
+]);
+
+// 处理消息 SSE 事件
+function handleMessageSSEEvent(action, msgData) {
+  // 统计本轮工具调用（增量按消息 id + parts 数去重），供假完成检测与续跑进度判定使用
+  if (action !== "deleted") collectRunStats(msgData);
+  else notifyDiscardedThinking(msgData);
+  // 数据更新统一由 store.handleSSEEvent 完成（created → upsertCreatedMessage，
+  // updated → updateMessage，deleted → deleteMessage，含临时气泡清理），此处只做 UI 刷新。
+  // 流式期间每个 delta 都会走到这里：用 rAF 合并调度，单帧最多渲染一次
+  scheduleRenderMessages();
+}
+
+// 思考气泡被服务端丢弃时补一条提示（旧版服务端兜底：新服务端会先发 DISCARD_NOTICE_TEXT
+// 里的 token，由 onAgentEventSSEEvent 给出精确原因并抑制本提示）。
+// 服务端在「推理超量」（reasoningOverrunMaxTokens ≈ 120000 tokens，按估算：ASCII 约 4 字节
+// /token、非 ASCII rune 计 1 token；不再按推理强度分档）时会中止当前 step、删掉那条只含
+// 思考的 assistant 消息（message.Delete → 本条 deleted 事件）并带 nudge 重试，见 admAgent
+// agent_loop_llm.go 的 errOutputDegraded 分支。前端此前只让思考气泡凭空消失，用户看到的
+// 是「思考很久 → 突然清屏 → 又继续思考」却没有任何说明，这里补上原因。
+// 只认「纯思考气泡」：带正文/工具调用的删除与空消息删除（上下文溢出、无 step 结果、
+// 决策轮失败）都不提示，避免把正常收尾清理误报成异常。
+function notifyDiscardedThinking(msgData) {
+  if (!msgData || msgData.role !== "assistant") return;
+  var parts = Array.isArray(msgData.parts) ? msgData.parts : [];
+  var hasThinking = false;
+  var hasVisible = false;
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i];
+    if (!p || !p.data) continue;
+    if (p.type === "reasoning") hasThinking = hasThinking || !!p.data.thinking;
+    else if (p.type === "text" || p.type === "tool_call" || p.type === "shell_command") hasVisible = true;
+  }
+  if (!hasThinking || hasVisible) return;
+  // 延迟 500ms 再提示：服务端 token 通知与 message deleted 走不同 broker，到达顺序不保证，
+  // 先让精确的 token 文案落位（旧版服务端没有该事件时本条才会真正显示）。
+  var fallbackSessionId = msgData.session_id || "";
+  if (discardFallbackTimer) clearTimeout(discardFallbackTimer);
+  discardFallbackTimer = setTimeout(function() {
+    discardFallbackTimer = null;
+    if (Date.now() - lastDiscardNoticeAt < 2000) return;
+    // 期间已切走会话时不再补弹（clearErrorNotices 只清已有节点，晚到的提示会落到新会话）
+    if (fallbackSessionId && S.currentConvId !== fallbackSessionId) return;
+    log.debug("SSE", "思考气泡被丢弃（服务端未给 token，按内容兜底），提示用户 id=" + (msgData.id || ""));
+    showInfo(_t("模型思考过长（超时或超量），已丢弃该段思考并重新生成"));
+  }, 500);
+}
+
+// 取消延迟中的兜底提示（切走 agent 视图时调用，与 cancelRunCompleteFallback 同职责）
+export function cancelDiscardFallback() {
+  if (discardFallbackTimer) {
+    clearTimeout(discardFallbackTimer);
+    discardFallbackTimer = null;
+  }
+}
+
+// ===== 本轮运行统计（续跑进度判定） =====
+// 副作用工具：会真实修改工作区/执行命令的工具。todos 不算（进度由 incomplete 数体现）
+var SIDE_EFFECT_TOOLS = ["edit", "write", "multiedit", "bash", "lsp_replace_symbol", "lsp_rename", "download", "agent"];
+
+// 统计消息中的工具调用（tool_call / tool_result part）
+function collectRunStats(msgData) {
+  var rs = S.runStats;
+  if (!rs || !msgData || !Array.isArray(msgData.parts)) return;
+  // 只统计与本次运行同一会话的消息：排队期间 activeRun 可能是其它会话，
+  // 其消息（session SSE 广播）不得计入本会话运行的统计，避免污染进度判定
+  if (msgData.session_id && rs.sessionId && msgData.session_id !== rs.sessionId) return;
+  var msgId = msgData.id || "";
+  if (!msgId) return;
+  var seenParts = rs.seenMsgIds[msgId] || 0;
+  var parts = msgData.parts;
+  if (parts.length <= seenParts) return; // 该消息 parts 未新增，无需重复统计
+  for (var i = seenParts; i < parts.length; i++) {
+    var p = parts[i];
+    if (!p || !p.data) continue;
+    var d = p.data;
+    if (p.type === "tool_call" && typeof d.name === "string") {
+      rs.toolCalls++;
+      if (SIDE_EFFECT_TOOLS.indexOf(d.name) >= 0) rs.sideEffectCalls++;
+    } else if (p.type === "tool_result" && typeof d.name === "string") {
+      if (SIDE_EFFECT_TOOLS.indexOf(d.name) >= 0 && !d.is_error) rs.sideEffectSuccess++;
+    }
+  }
+  rs.seenMsgIds[msgId] = parts.length;
+}
+
+// 处理会话 SSE 事件
+function handleSessionSSEEvent(action, sessData, ctx) {
+  // 数据更新统一由 store.handleSessionEvent 完成（created 插入 / updated 替换并
+  // 同步 currentConv/contextUsage / deleted 清空会话与消息），此处只保留 UI 副作用。
+  // store 先于本 handler 执行（见 setupSSEListener），S 已是更新后的状态。
+  // deleted 时 store 已将 currentConvId 置 null，需用 ctx.prevCurrentConvId 判断
+  // 被删会话是否曾是当前会话，否则 UI 清理全部被跳过。
+  if (action === "created") {
+    renderConversationList();
+  } else if (action === "updated") {
+    renderConversationList();
+    // 手动压缩完成信号：压缩成功后服务端写回 summary_message_id（session.Save →
+    // Publish UpdatedEvent），由 compact.js 判断是否匹配进行中的压缩并收尾
+    onSessionUpdated(sessData);
+    // 如果是当前会话，更新标题、上下文和 Todo 面板
+    if (S.currentConvId === sessData.id) {
+      document.getElementById("agent-conv-title").textContent = sessData.title || _t("会话");
+      // Session SSE 是完整快照；todos 使用 omitempty，字段缺失表示列表已清空，必须隐藏旧面板
+      renderTodos(Array.isArray(sessData.todos) ? sessData.todos : []);
+      // context_tokens 为 0 时（如仅改标题触发的更新）保留现有估算值，避免被清零
+      if (sessData.context_tokens) {
+        updateContextUsage();
+      }
+    }
+  } else if (action === "deleted") {
+    renderConversationList();
+    if ((ctx && ctx.prevCurrentConvId) === sessData.id) {
+      updateDecisionModeUI();
+      resetPermissionState();
+      syncWxFollowSession();
+      renderMessages();
+      renderTodos([]);
+      document.getElementById("agent-conv-title").textContent = _t("选择或创建一个会话");
+    }
+  }
+}

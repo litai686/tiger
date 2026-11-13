@@ -1,0 +1,255 @@
+mod app_state;
+mod common;
+mod pages;
+
+use app_state::AppState;
+use pages::{agent, index, settings, ilink, skills};
+
+use tauri::Manager;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+/// 显示主窗口并带到前台（跨平台）。
+///
+/// macOS 关键点：`set_skip_taskbar(true)` 在 macOS 上会切换到 `Accessory` 激活策略
+/// （隐藏 Dock 图标），之后单纯 `show()` + `set_focus()` 无法把窗口带到前台。
+/// 因此 macOS 上需要先显式恢复 `Regular` 激活策略，再 `show` + `set_focus`。
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        #[cfg(target_os = "macos")]
+        {
+            // macOS：先恢复 Regular 策略（Dock 图标 + 菜单栏），再显示窗口
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = window.set_skip_taskbar(false);
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }
+}
+
+/// 清理所有子进程（Agent / admAgent）。
+/// 从原 `on_window_event(CloseRequested)` 提取，供托盘"退出"、正常关闭与
+/// 应用自升级（拉起安装包后退出）复用。
+pub(crate) fn cleanup_processes(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+
+    // 关闭 Agent 会话（只杀本进程拉起的 admAgent server 子进程；复用的共享
+    // server 不杀，由服务端在最后一个工作区被 teardown 时自行退出）
+    agent::kill_agent_session(&state);
+}
+
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // 单实例：第二个实例启动时，让第一个实例显示窗口
+            show_main_window(app);
+        }))
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_hwinfo::init())
+        .manage(AppState::new())
+        .manage(ilink::IlinkManaged::default())
+        .setup(|app| {
+            // 调试日志：按持久化设置恢复开关（开启时截断重建 → 每次重启清空上次日志），
+            // 早于任何 admAgent 交互，确保本次会话从头开始记录。
+            agent::init_debug_logging(app.handle());
+
+            // admAgent.json 备份与损坏恢复：首次启动备份；检测到损坏时弹窗引导从备份恢复
+            agent::init_agent_config_recovery(app.handle());
+
+            // ===== 系统托盘 =====
+            let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出 Tiger", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+            // 托盘创建失败不阻断启动：Linux 上缺少 libayatana-appindicator3 或桌面无
+            // StatusNotifier 宿主时创建会失败，若直接 `?` 冒泡，应用在精简桌面环境里根本起不来。
+            // 结果记入 AppState，关闭窗口的行为随之降级为直接退出（见 on_window_event）
+            let tray_result = TrayIconBuilder::with_id("main-tray")
+                .icon(app.default_window_icon().unwrap().clone())
+                .tooltip("Tiger")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "show" => {
+                        show_main_window(app);
+                    }
+                    "quit" => {
+                        cleanup_processes(app);
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    // Windows 上单击会触发两次 Click（Down + Up），
+                    // 仅在鼠标释放（Up）时处理，避免 show→hide 闪一下又消失
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            if window.is_minimized().unwrap_or(false) {
+                                // 最小化在任务栏：恢复显示并带到前台
+                                show_main_window(app);
+                            } else if window.is_visible().unwrap_or(false) {
+                                // 隐藏到托盘（macOS 不调 set_skip_taskbar，避免 Accessory 策略）
+                                let _ = window.hide();
+                                #[cfg(not(target_os = "macos"))]
+                                {
+                                    let _ = window.set_skip_taskbar(true);
+                                }
+                            } else {
+                                show_main_window(app);
+                            }
+                        }
+                    }
+                })
+                .build(app);
+            // 托盘是「退出」的唯一入口（托盘菜单的 quit 是全项目唯一调用 app.exit 的地方），
+            // 创建失败必须让关闭窗口的行为退化为直接退出，否则进程会留在后台且界面里无法退出
+            let tray_ok = match tray_result {
+                Ok(_) => true,
+                Err(e) => {
+                    eprintln!("[tray] 创建系统托盘失败（关闭窗口将直接退出）: {}", e);
+                    false
+                }
+            };
+            app.state::<AppState>()
+                .tray_available
+                .store(tray_ok, std::sync::atomic::Ordering::Relaxed);
+
+            // iLink 微信 Bot：已绑定且启用时自动恢复桥接（内部等待 admAgent 就绪）
+            ilink::auto_start(app.handle().clone());
+
+            // macOS：清理旧版「运行时下载」模式遗留在 app_data_dir 的 admAgent（新版用安装包内置 sidecar）
+            #[cfg(target_os = "macos")]
+            agent::cleanup_legacy_adm_agent(app.handle());
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                #[cfg(target_os = "macos")]
+                {
+                    let _api = api; // 标记为未用
+                    // macOS：点击关闭一律退出，不最小化到托盘
+                    // 注意：不需要 api.prevent_close()，正常退出即可
+                    cleanup_processes(window.app_handle());
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    // Windows/Linux：托盘可用时拦截关闭、隐藏到托盘（模型继续运行）；
+                    // 托盘不可用时隐藏等于把应用藏进后台且无处退出，只能走正常退出流程
+                    let tray_ok = window
+                        .app_handle()
+                        .state::<AppState>()
+                        .tray_available
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if tray_ok {
+                        api.prevent_close();
+                        let _ = window.hide();
+                        let _ = window.set_skip_taskbar(true);
+                    } else {
+                        cleanup_processes(window.app_handle());
+                        window.app_handle().exit(0);
+                    }
+                }
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            // index.rs
+            index::get_system_info,
+            index::check_update,
+            index::download_app_update,
+            index::install_app_update,
+            // settings.rs
+            settings::save_settings,
+            settings::load_settings,
+            settings::get_app_version,
+            settings::get_tauri_version,
+            settings::get_server_connection,
+            settings::set_server_connection,
+            settings::prepare_device_identity,
+            settings::test_server_connection,
+            // agent.rs - server mode
+            agent::get_platform_os,
+            agent::get_platform_arch,
+            agent::check_adm_agent,
+            agent::get_adm_agent_version,
+            agent::get_agent_workdir,
+            agent::set_agent_workdir,
+            agent::pick_workdir_folder,
+            agent::get_workdirs,
+            agent::add_workdir,
+            agent::remove_workdir,
+            agent::set_default_workdir,
+            agent::validate_workdirs,
+            agent::add_cloud_provider,
+            agent::list_cloud_providers,
+            agent::update_cloud_provider,
+            agent::delete_cloud_provider,
+            agent::probe_models_endpoint,
+            agent::list_mcp_servers,
+            agent::add_mcp_server,
+            agent::update_mcp_server,
+            agent::delete_mcp_server,
+            agent::start_agent_server,
+            agent::stop_agent_server,
+            agent::get_agent_server_status,
+            agent::agent_http_request,
+            agent::agent_subscribe_events,
+            agent::create_workspace,
+            agent::switch_workspace,
+            agent::agent_debug_log,
+            agent::set_debug_logging,
+            agent::open_debug_log_dir,
+            agent::read_attachment_file,
+            agent::is_directory,
+            agent::check_git_repo,
+            agent::save_attachment_file,
+            agent::read_clipboard_files,
+            agent::clipboard_read_text,
+            agent::clipboard_write_text,
+            agent::agent_lsp_fix,
+            agent::agent_lsp_fix_targets,
+            agent::read_project_memory,
+            agent::update_project_memory,
+            // ilink.rs - 微信 Bot 桥接
+            ilink::start_ilink_login,
+            ilink::cancel_ilink_login,
+            ilink::submit_ilink_verify_code,
+            ilink::get_ilink_status,
+            ilink::start_ilink_bridge,
+            ilink::stop_ilink_bridge,
+            ilink::unbind_ilink,
+            ilink::set_ilink_follow,
+            ilink::set_ilink_current_session,
+            // skills.rs - 技能管理
+            skills::fetch_skill_store,
+            skills::install_skill,
+            skills::install_skill_from_zip,
+            skills::uninstall_skill,
+            skills::list_installed_skills,
+        ])
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    // macOS：Cmd+Q / Dock 菜单退出走 RunEvent::ExitRequested（不是 CloseRequested），
+    // 只有在这里才能统一拦截清理子进程，否则 admAgent 残留为孤儿（端口被占用、
+    // 下次启动服务报"端口占用"）。cleanup_processes 幂等，重复调用安全。
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { .. } = event {
+            cleanup_processes(app_handle);
+        }
+    });
+}

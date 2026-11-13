@@ -1,0 +1,309 @@
+// 纯工具函数（无共享状态依赖）
+
+// 按 id 获取表单元素（input/textarea/select 通用，供 checkJs 类型收窄；运行时等价 getElementById）
+/** @param {string} id @returns {HTMLInputElement} */
+export function $input(id) {
+  return /** @type {HTMLInputElement} */ (document.getElementById(id));
+}
+
+// 推理强度归一化：仅接受 low/medium/high，历史版本存过 ""（默认）和 "auto"，统一迁移为 medium
+/** @param {string|undefined|null} v @returns {string} */
+export function normalizeReasoningEffort(v) {
+  return v === "low" || v === "medium" || v === "high" ? v : "medium";
+}
+
+// 推理强度下拉的「关闭」档：思考开关与推理强度合并成单个控件后，用它表示不启用模型思考
+var REASONING_OFF = "off";
+
+/**
+ * 设置状态 → 下拉选中值：thinking_enabled=false 即「关闭」；其余归一化为 low/medium/high
+ * （历史配置里的 "" 与 "auto" 一并回落到 medium）。
+ * @param {boolean|undefined} enabled @param {string|undefined|null} effort @returns {string}
+ */
+export function reasoningSettingValue(enabled, effort) {
+  return enabled === false ? REASONING_OFF : normalizeReasoningEffort(effort);
+}
+
+/**
+ * 下拉选中值 → 设置状态：选「关闭」只翻 thinking_enabled 并保留原档位，
+ * 这样从「关闭」切回来能恢复用户原来的强度。
+ */
+/** @param {string} value @param {string|undefined|null} currentEffort @returns {{enabled: boolean, effort: string}} */
+export function applyReasoningSetting(value, currentEffort) {
+  if (value === REASONING_OFF) {
+    return { enabled: false, effort: normalizeReasoningEffort(currentEffort) };
+  }
+  return { enabled: true, effort: normalizeReasoningEffort(value) };
+}
+
+export function getRequestReasoningEffort(enabled, effort) {
+  return enabled === false ? "none" : normalizeReasoningEffort(effort);
+}
+
+// 生成 UUID (兼容性方案)
+export function generateUUID() {
+  var d = Date.now();
+  var d2 = (typeof performance !== "undefined" && performance.now && (performance.now() * 1000)) || 0;
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function(c) {
+    var r = Math.random() * 16;
+    if (d > 0) {
+      r = (d + r) % 16 | 0;
+      d = Math.floor(d / 16);
+    } else {
+      r = (d2 + r) % 16 | 0;
+      d2 = Math.floor(d2 / 16);
+    }
+    return (c === "x" ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
+
+// 消息区是否已滚到底部（4px 容差，避免亚像素/缩放导致判定不中）
+export function isMsgAreaAtBottom(area) {
+  return area.scrollHeight - area.scrollTop - area.clientHeight <= 4;
+}
+
+// 消息区“完全滚到底部”：area 在底部，且所有展开的轮容器（.msg-round，
+// 内部独立滚动）也在底部。轮内向上滑动 area 的 scrollTop 不变，仅靠
+// isMsgAreaAtBottom 会误判为“已到底”，导致回到底部圆球不显示、自动跟随误判。
+// rounds 可选：调用方刚扫描过展开轮列表时透传，避免同一渲染流程内重复全量 query。
+export function isFullyAtBottom(area, rounds) {
+  if (area.scrollHeight - area.scrollTop - area.clientHeight > 4) return false;
+  var list = rounds || area.querySelectorAll(".msg-round:not(.msg-round-collapsed)");
+  for (var i = 0; i < list.length; i++) {
+    var r = list[i];
+    if (r.scrollHeight - r.scrollTop - r.clientHeight > 4) return false;
+  }
+  return true;
+}
+
+// 从 parts 中提取文本内容（用于临时消息匹配）
+export function getTextFromParts(parts) {
+  if (!parts || !Array.isArray(parts)) return "";
+  var textParts = parts.filter(function(p) { return p.type === "text"; });
+  return textParts.map(function(p) { return (p.data && p.data.text) || ""; }).join("");
+}
+
+// 从用户消息文本中提取 <system_info> 附件引导块（服务端注入的附件读取引导）。
+// 返回 { text: 去除引导块后的正文（首尾空白已清理）, hints: 各引导块全文, names: 解析出的附件文件名 }；
+// 无引导块时返回 null。正则要求引导块闭合，避免误伤正文中零散的 "<system_info>" 字样。
+export function splitSystemInfo(text) {
+  if (!text || text.indexOf("<system_info>") === -1) return null;
+  var hints = [];
+  var rest = text.replace(/<system_info>([\s\S]*?)<\/system_info>/g, function(_, inner) {
+    if (inner != null) hints.push(inner);
+    return "";
+  });
+  if (hints.length === 0) return null;
+  var names = [];
+  hints.forEach(function(h) {
+    var re = /附件 '([^']+)'/g;
+    var m;
+    while ((m = re.exec(h))) names.push(m[1]);
+  });
+  return { text: rest.trim(), hints: hints, names: names };
+}
+
+// 去除文本中的 <system_info> 引导块（用于临时消息与服务端消息的内容匹配）
+export function stripSystemInfoText(text) {
+  var info = splitSystemInfo(text);
+  return info ? info.text : text;
+}
+
+// 与 src-tauri agent.rs 的 slugify_model_id 保持一致：转小写，
+// 空格/下划线/连字符→'-'，保留点号，其它字符忽略，去尾部 '-'/'.'
+export function slugifyModelId(name) {
+  var out = "";
+  var prevDash = false;
+  for (var i = 0; i < name.length; i++) {
+    var c = name[i];
+    if (/[a-zA-Z0-9.]/.test(c)) {
+      out += c.toLowerCase();
+      prevDash = false;
+    } else if (/[\s\-_]/.test(c)) {
+      if (out && !prevDash) { out += "-"; prevDash = true; }
+    }
+  }
+  out = out.replace(/[-.]+$/, "");
+  return out || "model";
+}
+
+// 与 src-tauri agent.rs 的 slugify_provider_key 保持一致：只保留 ASCII 字母数字并转小写。
+// providers 的 JSON 键由「模型名称」派生（添加时计算一次，之后改名不变），因此两个
+// slug 后相同的名称会指向同一个键、互相覆盖。
+export function slugifyProviderKey(name) {
+  var out = String(name || "").replace(/[^0-9a-zA-Z]/g, "").toLowerCase();
+  return out || "cloud";
+}
+
+export function formatTokens(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
+  if (n >= 1000) return (n / 1000).toFixed(1) + "K";
+  return String(n || 0);
+}
+
+export function parseContextSize(s) {
+  s = s.trim().toUpperCase();
+  if (!s) return 0;
+  if (s.endsWith("M")) return Math.round(parseFloat(s) * 1000000);
+  if (s.endsWith("K")) return Math.round(parseFloat(s) * 1000);
+  return parseInt(s) || 0;
+}
+
+// ===== 辅助函数 =====
+export function escapeHtml(s) {
+  if (!s) return "";
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+export function formatTime(t) {
+  if (!t) return "";
+  try {
+    // t 可能是 Unix 时间戳（数字/数字字符串）或 ISO 字符串
+    var d;
+    if (typeof t === "number" || /^\d+$/.test(t)) {
+      d = new Date(parseInt(t, 10) * 1000);
+    } else {
+      d = new Date(t);
+    }
+    if (isNaN(d.getTime())) return "";
+    return d.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  } catch (_) { return ""; }
+}
+
+export function autoResize(textarea) {
+  textarea.style.height = "auto";
+  textarea.style.height = Math.min(textarea.scrollHeight, 200) + "px";
+}
+
+export function generateRunId() {
+  return "run-" + Date.now() + "-" + Math.random().toString(36).substr(2, 9);
+}
+
+// ===== Markdown 简易渲染 =====
+// 渲染结果按原文缓存：同一文本在流式节流、消息节点重建等场景会重复渲染。
+// Map 保持插入序，超限淘汰最早的；超长文本不缓存，避免大字符串常驻内存。
+var MD_CACHE_MAX_ENTRIES = 100;
+var MD_CACHE_MAX_TEXT = 20000;
+var mdCache = new Map();
+export function renderMarkdown(text) {
+  if (!text) return "";
+  if (text.length > MD_CACHE_MAX_TEXT) return renderMarkdownUncached(text);
+  var hit = mdCache.get(text);
+  if (hit !== undefined) return hit;
+  var html = renderMarkdownUncached(text);
+  mdCache.set(text, html);
+  if (mdCache.size > MD_CACHE_MAX_ENTRIES) {
+    mdCache.delete(mdCache.keys().next().value);
+  }
+  return html;
+}
+
+function renderMarkdownUncached(text) {
+  // 简易 Markdown 渲染：代码块、行内代码、粗体、斜体、标题、列表、链接
+  var html = escapeHtml(text);
+
+  // 代码块 ```language\ncode```
+  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, function(_, lang, code) {
+    return '<pre style="background:var(--c-bg-deep);border:1px solid var(--c-border);border-radius:6px;padding:10px;margin:8px 0;overflow-x:auto;font-size:12px;"><code>' + code.trim() + "</code></pre>";
+  });
+
+  // 行内代码 `code`
+  html = html.replace(/`([^`]+)`/g, '<code style="background:var(--c-bg-deep);padding:2px 6px;border-radius:3px;font-size:12px;">$1</code>');
+
+  // 标题 ### / ## / #
+  html = html.replace(/^### (.+)$/gm, '<h3 style="margin:12px 0 6px;font-size:15px;">$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2 style="margin:14px 0 8px;font-size:17px;">$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1 style="margin:16px 0 10px;font-size:19px;">$1</h1>');
+
+  // 粗体 **text**
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+
+  // 斜体 *text*
+  html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+
+  // 列表项
+  html = html.replace(/^- (.+)$/gm, '<li style="margin-left:16px;">$1</li>');
+
+  // 链接 [text](url)：仅放行 http(s)，阻断 javascript:/data: 等危险协议
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_, text, url) {
+    var safe = /^https?:\/\//i.test(url.trim()) ? url : "#";
+    return '<a href="' + safe + '" style="color:var(--c-accent);text-decoration:none;" target="_blank">' + text + '</a>';
+  });
+
+  // GFM 表格：表头行 + 分隔行（|---|）+ 数据行 → <table>（放在换行转换之前，
+  // 单元格内文本此时已含 strong/em/code/a 等行内 HTML；跳过 <pre> 代码块内的 | 行）
+  html = renderTable(html);
+
+  // 换行
+  html = html.replace(/\n/g, "<br>");
+
+  return html;
+}
+
+// 表格单元格拆分：剥掉首尾管道后按 | 切分，逐格去除两侧空白；
+// \| 为转义管道（如命令 a|b 或正则），切分前占位保护、切分后还原为字面 |
+/** @param {string} row @returns {string[]} */
+function tableCells(row) {
+  var r = row.trim();
+  if (r.charAt(0) === "|") r = r.slice(1);
+  if (r.charAt(r.length - 1) === "|") r = r.slice(0, -1);
+  r = r.replace(/\\\|/g, "\u0000");
+  return r.split("|").map(function(x) { return x.trim().replace(/\u0000/g, "|"); });
+}
+
+// 分隔行判定：只含 | - : 空白，且至少一个 -
+/** @param {string} line @returns {boolean} */
+function isTableSeparator(line) {
+  if (!/^\s*\|/.test(line) && !/\|\s*$/.test(line)) return false;
+  var body = line.replace(/^\s*\|?/, "").replace(/\|?\s*$/, "");
+  return body.indexOf("-") !== -1 && /^[\s:|-]*$/.test(body);
+}
+
+// 行内 HTML 转义后的文本里，分隔单元格中可能残留 | 等字符，需按原样拼接；
+// 对齐：分隔单元格首/尾 : 决定该列 left/center/right
+/** @param {string} html @returns {string} */
+function renderTable(html) {
+  var lines = html.split("\n");
+  var out = [];
+  var inCode = false; // <pre> 内不解析表格
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    if (/<pre/.test(line)) inCode = true;
+    if (inCode) {
+      out.push(line);
+      if (/<\/pre>/.test(line)) inCode = false;
+      continue;
+    }
+    if (i + 1 < lines.length && /^\s*\|/.test(line) && isTableSeparator(lines[i + 1])) {
+      var rows = [line];
+      var j = i + 2;
+      while (j < lines.length && /^\s*\|/.test(lines[j])) { rows.push(lines[j]); j++; }
+      var sepCells = tableCells(lines[i + 1]);
+      var head = tableCells(rows[0]);
+      var body = rows.slice(1);
+      var t = '<div class="agent-tbl-wrap"><table class="agent-tbl"><thead><tr>' +
+        head.map(function(c, idx) {
+          var al = sepCells[idx] || "";
+          var st = al.charAt(0) === ":" ? (al.charAt(al.length - 1) === ":" ? ' style="text-align:center;"' : ' style="text-align:left;"') : (al.charAt(al.length - 1) === ":" ? ' style="text-align:right;"' : "");
+          return "<th" + st + ">" + c + "</th>";
+        }).join("") + "</tr></thead>";
+      if (body.length) {
+        t += "<tbody>";
+        body.forEach(function(r) {
+          t += "<tr>" + tableCells(r).map(function(c, idx) {
+            var al = sepCells[idx] || "";
+            var st = al.charAt(0) === ":" ? (al.charAt(al.length - 1) === ":" ? ' style="text-align:center;"' : "") : (al.charAt(al.length - 1) === ":" ? ' style="text-align:right;"' : "");
+            return "<td" + st + ">" + c + "</td>";
+          }).join("") + "</tr>";
+        });
+        t += "</tbody>";
+      }
+      t += "</table></div>";
+      out.push(t);
+      i = j - 1; // 跳过已消费的表格行
+    } else {
+      out.push(line);
+    }
+  }
+  return out.join("\n");
+}

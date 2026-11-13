@@ -1,0 +1,29 @@
+{
+  "name": "Tiger",
+  "private": true,
+  "version": "0.1.2",
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "typecheck": "tsc -p jsconfig.json",
+    "agent:push": "node scripts/push-agent-binaries.mjs",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "tauri:build:windows": "tauri build --target x86_64-pc-windows-msvc --bundles nsis",
+    "tauri:build:linux": "tauri build --target x86_64-unknown-linux-gnu --bundles deb,appimage",
+    "tauri:build:macos": "tauri build --target aarch64-apple-darwin --bundles dmg",
+    "sign:macos": "bash scripts/sign-macos.sh",
+    "sign:windows": "powershell -ExecutionPolicy Bypass -File scripts/sign-windows.ps1",
+    "release:macos": "pnpm tauri:build:macos && pnpm sign:macos",
+    "release:windows": "pnpm tauri:build:windows && pnpm sign:windows",
+    "fix:macos": "bash scripts/fix-macos-damaged.sh"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "tauri-plugin-hwinfo": "^0.2.3"
+  },
+  "packageManager": "pnpm@9.15.9+sha512.68046141893c66fad01c079231128e9afb89ef87e2691d69e4d40eee228988295fd4682181bae55b58418c3a253bde65a505ec7c5f9403ece5cc3cd37dcf2531"
+}
