@@ -1189,8 +1189,8 @@ pub struct CloudProviderView {
     pub can_reason: bool,
 }
 
-/// 列出 tigerAgent.json 中已添加的全部云端模型 Provider（排除自动管理的 `local`）。
-/// 返回每项的关键信息，供前端列表展示与编辑回填。
+/// 列出服务端设置中已添加的全部云端模型 Provider（排除自动管理的 `local`
+/// 与服务端内置的 `tigerAgent`）。返回每项的关键信息，供前端列表展示与编辑回填。
 #[tauri::command]
 pub async fn list_cloud_providers(
     _app: tauri::AppHandle,
@@ -1212,6 +1212,12 @@ fn cloud_providers_from_settings(view: &serde_json::Value) -> Vec<CloudProviderV
         };
         // 跳过自动生成的本地 provider（非用户添加）
         if key == "local" {
+            continue;
+        }
+        // 跳过服务端内置 provider（tigerAgent/agent-models）：没有 base_url/api_key，
+        // 由服务端后端池提供，只需经 /providers 快照进入模型下拉供选择，
+        // 不属于用户可编辑/删除的云端模型列表（误列会让发送前的 Base URL 校验误报）
+        if key == BUILTIN_VISION_PROVIDER {
             continue;
         }
         let name = provider
@@ -3755,5 +3761,44 @@ mod sse_sub_agent_filter_tests {
     fn events_without_session_id_forwarded() {
         assert!(!is_sub_agent_event(&serde_json::json!({ "type": "config_changed" })));
         assert!(!is_sub_agent_event(&serde_json::json!({ "raw": "not-json" })));
+    }
+}
+
+#[cfg(test)]
+mod cloud_provider_view_tests {
+    use super::*;
+
+    /// 服务端 /v1/settings 会把代码内置 provider（tigerAgent/agent-models）一并列出，
+    /// 但它没有 base_url/api_key、不可编辑删除：设置列表只能出现用户添加的云端模型。
+    #[test]
+    fn builtin_and_local_providers_are_not_user_manageable() {
+        let view = serde_json::json!({
+            "providers": [
+                {
+                    "key": "tigerAgent",
+                    "name": "tigerAgent",
+                    "models": [{ "id": "agent-models", "context_window": 200000 }]
+                },
+                {
+                    "key": "local",
+                    "name": "Local",
+                    "models": [{ "id": "localModel" }]
+                },
+                {
+                    "key": "mycloud",
+                    "name": "My Cloud",
+                    "base_url": "https://example.invalid/v1",
+                    "has_key": true,
+                    "models": [{ "id": "m1", "context_window": 128000, "supports_images": true }]
+                }
+            ]
+        });
+
+        let list = cloud_providers_from_settings(&view);
+        assert_eq!(list.len(), 1, "内置/本地 provider 不得进入可管理列表");
+        assert_eq!(list[0].key, "mycloud");
+        assert_eq!(list[0].model_id, "m1");
+        assert!(list[0].has_key);
+        assert!(list[0].supports_images);
     }
 }
