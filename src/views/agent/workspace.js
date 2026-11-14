@@ -4,7 +4,7 @@ import { S, invoke, store } from "./store.js";
 import { api } from "./api.js";
 import { updateContextUsage, exitManualScrollMode, clearErrorNotices, reportError, clearSendSafetyTimer, updateStatusBar, updateSendButton, showConfirm, showNotice, showWarning } from "./ui.js";
 import { getErrorMessage } from "./error.js";
-import { $input } from "./utils.js";
+import { $input, modelContextWindow } from "./utils.js";
 import { log } from "./log.js";
 import { renderMessages, renderTodos } from "./render.js";
 import { loadConversations, renderConversationList } from "./session.js";
@@ -99,8 +99,9 @@ export async function switchToWorkspace(wsId, wsPath) {
     try {
       var info = await api("GET", "/v1/workspaces/" + wsId + "/agent");
       store.setAgentInfo(wsId, info);
-      if (info && info.model && info.model.context_window) {
-        store.setContextUsage(wsId, S.contextUsage.used, info.model.context_window, S.contextUsage.estimated);
+      var ctxLen = modelContextWindow(info && info.model);
+      if (ctxLen) {
+        store.setContextUsage(wsId, S.contextUsage.used, ctxLen, S.contextUsage.estimated);
       }
     } catch (_) {}
     // SSE 监听是全局的（后端为每个 workspace 独立转发），不需要重新订阅

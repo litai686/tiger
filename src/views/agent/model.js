@@ -2,7 +2,7 @@
 import { t as _t } from "../../i18n.js";
 import { S, invoke, store } from "./store.js";
 import { api } from "./api.js";
-import { escapeHtml, formatTokens, slugifyModelId, getRequestReasoningEffort, normalizeReasoningEffort } from "./utils.js";
+import { escapeHtml, formatTokens, slugifyModelId, getRequestReasoningEffort, normalizeReasoningEffort, modelContextWindow } from "./utils.js";
 import { reportError, updateContextUsage } from "./ui.js";
 import { log } from "./log.js";
 
@@ -87,8 +87,9 @@ export async function refreshAgentInfo() {
     var info = await api("GET", "/v1/workspaces/" + S.serverInfo.workspace_id + "/agent");
     if (seq !== S.agentInfoSeq) return null; // 已有更新的请求，丢弃旧响应
     store.setAgentInfo(S.serverInfo.workspace_id, info);
-    if (info && info.model && info.model.context_window) {
-      store.setContextUsage(S.serverInfo.workspace_id, S.contextUsage.used, info.model.context_window, S.contextUsage.estimated);
+    var ctxLen = modelContextWindow(info && info.model);
+    if (ctxLen) {
+      store.setContextUsage(S.serverInfo.workspace_id, S.contextUsage.used, ctxLen, S.contextUsage.estimated);
       updateContextUsage();
     }
     updateModelBtn();
@@ -153,7 +154,8 @@ async function cleanupDuplicatedProviderModels(list) {
 }
 
 // 把前端 providerKey（"local" / "local:xxx" / "provider/model" / 云端 provider key）解析成
-// Agent /config/model 接口需要的 { provider, model }
+// Agent /config/model 接口需要的 { provider, model }；额外带上当前模型的上下文窗口
+// context_window，供 switchModel 在服务端确认前立即刷新 toolbar 的用量显示。
 export function resolveAgentModel(providerKey) {
   if (providerKey === "local" || providerKey.startsWith("local:")) {
     // 本地模型统一走 tigerAgent.json 里自动维护的 local provider（唯一 model id 为 localModel）
@@ -162,12 +164,32 @@ export function resolveAgentModel(providerKey) {
   // "provider/model" 复合 key（服务端 provider 列表条目，含内置模型）
   var slash = providerKey.indexOf("/");
   if (slash > 0) {
-    return { provider: providerKey.slice(0, slash), model: providerKey.slice(slash + 1) };
+    var providerId = providerKey.slice(0, slash);
+    var modelId = providerKey.slice(slash + 1);
+    return { provider: providerId, model: modelId, context_window: findModelContextWindow(providerId, modelId) };
   }
   var p = S.providers.find(function(x) { return x.key === providerKey; });
-  if (p && p.model_id) return { provider: providerKey, model: p.model_id };
+  if (p && p.model_id) return { provider: providerKey, model: p.model_id, context_window: modelContextWindow(p) };
   // 回退：与后端 slugify_model_id 一致的派生规则
-  return { provider: providerKey, model: slugifyModelId(p ? p.name : providerKey) };
+  return { provider: providerKey, model: slugifyModelId(p ? p.name : providerKey), context_window: modelContextWindow(p) };
+}
+
+// 在 /providers 快照（新键 ctx_size）与磁盘 provider 列表（旧键 context_window）中
+// 反查某个 provider/model 的上下文窗口，查不到返回 0（切换模型时的即时显示兜底，
+// 随后 refreshAgentInfo 会用服务端确认值覆盖）。
+function findModelContextWindow(providerId, modelId) {
+  var list = Array.isArray(S.serverProviders) ? S.serverProviders : [];
+  for (var i = 0; i < list.length; i++) {
+    var sp = list[i];
+    if (!sp || sp.id !== providerId) continue;
+    var models = Array.isArray(sp.models) ? sp.models : [];
+    for (var j = 0; j < models.length; j++) {
+      if (models[j] && models[j].id === modelId) return modelContextWindow(models[j]);
+    }
+  }
+  var p = S.providers.find(function(x) { return x.key === providerId; });
+  if (p && (!p.model_id || p.model_id === modelId)) return modelContextWindow(p);
+  return 0;
 }
 
 // 取第一个可用云端模型（provider/model 复合 key），无可用项时返回空串。
@@ -180,7 +202,7 @@ export function firstCloudModelKey() {
     var models = Array.isArray(sp.models) ? sp.models : [];
     for (var j = 0; j < models.length; j++) {
       var m = models[j];
-      if (m && m.id) return { key: sp.id + "/" + m.id, name: m.name || m.id, context_window: m.context_window || 0 };
+      if (m && m.id) return { key: sp.id + "/" + m.id, name: m.name || m.id, context_window: modelContextWindow(m) };
     }
   }
   return null;
@@ -236,7 +258,7 @@ export function updateModelDropdown() {
           key: key,
           providerId: sp.id,
           name: m.name || m.id,
-          context_window: m.context_window || 0,
+          context_window: modelContextWindow(m),
           supports_images: m.supports_images === true,
         });
       });
@@ -250,7 +272,7 @@ export function updateModelDropdown() {
       // 磁盘配置下 model_id 取的是 providers.<key>.models[0]（见 list_cloud_providers），
       // 离线态只能启动该模型，故命中即隐藏整个 provider 行；快照路径按单模型粒度过滤。
       if (isHiddenBuiltinModel(p.key, p.model_id || "", p.name || "")) return;
-      cloudEntries.push({ key: p.key, providerId: p.key, name: p.name, context_window: p.context_window || 0, supports_images: p.supports_images === true });
+      cloudEntries.push({ key: p.key, providerId: p.key, name: p.name, context_window: modelContextWindow(p), supports_images: p.supports_images === true });
     });
   }
 

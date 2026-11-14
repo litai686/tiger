@@ -6,7 +6,7 @@ import { template } from "./agent/template.js";
 import { S, invoke, listen, store } from "./agent/store.js";
 import { log, setLogEnabled } from "./agent/log.js";
 import { api } from "./agent/api.js";
-import { generateUUID, isFullyAtBottom, autoResize, $input, applyReasoningSetting } from "./agent/utils.js";
+import { generateUUID, isFullyAtBottom, autoResize, $input, applyReasoningSetting, modelContextWindow } from "./agent/utils.js";
 import { updateStatusBar, updateContextUsage, updateSendButton, exitManualScrollMode, startSendSafetyTimer, clearSendSafetyTimer, showError, showWarning, showInfo, showCopyPasteMenu, updateScrollBottomBtn, reportError, showInitProgress, hideInitProgress } from "./agent/ui.js";
 import { loadConversations, selectConversation, newConversation, clearAllConversations, toggleOutlinePanel, setOutlinePanelOpen, renderConversationList } from "./agent/session.js";
 import { syncWorkingIndicator, onAreaScroll, scrollChatToBottom, beginSelectGuard, endSelectGuard, resetSelectGuard } from "./agent/render.js";
@@ -158,8 +158,9 @@ async function _doInit(seq) {
     try {
       var info = await api("GET", "/v1/workspaces/" + S.serverInfo.workspace_id + "/agent");
       store.setAgentInfo(S.serverInfo.workspace_id, info);
-      if (info && info.model && info.model.context_window) {
-        store.setContextUsage(S.serverInfo.workspace_id, S.contextUsage.used, info.model.context_window, S.contextUsage.estimated);
+      var ctxLen = modelContextWindow(info && info.model);
+      if (ctxLen) {
+        store.setContextUsage(S.serverInfo.workspace_id, S.contextUsage.used, ctxLen, S.contextUsage.estimated);
       }
       updateContextUsage();
     } catch (e) {

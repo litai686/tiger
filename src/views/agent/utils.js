@@ -141,6 +141,16 @@ export function formatTokens(n) {
   return String(n || 0);
 }
 
+// 读模型上下文窗口：服务端 ModelInfo 用新键 ctx_size（见 internal/config/modelinfo.go），
+// 旧键 context_window 仅作兜底（旧服务端 / 桌面端写盘的 tigerAgent.json 仍可能只有旧键）。
+// 内置 provider tigerAgent/agent-models 是服务端内存注入的，只有新键，漏掉这个兜底会让
+// 上下文显示停在 0/0。
+/** @param {any} m @returns {number} */
+export function modelContextWindow(m) {
+  if (!m) return 0;
+  return m.ctx_size || m.context_window || 0;
+}
+
 export function parseContextSize(s) {
   s = s.trim().toUpperCase();
   if (!s) return 0;

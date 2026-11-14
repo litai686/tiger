@@ -644,6 +644,8 @@ GET /v1/workspaces/{id}/providers
 
 列出工作区可用的模型提供商列表。
 
+`models[]` 为 ModelInfo 结构：上下文窗口字段是 `ctx_size`（旧键 `context_window` 只在读取 tigerAgent.json 时作为别名接受，不会出现在响应里；服务端内存注入的内置 provider `tigerAgent/agent-models` 尤其只有 `ctx_size`）。客户端读窗口时必须新键优先、旧键兜底。
+
 **响应** `200 OK`：Provider 信息对象
 
 ---
@@ -920,7 +922,7 @@ GET /v1/workspaces/{id}/agent
   "model": {
     "id": "gpt-4o",
     "name": "GPT-4o",
-    "context_window": 128000,
+    "ctx_size": 128000,
     "supports_images": true,
     "can_reason": false
   },
@@ -2176,9 +2178,9 @@ interface AgentInfo {
 interface ModelInfo {
   id: string;
   name?: string;
-  context_window?: number;
-  default_max_tokens?: number;
-  max_output_tokens?: number;
+  ctx_size?: number;                 // 上下文窗口；旧键 context_window 仅为配置输入别名
+  output_tokens?: number;            // 旧键 default_max_tokens（配置别名）
+  provider_max_output_tokens?: number; // 旧键 max_output_tokens（配置别名）
   default_reasoning_effort?: string;
   reasoning_levels?: string[];
   supports_images?: boolean;
