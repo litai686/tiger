@@ -1,16 +1,18 @@
-# 决策模式上移到服务端（admAgent）方案
+# 决策模式上移到服务端（Agent）方案
+
+> 后续变更：决策协议标签已统一为 `agent_decision_*`（`<agent_decision_result>`），内置显示模型为 `tigerAgent/agent-models`；实现以 [`server-api.md`](server-api.md) 与代码为准。
 
 > 状态：**P0–P3 已实施**（服务端旁路决策轮 + 客户端传 `decision` 字段 + 专用 `decision` part + `json_schema` 强制）
-> 实施范围：admAgent（`internal/decision`、`internal/agent/decision_turn.go`、`internal/message` 新 part、`internal/llm` response_format）+ 桌面端（`src/views/agent/send.js`、`decision_mode.js`、`render.js`）+ 文档；TUI 不感知（opt-in）
+> 实施范围：Agent（`internal/decision`、`internal/agent/decision_turn.go`、`internal/message` 新 part、`internal/llm` response_format）+ 桌面端（`src/views/agent/send.js`、`decision_mode.js`、`render.js`）+ 文档；TUI 不感知（opt-in）
 > 关联文档：`doc/agent-decision-output-plan.md`（前端注入式 MVP，已由本方案取代）、`doc/server-api.md`（`decision` 请求字段）
 
 ## 0. 实施现状（本轮已落地）
 
 | 计划项 | 状态 | 落点 |
 |---|---|---|
-| P0 旁路决策轮 | ✅ | 新文件 `admAgent/internal/agent/decision_turn.go`（单次请求 + 校验 + 一次定向重试）；分派点 `internal/agent/agent.go:1090`（`call.Decision != nil`，4 行）；主循环 `agent_loop_llm.go` **零改动** |
+| P0 旁路决策轮 | ✅ | 新文件 `Agent/internal/agent/decision_turn.go`（单次请求 + 校验 + 一次定向重试）；分派点 `internal/agent/agent.go:1090`（`call.Decision != nil`，4 行）；主循环 `agent_loop_llm.go` **零改动** |
 | P0 请求字段 | ✅ | `internal/proto/proto.go`（`DecisionSpec` + `AgentMessage.Decision`）、`internal/agent/agent.go`（`SessionAgentCall.Decision` + `ValidateCall` 校验）、`internal/backend/agent.go`（API 边界同步 400 + context 下传）、`internal/agent/decision_ctx.go`（spec 传递，Run/RunAccepted 签名不变） |
-| P1 服务端输出契约 | ✅ | 新包 `admAgent/internal/decision`（`Spec`/`Validate`/`SystemPrompt`/`Parse`/`RetryPrompt`）：契约拼进**本轮系统提示词**（`agent.go` 的 `systemPrompt` 局部追加，不改共享值），不再进用户消息 |
+| P1 服务端输出契约 | ✅ | 新包 `Agent/internal/decision`（`Spec`/`Validate`/`SystemPrompt`/`Parse`/`RetryPrompt`）：契约拼进**本轮系统提示词**（`agent.go` 的 `systemPrompt` 局部追加，不改共享值），不再进用户消息 |
 | P1 结果校验与失败报错 | ✅ | 校验失败 → 一次定向重试（带上具体违规原因 + 模型上次原文，wire-only 不落库）；两次仍失败 → 本轮以 `invalid decision output after 2 attempts: …` 结束，`run_complete.error` 带出 |
 | P1 桌面端切换 | ✅ | `send.js` 不再拼控制块，改为请求体带 `decision` 字段；`decision_mode.js` 的 `buildDecisionConstraint` 换成 `decisionRequestPayload` |
 | P1 折叠插入例外 | ✅ | 决策模式强制走排队（不折叠进运行中的普通轮）：`send.js` 的 `foldIn` 只对 `text` 模式成立 |
@@ -23,23 +25,23 @@
 | P3 服务端强制关思考 | ✅ | 决策轮在 `decision_turn.go` 固定 `reasoning_effort: none`（不再读 model 配置里的 thinking 开关，也不带 `Thinking` 对象）；provider 把两种写法都拒时（`llm.ThinkingModeUnsupported`）去掉参数重试同一请求，契约提示词仍约束只输出一个 JSON 块；桌面端据此移除了「决策模式 ↔ 推理强度」的全局联动（设置面板已把思考开关与推理强度合并为单个下拉），用户切换会话/模式不再改写全局设置 |
 
 > ⚠️ **新增 part 类型必须同时登记四处**（漏一处会表现成"服务端成功、前端拿不到 part"→ 误报"未返回有效决策结果"）：
-> ① `internal/message`（存储层 `partType`/`isPart`）；② `internal/proto/message.go`（wire 白名单：`partType` 常量 + `MarshalParts`/`UnmarshalParts`）；③ `internal/server/events.go` 的 `messageToProto`（message → wire 转换，SSE 事件与 `/messages` 三个端点共用）；④ `internal/workspace/client_workspace.go` 的 `protoToMessage`（客户端模式 proto→message，漏登记会静默丢弃，TUI 历史只剩 finish 标记）。另有 `internal/cmd/session.go` 的 `convertParts` 决定 `adm session show` 的展示（漏登记显示为 `unknown`）。回归用例：`internal/server/events_test.go` 的 `TestMessageToProtoDecision`、`internal/workspace/client_workspace_test.go` 的 `TestProtoToMessageDecision`、`internal/cmd/session_show_test.go` 的 `TestConvertPartsDecision`。
+> ① `internal/message`（存储层 `partType`/`isPart`）；② `internal/proto/message.go`（wire 白名单：`partType` 常量 + `MarshalParts`/`UnmarshalParts`）；③ `internal/server/events.go` 的 `messageToProto`（message → wire 转换，SSE 事件与 `/messages` 三个端点共用）；④ `internal/workspace/client_workspace.go` 的 `protoToMessage`（客户端模式 proto→message，漏登记会静默丢弃，TUI 历史只剩 finish 标记）。另有 `internal/cmd/session.go` 的 `convertParts` 决定 `tigerAgent session show` 的展示（漏登记显示为 `unknown`）。回归用例：`internal/server/events_test.go` 的 `TestMessageToProtoDecision`、`internal/workspace/client_workspace_test.go` 的 `TestProtoToMessageDecision`、`internal/cmd/session_show_test.go` 的 `TestConvertPartsDecision`。
 
-测试：`admAgent/internal/decision`（契约/解析/bare JSON/StripResult/JSONSchema）、`admAgent/internal/message`（decision part 序列化往返与正文剔除）、`admAgent/internal/llm`（response_format 发送 / 被拒后重试并缓存 / extra_body 覆盖 / `StructuredOutputRejection` 分类）、`admAgent/internal/agent`（决策轮 9 例：一次命中+part 落库、普通轮无契约、违规一次重试、持续违规报错、非法 spec 拒绝、structured_output=off 且 bare JSON 可解析、response_format 被拒时去参重试、强制 `reasoning_effort=none`、provider 拒思考参数时降级）；桌面端 `pnpm typecheck`。
+测试：`Agent/internal/decision`（契约/解析/bare JSON/StripResult/JSONSchema）、`Agent/internal/message`（decision part 序列化往返与正文剔除）、`Agent/internal/llm`（response_format 发送 / 被拒后重试并缓存 / extra_body 覆盖 / `StructuredOutputRejection` 分类）、`Agent/internal/agent`（决策轮 9 例：一次命中+part 落库、普通轮无契约、违规一次重试、持续违规报错、非法 spec 拒绝、structured_output=off 且 bare JSON 可解析、response_format 被拒时去参重试、强制 `reasoning_effort=none`、provider 拒思考参数时降级）；桌面端 `pnpm typecheck`。
 
 ## 1. 为什么要上移到服务端
 
 当前实现是**纯前端注入**：桌面端把 `<adm_decision_request>` + 英文契约拼进本轮 `prompt` 正文（`src/views/agent/decision_mode.js:129-152` → `src/views/agent/send.js:279-280`），再在渲染层解析模型正文里的 `<adm_decision_result>` 标签画卡片。它能跑，但根因级问题都出在"服务端不知道这是决策轮"：
 
-1. **重复输出**：服务端把"只有正文、没有工具调用"的 stop 判为叙述性停止并 nudge 重试（`admAgent/internal/agent/agent_loop_llm.go:1178-1196`，`isLikelyCodingTask(call.Prompt)` 因为契约里全是 JSON/code fence 之类关键词而误判成编码任务），模型被迫重发结果 → 同一轮出现 3 条 assistant 消息、3 份结果块。
-   实测证据（`%LOCALAPPDATA%\admAgent\cache\admAgent.log`，会话 `c161fc53-…`）：
+1. **重复输出**：服务端把"只有正文、没有工具调用"的 stop 判为叙述性停止并 nudge 重试（`Agent/internal/agent/agent_loop_llm.go:1178-1196`，`isLikelyCodingTask(call.Prompt)` 因为契约里全是 JSON/code fence 之类关键词而误判成编码任务），模型被迫重发结果 → 同一轮出现 3 条 assistant 消息、3 份结果块。
+   实测证据（`%LOCALAPPDATA%\tigerAgent\cache\Agent.log`，会话 `c161fc53-…`）：
    ```
    16:12:57 step 1: finish_reason=stop text_bytes=208 tool_calls=0 → "narrative stop without tools, retrying with nudge"
    16:13:00 step 2: stop text 179 tools 0 → 再次 nudge
    16:13:04 step 3: stop text 200 tools 0 → "repeatedly returned narrative stop, ending turn"
    ```
    会话 DB 中该轮为 1 条 user + 3 条 assistant（每条 `parts=[text,finish]`，各含一个结果块，无工具调用）。
-2. **契约文本落入用户消息**：控制块随 `prompt` 落库，导致 ① 会话自动标题被英文契约污染（服务端用首条 user 消息生成标题，`internal/agent/agent.go:941-945, 2414`）；② 共享同一会话的其它客户端（TUI、微信 Bot）会看到原始控制标签。
+2. **契约文本落入用户消息**：控制块随 `prompt` 落库，导致 ① 会话自动标题被英文契约污染（服务端用首条 user 消息生成标题，`internal/agent/agent.go:941-945, 2414`）；② 共享同一会话的其它客户端（TUI 等）会看到原始控制标签。
 3. **模型侧不可控**：`response_format`/`json_schema` 之类强制结构化输出只能由服务端发，前端拼提示词无法做到"强制"。
 4. **前端兜底很脆**：桌面端只能事后校验（`src/views/agent/sse.js:79-81` 提示"未返回有效结果"）+ 渲染层去重（`src/views/agent/render.js:257-267`、`:642-656`）；浪费的两次重复生成无法从客户端拦住。
 
@@ -105,7 +107,7 @@ if call.Decision != nil {
 - 决策结果只是建议，**不得**因此自动执行任何修改类操作；权限规则照旧。
 - 缺关键事实时仍落到最接近的类型，把缺口写进 `reason`，不得退回散文。
 
-好处：契约不再进用户消息 → 标题不再被污染、TUI/微信看不到控制块；提示词可随服务端版本演进，前端不用跟着改文案。
+好处：契约不再进用户消息 → 标题不再被污染、TUI 看不到控制块；提示词可随服务端版本演进，前端不用跟着改文案。
 
 ### 3.3 独立决策轮（旁路管线，主循环零改动）
 
@@ -208,7 +210,7 @@ if call.Decision != nil {
 ## 5. TUI / 其它客户端影响
 
 - 决策模式是**每轮 opt-in**，TUI 不传 `decision` → 行为与现在完全一致（不注入提示词、不收敛工具面、不豁免 nudge）。
-- 反向收益：桌面端决策轮的控制块不再进用户消息，TUI/微信不再看到英文契约；P2 后也不再看到裸结果 JSON。
+- 反向收益：桌面端决策轮的控制块不再进用户消息，TUI 不再看到英文契约；P2 后也不再看到裸结果 JSON。
 - 需在 `doc/server-api.md` 中标注"`decision` 仅桌面端使用，TUI 可忽略"。
 
 ## 6. 兼容与迁移

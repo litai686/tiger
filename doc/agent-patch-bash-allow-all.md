@@ -1,12 +1,12 @@
-# admAgent 改动：options.bash_allow_all —— 关闭 bash 命令黑名单
+# Agent 改动：options.bash_allow_all —— 关闭 bash 命令黑名单
 
-> 已按审核意见落盘（`admAgent/` 已有改动，6 个文件）。`go build ./...`、
+> 已按审核意见落盘（`Agent/` 已有改动，6 个文件）。`go build ./...`、
 > `go test ./internal/agent/... ./internal/config/... -count=1` 均通过。
 > 本文件保留为设计记录与 Linux 使用前置条件说明。
 
 ## 背景 / 问题
 
-桌面端「Agent 设置 → 开启所有工具调用」会往 `admAgent.json` 写：
+桌面端「Agent 设置 → 开启所有工具调用」会往 `tigerAgent.json` 写：
 
 ```json
 { "options": { "bash_allow_all": true } }
@@ -15,7 +15,7 @@
 并依次 POST `/v1/workspaces/{id}/config/set`（磁盘全量重载）与 `/v1/workspaces/{id}/agent/update`
 （`UpdateModels` → `buildTools` 重建工具集）。
 
-当前 admAgent 侧：
+当前 Agent 侧：
 
 - 黑名单是**硬编码**的 `bannedCommands`（`internal/agent/tools/bash.go:75-146`），在
   `blockFuncs()`（`bash.go:165`）里生效，作用于前台 bash（`bash.go:254`）、后台 bash（`bash.go:309`），
@@ -25,12 +25,12 @@
 
 ## 改动清单（4 个源文件 + 2 个测试文件）
 
-### 1. `admAgent/internal/config/config.go` — Options 新增字段
+### 1. `Agent/internal/config/config.go` — Options 新增字段
 
 `Options` 结构体末尾（`DisabledSkills` 之后，第 279 行附近）：
 
 ```go
-	DisabledSkills          []string     `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=admAgent-config"`
+	DisabledSkills          []string     `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=Agent-config"`
 	// BashAllowAll disables the bash command deny-list (sudo, apt, systemctl,
 	// curl, ...), so the agent can run privileged / package-manager commands.
 	// Off by default: the deny-list is the only guard rail against a model
@@ -38,7 +38,7 @@
 	BashAllowAll bool `json:"bash_allow_all,omitempty" jsonschema:"description=Disable the bash command deny-list so privileged and package-manager commands (sudo, apt, systemctl, curl, ...) can be executed. Only enable this on machines you trust.,default=false"`
 ```
 
-### 2. `admAgent/internal/agent/tools/bash.go`
+### 2. `Agent/internal/agent/tools/bash.go`
 
 ```diff
 -func bashDescription(attribution *config.Attribution, modelID string) string {
@@ -83,14 +83,14 @@
 注意：**外层 `bannedCommands` / `CommandsBlocker` / `ArgumentsBlocker` 全部保留**，只是新增开关；
 `Shell.SetBlockFuncs`、`shell.CommandsBlocker` 等导出 API 不动，`internal/shell` 无需任何改动。
 
-### 3. `admAgent/internal/agent/tools/bash.md.tpl` 第 11 行
+### 3. `Agent/internal/agent/tools/bash.md.tpl` 第 11 行
 
 ```diff
 -2. Security Check: Banned commands ({{ .BannedCommands }}) return error - explain to user. Safe read-only commands execute without prompts
 +2. Security Check: {{ if .BannedCommands }}Banned commands ({{ .BannedCommands }}) return error - explain to user. {{ else }}The command deny-list is disabled (options.bash_allow_all): privileged and system commands run unchecked - be deliberate. {{ end }}Safe read-only commands execute without prompts
 ```
 
-### 4. `admAgent/internal/agent/coordinator.go:678` — 传入配置
+### 4. `Agent/internal/agent/coordinator.go:678` — 传入配置
 
 ```diff
 -		tools.NewBashTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.Attribution, modelID),
@@ -102,8 +102,8 @@
 
 ### 5. 测试签名补齐（必改，否则编译不过）
 
-- `admAgent/internal/agent/common_test.go:172`
-- `admAgent/internal/agent/tools/bash_test.go:133`、`:142`
+- `Agent/internal/agent/common_test.go:172`
+- `Agent/internal/agent/tools/bash_test.go:133`、`:142`
 
 三处 `NewBashTool(...)` 末尾补 `, false`。
 
@@ -126,19 +126,19 @@ func TestBashDescription_AllowAllDropsDenyList(t *testing.T) {
 ## 验证步骤（已执行）
 
 ```bash
-cd admAgent
+cd Agent
 go build ./...                                        # BUILD_OK
 go test ./internal/agent/... ./internal/config/... -count=1   # 全绿（含新增的两个回归测试）
 ```
 
-1. `admAgent.json` 写 `"options": { "bash_allow_all": true }`，重启 server；
+1. `tigerAgent.json` 写 `"options": { "bash_allow_all": true }`，重启 server；
 2. TUI/桌面端让模型执行 `sudo -n apt-get install -y <pkg>`，应能真正执行而不是返回
    "command is blocked"；
 3. 改回 `false` 或删除该字段，同样命令应重新被拦。
 
 ## 附：Linux 上让 sudo 真正可用的前置条件（与本次改动无关，但不做则命令必然失败）
 
-- agent 进程没有 TTY，`sudo` 无法交互输密码：需 `sudo visudo -f /etc/sudoers.d/admagent`
+- agent 进程没有 TTY，`sudo` 无法交互输密码：需 `sudo visudo -f /etc/sudoers.d/tigeragent`
   写 `admin ALL=(ALL) NOPASSWD: ALL`（或按需收窄到 `/usr/bin/apt-get, /usr/bin/apt, /usr/bin/dpkg`）。
 - 建议在项目 `AGENTS.md` 里写明"安装依赖用 `sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y ...`"，
   避免 debconf 交互卡住与 apt 锁竞争。

@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://adm.tuduoduo.top/sitemap.xml
+Sitemap: https://tiger.kuda520.com/sitemap.xml

@@ -18,13 +18,6 @@ var autoCreateStrikes = 0;
 // 一键清除是否进行中：期间禁用「清除全部」按钮，防重复点击后对已删会话再次 DELETE
 var clearAllInFlight = false;
 
-// 同步当前会话 ID 给微信 Bridge（跟随模式下微信消息以此为目标会话）；fire-and-forget
-export function syncWxFollowSession() {
-  try {
-    invoke("set_ilink_current_session", { sessionId: S.currentConvId || "" }).catch(function() {});
-  } catch (_) {}
-}
-
 // ===== 会话管理 =====
 export async function loadConversations(restoreCurrent) {
   console.log("[agent] 加载会话列表, workspace:", S.serverInfo ? S.serverInfo.workspace_id : "无");
@@ -123,7 +116,7 @@ export function renderConversationList() {
     var msgCount = conv.message_count || conv.messages || 0;
     var lastTime = conv.updated_at || conv.last_time || "";
     // 运行/排队标识：以本工作区的运行登记为准（更实时，支持多会话并行），
-    // 服务端 is_busy 快照兜底（如微信 Bot 等后台会话的运行）
+    // 服务端 is_busy 快照兜底（如其它客户端 / 并行会话的运行）
     var activeRunInfo = (S.runs || []).find(function(r) { return r.sessionId === conv.id && !r.queued; });
     var queuedRunInfo = !activeRunInfo && (S.runs || []).find(function(r) { return r.sessionId === conv.id && r.queued; });
     var isActiveRun = !!activeRunInfo;
@@ -161,8 +154,8 @@ export function renderConversationList() {
 // （重新挂载后 DOM 换新会自动重挂）。动作按钮命中时阻止冒泡，避免误触选中会话。
 function ensureConvListDelegation(container) {
   var cref = /** @type {any} */ (container);
-  if (cref._admConvDelegated) return;
-  cref._admConvDelegated = true;
+  if (cref._agentConvDelegated) return;
+  cref._agentConvDelegated = true;
   container.addEventListener("click", function(e) {
     var target = e.target instanceof Element ? e.target : null;
     if (!target) return;
@@ -249,7 +242,6 @@ async function doClearAllConversations(wsId, ids) {
     if (runCleared && !S.isSending) updateStatusBar("ready", null, S.contextUsage.used);
     if (!S.currentConvId) {
       resetPermissionState();
-      syncWxFollowSession();
       clearErrorNotices();
       store.setContextUsage(wsId, 0, S.contextUsage.max, false);
       document.getElementById("agent-conv-title").textContent = _t("选择或创建一个会话");
@@ -297,8 +289,8 @@ export function scheduleMessageOutline() {
 // 事件委托只挂一次（容器在视图生命周期内复用；重新挂载后 DOM 换新会自动重挂）
 function ensureOutlineDelegation(container) {
   var cref = /** @type {any} */ (container);
-  if (cref._admOutlineDelegated) return;
-  cref._admOutlineDelegated = true;
+  if (cref._agentOutlineDelegated) return;
+  cref._agentOutlineDelegated = true;
   container.addEventListener("click", function(e) {
     var target = e.target instanceof Element ? e.target : null;
     var item = target ? target.closest(".outline-item") : null;
@@ -324,7 +316,7 @@ export function renderMessageOutline() {
   var cref = /** @type {any} */ (container);
   if (visible.length === 0) {
     container.querySelectorAll(".outline-item").forEach(function(el) { el.remove(); });
-    cref._admNodes = {};
+    cref._agentNodes = {};
     if (!container.querySelector(".agent-outline-empty")) {
       container.innerHTML =
         '<div class="agent-outline-empty">' +
@@ -338,7 +330,7 @@ export function renderMessageOutline() {
   var emptyEl = container.querySelector(".agent-outline-empty");
   if (emptyEl) emptyEl.remove();
 
-  var nodes = cref._admNodes || (cref._admNodes = {});
+  var nodes = cref._agentNodes || (cref._agentNodes = {});
   var used = {};
   // 从后向前插入/校正顺序：node.nextSibling 即期望位置，已就位的节点零移动
   var nextRef = null;
@@ -389,14 +381,14 @@ function buildOutlineItem(item, idx) {
   body.appendChild(titleEl);
   node.appendChild(bar);
   node.appendChild(body);
-  /** @type {any} */ (node)._adm = { idxEl: idxEl, timeEl: timeEl, titleEl: titleEl, rawTime: "", idx: -1, title: null };
+  /** @type {any} */ (node)._agent = { idxEl: idxEl, timeEl: timeEl, titleEl: titleEl, rawTime: "", idx: -1, title: null };
   updateOutlineItem(node, item, idx);
   return node;
 }
 
 // 就地更新大纲项：只写变化的字段；.active 高亮类由 scrollToRound 维护，不在此清除
 function updateOutlineItem(node, item, idx) {
-  var st = /** @type {any} */ (node)._adm;
+  var st = /** @type {any} */ (node)._agent;
   if (st.idx !== idx) {
     st.idx = idx;
     st.idxEl.textContent = "#" + (idx + 1);
@@ -425,7 +417,7 @@ function scrollToRound(roundKey, sourceItem) {
     return;
   }
   target.classList.remove("msg-round-collapsed");
-  /** @type {any} */ (target)._admRoundOpen = true;
+  /** @type {any} */ (target)._agentRoundOpen = true;
   // 轮内独立滚动：回到本轮开头，让用户从这轮的提问开始读
   target.scrollTop = 0;
   // 退出手动滚动模式 + 跳到底部命令互斥状态，确保后续 scroll 事件判定为程序触发。
@@ -558,7 +550,6 @@ function handleConvAction(action, convId) {
               resetPermissionState();
               store.setCurrentConvId(S.serverInfo.workspace_id, null);
               updateDecisionModeUI();
-              syncWxFollowSession();
               store.setCurrentConv(S.serverInfo.workspace_id, null);
               store.setMessages(S.serverInfo.workspace_id, []);
               renderMessages();
@@ -578,7 +569,6 @@ export async function selectConversation(convId) {
   if (convId !== S.currentConvId) { resetPermissionState(); exitManualScrollMode(); clearErrorNotices(); }
   store.setCurrentConvId(S.serverInfo.workspace_id, convId);
   updateDecisionModeUI();
-  syncWxFollowSession();
   renderConversationList();
   // 切换后同步按钮语义（运行中→取消 / 排队中→取消排队 / 其它→发送），
   // 并提示用户当前工作区的运行状态，避免误把发送当取消
@@ -655,7 +645,6 @@ export async function selectConversation(convId) {
         updateDecisionModeUI();
         store.setCurrentConv(S.serverInfo.workspace_id, null);
         store.setMessages(S.serverInfo.workspace_id, []);
-        syncWxFollowSession();
       }
       var filtered = S.conversations.filter(function(c) { return c.id !== convId; });
       store.setConversations(S.serverInfo.workspace_id, filtered);
@@ -690,7 +679,6 @@ export async function newConversation() {
     clearErrorNotices();
     store.setCurrentConvId(S.serverInfo.workspace_id, resp.id);
     updateDecisionModeUI();
-    syncWxFollowSession();
     store.setMessages(S.serverInfo.workspace_id, []);
     store.setCurrentConv(S.serverInfo.workspace_id, resp);
     store.setContextUsage(S.serverInfo.workspace_id, 0, S.contextUsage.max, false);

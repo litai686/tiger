@@ -20,10 +20,10 @@
 // 临时消息内容匹配工具（utils.js 无任何导入，不存在循环依赖）
 import { stripSystemInfoText, getTextFromParts } from "./utils.js";
 
-export const invoke = window.__adm_invoke;
-export const listen = window.__adm_listen;
+export const invoke = window.__agent_invoke;
+export const listen = window.__agent_listen;
 
-// store.js 不能直接 import log.js（log.js 用 window.__adm_invoke 不依赖 store，
+// store.js 不能直接 import log.js（log.js 用 window.__agent_invoke 不依赖 store，
 // 但为避免未来循环依赖风险，直接内联写日志）
 function _log(level, cat, msg) {
   try { invoke("agent_debug_log", { line: "[" + cat + "][" + level + "] " + msg }).catch(function() {}); } catch (_) {}
@@ -363,7 +363,7 @@ class Store {
       this.workspaces.forEach(function(ws) {
         if (ws && ws.isSending) busy = true;
       });
-      window.__adm_state.agentBusy = busy;
+      window.__agent_state.agentBusy = busy;
     } catch (_) {}
   }
 

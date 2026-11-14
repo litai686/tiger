@@ -1,39 +1,30 @@
-//! 服务端连接模式解析（`docs/tcp-tls-ed25519.md` §11.2）。
+//! 服务端连接配置解析（`docs/tcp-tls-ecdsa.md` §11）。
 //!
-//! 两种模式：
-//! - `local`：服务端与桌面端同机，走 unix socket / named pipe，不做 TLS；
-//! - `remote`：服务端在另一台机器上，走 TCP + TLS 1.3 + Ed25519 双向认证，
-//!   工作目录/会话/配置全部留在服务端，桌面端只是操作界面。
+//! 桌面端只有一种连接方式：用户自行启动的远程服务端，TCP + TLS 1.3。设置页只
+//! 保存**一条连接串**，服务端启动时打印、客户端整条粘贴：
 //!
-//! 解析在启动时做一次（`set_active_transport`），之后所有 `default_host()`
-//! 调用点改读 `agent_http::active_transport()`，避免半个界面连远端、半个连本地。
+//! ```text
+//! tigerAgent://host:port?fp=sha256:…&token=…
+//! ```
+//!
+//! `fp` 固定服务端身份（自签证书不在系统信任库，只能靠 pin 防中间人），
+//! `token` 是服务端签发的 Bearer 凭据；客户端不再生成任何设备身份。
+//!
+//! 解析在启动时做一次（`apply`），之后所有请求点改读
+//! `agent_http::active_target()`，避免半个界面连一个地址、半个连另一个。
 
 use std::net::IpAddr;
 use std::str::FromStr;
-use std::sync::Arc;
 
-use crate::common::agent_http::{self, AgentTransport, TcpTarget};
+use crate::common::agent_http::{self, TcpTarget};
 use crate::common::config;
-use crate::common::device_identity;
 use crate::common::error::AppError;
 use crate::common::types::Settings;
 
-/// 解析后的连接模式。
-pub enum ServerMode {
-    /// 同机：本地传输，不加密（OS 权限保护）
-    Local,
-    /// 异机：TCP + TLS 1.3 + Ed25519 双向认证
-    Remote(TcpTarget),
-}
-
-impl ServerMode {
-    pub fn is_remote(&self) -> bool {
-        matches!(self, ServerMode::Remote(_))
-    }
-}
+const CONNECTION_PREFIX: &str = "tigerAgent://";
 
 /// 读取 `<app_data>/config.json`（与 `settings::load_settings` 同路径）。
-/// 缺失或解析失败时返回默认值（= 本地模式），绝不因为配置坏掉而阻断启动。
+/// 缺失或解析失败时返回默认值，绝不因为配置坏掉而阻断启动。
 pub fn load_settings(app: &tauri::AppHandle) -> Settings {
     let Ok(dir) = config::get_data_dir(Some(app)) else {
         return Settings::default();
@@ -45,57 +36,67 @@ pub fn load_settings(app: &tauri::AppHandle) -> Settings {
     serde_json::from_str::<Settings>(&raw).unwrap_or_default()
 }
 
-/// 按配置解析模式。远程模式要求：完整地址 + 已保存的 pin + 已生成的设备身份。
-pub fn resolve(app: &tauri::AppHandle) -> Result<ServerMode, AppError> {
+/// 按配置解析服务端目标。
+pub fn resolve(app: &tauri::AppHandle) -> Result<TcpTarget, AppError> {
     let settings = load_settings(app);
-    if !settings.server.mode.eq_ignore_ascii_case("remote") {
-        return Ok(ServerMode::Local);
-    }
-
-    let remote = &settings.server.remote;
-    let addr = remote.addr.trim();
-    if addr.is_empty() {
-        return Err(AppError::msg("远程模式缺少服务端地址，请在设置中填写 host:port"));
-    }
-    let (host, port) = split_addr(addr)
-        .ok_or_else(|| AppError::msg(format!("无效的服务端地址: {}（应为 host:port）", addr)))?;
-
-    // 环回地址 = 同机部署：不值得为本机再套一层 TCP + 证书，直接按本地模式走。
-    if is_loopback(&host) {
-        eprintln!("[server_mode] 远程地址是环回地址 {}，按本地模式使用 sidecar 传输", addr);
-        return Ok(ServerMode::Local);
-    }
-
-    let pin = remote.fingerprint.trim();
-    if pin.is_empty() {
+    let raw = settings.server.remote.connection.trim();
+    if raw.is_empty() {
         return Err(AppError::msg(
-            "远程模式缺少服务端指纹（sha256:…）。请从服务端启动日志、`tigerAgent --print-fingerprint` 或 `pair --qr` 获取",
+            "未配置服务端连接串：请在设置 → 服务端连接中粘贴服务端启动时打印的 tigerAgent://… 连接串",
         ));
     }
-
-    let device = device_identity::load(&device_identity::device_dir(app)?)?;
-    let sni = if remote.sni.trim().is_empty() {
-        "tigerAgent.local".to_string()
-    } else {
-        remote.sni.trim().to_string()
-    };
-
-    Ok(ServerMode::Remote(TcpTarget {
-        host,
-        port,
-        sni,
-        pin: pin.to_string(),
-        device: Arc::new(device),
-    }))
+    parse_connection(raw)
 }
 
-/// 解析并把结果写进全局传输；返回模式供调用方决定是否还拉起 sidecar。
-pub fn apply(app: &tauri::AppHandle) -> Result<ServerMode, AppError> {
-    let mode = resolve(app)?;
-    if let ServerMode::Remote(target) = &mode {
-        agent_http::set_active_transport(AgentTransport::Tcp(Box::new(target.clone())));
+/// 解析连接串：`tigerAgent://host:port?fp=sha256:…&token=…`。
+/// 值不做百分号编码（host:port、sha256:+base64url、base64url 都是安全字符），
+/// 与 Go 侧 `server.ConnectionString` 保持一致。
+pub fn parse_connection(raw: &str) -> Result<TcpTarget, AppError> {
+    let rest = raw.trim().strip_prefix(CONNECTION_PREFIX).ok_or_else(|| {
+        AppError::msg(
+            "连接串格式应为 tigerAgent://<host>:<port>?fp=sha256:…&token=…（在服务端启动日志或 `tigerAgent --print-connection` 中获取）",
+        )
+    })?;
+    let (authority, query) = rest.split_once('?').ok_or_else(|| {
+        AppError::msg("连接串缺少 ?fp=…&token=… 部分（请复制服务端打印的完整连接串）")
+    })?;
+    let (host, port) = split_addr(authority)
+        .ok_or_else(|| AppError::msg(format!("连接串地址无效: {}（应为 host:port）", authority)))?;
+
+    let mut pin: Option<String> = None;
+    let mut token: Option<String> = None;
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = pair
+            .split_once('=')
+            .ok_or_else(|| AppError::msg(format!("连接串参数格式无效: {}", pair)))?;
+        match key {
+            "fp" => pin = Some(value.trim().to_string()),
+            "token" => token = Some(value.trim().to_string()),
+            _ => {}
+        }
     }
-    Ok(mode)
+
+    let pin = pin
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::msg("连接串缺少 fp=（服务端指纹）"))?;
+    if !pin.starts_with("sha256:") {
+        return Err(AppError::msg("连接串里的 fp 应以 sha256: 开头"));
+    }
+    let token = token
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::msg("连接串缺少 token=（服务端令牌）"))?;
+
+    Ok(TcpTarget { host, port, pin, token })
+}
+
+/// 解析并把结果写进全局目标；返回目标供调用方建链。
+pub fn apply(app: &tauri::AppHandle) -> Result<TcpTarget, AppError> {
+    let target = resolve(app)?;
+    agent_http::set_active_target(target.clone());
+    Ok(target)
 }
 
 /// `host:port` / `[::1]:port` → (host, port)
@@ -112,7 +113,8 @@ fn split_addr(addr: &str) -> Option<(String, u16)> {
     Some((host.to_string(), port.parse().ok()?))
 }
 
-fn is_loopback(host: &str) -> bool {
+/// 地址是否是环回地址：仅用于提示（`127.0.0.1` 也是合法 TCP 目标）。
+pub fn is_loopback(host: &str) -> bool {
     if host.eq_ignore_ascii_case("localhost") {
         return true;
     }
@@ -129,6 +131,27 @@ mod tests {
         assert_eq!(split_addr("[::1]:18471"), Some(("::1".into(), 18471)));
         assert_eq!(split_addr("nope"), None);
         assert_eq!(split_addr(":18471"), None);
+    }
+
+    #[test]
+    fn parses_connection_string() {
+        let target = parse_connection(
+            "tigerAgent://192.168.1.20:18471?fp=sha256:abcDEF_123&token=tok_en-1",
+        )
+        .expect("parse");
+        assert_eq!(target.host, "192.168.1.20");
+        assert_eq!(target.port, 18471);
+        assert_eq!(target.pin, "sha256:abcDEF_123");
+        assert_eq!(target.token, "tok_en-1");
+    }
+
+    #[test]
+    fn rejects_incomplete_connection_strings() {
+        assert!(parse_connection("192.168.1.20:18471?fp=sha256:a&token=b").is_err());
+        assert!(parse_connection("tigerAgent://192.168.1.20:18471").is_err());
+        assert!(parse_connection("tigerAgent://192.168.1.20:18471?fp=sha256:a").is_err());
+        assert!(parse_connection("tigerAgent://192.168.1.20:18471?fp=nope&token=b").is_err());
+        assert!(parse_connection("tigerAgent://192.168.1.20:18471?fp=sha256:a&token=").is_err());
     }
 
     #[test]

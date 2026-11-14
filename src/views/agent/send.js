@@ -1,6 +1,6 @@
 // 发送消息（fire-and-forget，结果经 SSE 返回）
 import { t as _t, tV } from "../../i18n.js";
-import { S, invoke, store } from "./store.js";
+import { S, store } from "./store.js";
 import { api } from "./api.js";
 import { autoResize, generateRunId } from "./utils.js";
 import { log } from "./log.js";
@@ -22,12 +22,12 @@ import { getActiveDecisionMode, decisionRequestPayload } from "./decision_mode.j
 // - 本地模型：桌面端已移除本地模型部署能力，旧配置残留的 local provider 指向无人
 //   监听的 127.0.0.1 端口，每轮对话都会报连接失败，这里提前拦下并提示切换云端模型
 // - 云端模型：磁盘配置中必须已有 base_url 与 api_key；内置 provider（不在磁盘列表，
-//   配置由 admAgent 内置提供）跳过校验，交给服务端处理
+//   配置由 Agent 内置提供）跳过校验，交给服务端处理
 // 返回错误文案（null = 校验通过）
 function getModelReadiness() {
   var providerKey = S.settings.agent_default_provider || "";
   var isLocal = providerKey === "local" || providerKey.indexOf("local:") === 0;
-  // 服务端实际模型为 localModel 也按本地处理（重启后 admAgent.json 恢复 local 的兜底）
+  // 服务端实际模型为 localModel 也按本地处理（重启后 tigerAgent.json 恢复 local 的兜底）
   if (S.agentInfo && S.agentInfo.model && S.agentInfo.model.id === "localModel") isLocal = true;
 
   if (isLocal) {
@@ -71,7 +71,7 @@ export async function cancelCurrentRun() {
   // 排队中的折叠消息，不再产生 message-created 去重替换，残留气泡需就地移除
   var foldTemps = S.messages.filter(function(m) { return m._fold; });
   foldTemps.forEach(function(m) { store.deleteMessage(activeRun.workspaceId, m.id); });
-  // 服务端 Cancel 会一并清掉该会话排队中的轮次（admAgent Cancel → clearQueue），
+  // 服务端 Cancel 会一并清掉该会话排队中的轮次（Agent Cancel → clearQueue），
   // 本地同步注销该会话的运行与排队登记；其它会话的并行运行保持不变
   store.cancelRun(activeRun.workspaceId, activeRun.sessionId);
   updateSendButton();
@@ -212,7 +212,7 @@ async function sendText(overrideText, filesOverride, expectedTarget) {
   // 附件发送策略：
   // - 图片：统一以 base64 内联传输（content 必带）——服务端负责落盘缓存并
   //   按主模型能力决定：支持图片 → 当轮 wire 层内联给模型（base64 不落库，
-  //   后续轮次通过本地缓存路径 + admAgent vision 再次识别）；不支持 → 注入
+  //   后续轮次通过本地缓存路径 + Agent vision 再次识别）；不支持 → 注入
   //   vision 命令引导。前端不感知模型能力。
   // - 文本：保持"路径模式"（内容不内联进 prompt，避免内联内容触发 70%
   //   上下文守卫死循环），统一落盘传路径，由 coordinator 注入 view 读取引导。
@@ -258,22 +258,15 @@ async function sendText(overrideText, filesOverride, expectedTarget) {
   if (otherFiles.length > 0) {
     for (var i = 0; i < otherFiles.length; i++) {
       var f = otherFiles[i];
-      var isImage = f.type && f.type.indexOf("image/") === 0;
-      if (isImage) {
-        attachments.push({ file_path: f.path || "", file_name: f.name, mime_type: f.type, content: f.base64 });
-        continue;
-      }
-      var realPath = f.path || null;
-      if (!realPath) {
-        try {
-          realPath = await invoke("save_attachment_file", { file_name: f.name, base64_content: f.base64 });
-        } catch (e) {
-          console.warn("[agent] 附件落盘失败:", e);
-          showError(_t("附件保存失败，已取消发送: ") + f.name + " (" + friendlyError(e, { inline: true }) + ")");
-          return { ok: false };
-        }
-      }
-      attachments.push({ file_path: realPath, file_name: f.name, mime_type: f.type || "application/octet-stream", content: "" });
+      // 图片与非图片统一 base64 内联上传：服务端先看 file_path 在**自己**的磁盘上
+      // 是否可用（本机部署时直接复用），不可用就用 content 落盘到 session 附件目录。
+      // 只传客户端本地路径在远程部署下服务端读不到（见 internal/agent/attachment_ingest.go）。
+      attachments.push({
+        file_path: f.path || "",
+        file_name: f.name,
+        mime_type: f.type || "application/octet-stream",
+        content: f.base64 || "",
+      });
     }
   }
   if (firstPdfBatch) {
@@ -321,7 +314,7 @@ async function sendText(overrideText, filesOverride, expectedTarget) {
   try {
     // POST /v1/workspaces/{id}/agent — fire-and-forget, 返回 202 Accepted (无响应体)
     // 实际结果通过 SSE 事件流获取
-    // admAgent 要求 prompt 非空（纯图片附件会被 ValidateCall 拒绝："prompt is empty"），
+    // Agent 要求 prompt 非空（纯图片附件会被 ValidateCall 拒绝："prompt is empty"），
     // 只发附件不输文字时补默认提示词（能走到这里 text 为空时 filesToSend 必非空）
     var body = {
       session_id: sessionId,

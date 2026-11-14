@@ -83,9 +83,9 @@ function isPlainMarkdownText(text) {
 }
 function scheduleMarkdownText(pe, text) {
   var ref = /** @type {any} */ (pe);
-  if (ref._admMdText === text) return;
-  var st = ref._admMdSched;
-  if (!st) st = ref._admMdSched = { pending: null, timer: 0, ts: 0 };
+  if (ref._agentMdText === text) return;
+  var st = ref._agentMdSched;
+  if (!st) st = ref._agentMdSched = { pending: null, timer: 0, ts: 0 };
   st.pending = text;
   var now = Date.now();
   if (!st.timer && now - st.ts >= MD_MIN_INTERVAL_MS) {
@@ -105,8 +105,8 @@ function flushMarkdownText(pe, st) {
   if (text === null) return;
   st.ts = Date.now();
   var ref = /** @type {any} */ (pe);
-  if (ref._admMdText === text) return;
-  ref._admMdText = text;
+  if (ref._agentMdText === text) return;
+  ref._agentMdText = text;
   if (isPlainMarkdownText(text)) pe.textContent = text;
   else pe.innerHTML = renderMarkdown(text);
 }
@@ -243,9 +243,9 @@ export function renderMessages() {
   Array.prototype.slice.call(area.children).forEach(function(c) {
     if (c.id === "agent-working-indicator") return;
     // 错误/警告/信息提示节点保留（否则 run_complete 后的 refreshMessages 会把刚显示的提示立即清掉）；
-    // 本地常驻错误气泡（data-adm-local-error）除外——它随消息列表管理，不在列表时即移除
+    // 本地常驻错误气泡（data-agent-local-error）除外——它随消息列表管理，不在列表时即移除
     if (c.classList && (c.classList.contains("warn") || c.classList.contains("info") ||
-        (c.classList.contains("error") && !c.hasAttribute("data-adm-local-error")))) return;
+        (c.classList.contains("error") && !c.hasAttribute("data-agent-local-error")))) return;
     if (c.classList && c.classList.contains("msg-round")) {
       var rk = c.getAttribute("data-roundkey");
       if (rk) existingRounds[rk] = c;
@@ -466,7 +466,7 @@ function groupMessagesByRound(messages) {
 }
 
 // 构建一个空的轮容器：header（标题条，点击切换展开/折叠）+ body（消息挂载点）。
-// 展开/折叠状态由 applyRoundState 每次 render 重算：用户手动 toggle 过（_admRoundOpen）
+// 展开/折叠状态由 applyRoundState 每次 render 重算：用户手动 toggle 过（_agentRoundOpen）
 // 则采用用户选择，否则默认“运行中的轮展开、已结束的轮折叠”。
 function buildRoundNode(round) {
   var div = document.createElement("div");
@@ -508,7 +508,7 @@ function buildRoundNode(round) {
     // 之前把“当前状态”误存为偏好并按当前状态 toggle，导致点击无效（状态原样保持）
     var willOpen = div.classList.contains("msg-round-collapsed");
     var ref = /** @type {any} */ (div);
-    ref._admRoundOpen = willOpen;
+    ref._agentRoundOpen = willOpen;
     div.classList.toggle("msg-round-collapsed", !willOpen);
   });
   // 容器内空白区域右键 → 折叠当前轮：仅命中轮容器/body 自身的空白（padding、消息间隙），
@@ -518,7 +518,7 @@ function buildRoundNode(round) {
     if (t !== div && t !== body) return;
     if (div.classList.contains("msg-round-collapsed")) return;
     e.preventDefault();
-    /** @type {any} */ (div)._admRoundOpen = false;
+    /** @type {any} */ (div)._agentRoundOpen = false;
     div.classList.add("msg-round-collapsed");
   });
   // 轮内独立滚动：scroll 事件不冒泡，必须在轮本身挂监听才能识别轮内向上滑动
@@ -602,7 +602,7 @@ function messageHasDecisionRequest(msg) {
       if (p && p.type === "text" && p.data && p.data.text) { text = p.data.text; break; }
     }
   }
-  return /<adm_decision_request>/i.test(text);
+  return /<agent_decision_request>/i.test(text);
 }
 
 // 决策模式：该消息是否已输出决策结果（专用 decision part 或旧的正文标签）。
@@ -643,7 +643,7 @@ var DECISION_HIDDEN_PART_TYPES = ["text", "reasoning", "tool_call", "tool_result
 
 // 决策模式本轮仍在跑、尚无结果时的哨兵 key：表示 assistant 侧输出一律不渲染、也暂不出卡片。
 // 消息 key 为真实消息 id 或 "idxN"，不会与之冲突。
-var DECISION_PENDING_KEY = "\u0000adm-decision-pending";
+var DECISION_PENDING_KEY = "\u0000agent-decision-pending";
 
 // 展开/折叠的“保持展开”标记：运行中把末轮 key 记入 lastOpenRoundKey；
 // run 完成后 activeRun 消失，但 key 仍在 → 末轮保持展开；下一轮开始时 key
@@ -653,14 +653,14 @@ var lastOpenRoundConv = "";
 
 // 应用轮的展开/折叠状态与标题文案。
 // 默认规则：roundKey 等于 lastOpenRoundKey（最近活跃过的末轮）才展开，其余折叠；
-// 用户手动 toggle 过（_admRoundOpen）则优先。
+// 用户手动 toggle 过（_agentRoundOpen）则优先。
 function applyRoundState(el, round, isLastRound) {
   var active = isLastRound &&
     ((S.activeRun && S.activeRun.sessionId === S.currentConvId) ||
      (S.queuedRun && S.queuedRun.sessionId === S.currentConvId));
   if (active) lastOpenRoundKey = round.roundKey;
   var ref = /** @type {any} */ (el);
-  var open = (ref._admRoundOpen !== undefined) ? ref._admRoundOpen : (round.roundKey === lastOpenRoundKey);
+  var open = (ref._agentRoundOpen !== undefined) ? ref._agentRoundOpen : (round.roundKey === lastOpenRoundKey);
   el.classList.toggle("msg-round-collapsed", !open);
   var header = el.querySelector(":scope > .msg-round-header");
   var titleEl = header ? header.querySelector(".msg-round-title") : null;
@@ -689,7 +689,7 @@ function alignMessagesInContainer(container, items, allowDecision, decisionCardK
     // 否则流式期间每次渲染都重建导致动画闪烁
     if (c.id === "agent-working-indicator") return;
     if (c.classList && (c.classList.contains("warn") || c.classList.contains("info") ||
-        (c.classList.contains("error") && !c.hasAttribute("data-adm-local-error")))) return;
+        (c.classList.contains("error") && !c.hasAttribute("data-agent-local-error")))) return;
     var mid = c.getAttribute ? c.getAttribute("data-msgid") : null;
     if (mid && keySet[mid] && !existing[mid]) existing[mid] = c;
     else c.remove();
@@ -705,18 +705,18 @@ function alignMessagesInContainer(container, items, allowDecision, decisionCardK
     // 模型在一轮里分步输出多份结果时，"卡片消息"会从旧消息移到新消息，旧卡片节点
     // 内容虽未变也必须重建为隐藏态，否则同一轮会残留多张卡片。
     var decisionState = decisionCardKey || null;
-    if (el && el._admSig === sig && el._admDecisionKey === decisionState) {
+    if (el && el._agentSig === sig && el._agentDecisionKey === decisionState) {
       // 内容与决策态均未变化，原样保留
     } else if (el && updateMessageNode(el, msg, callResultMap, allowDecision, decisionCardKey)) {
-      el._admSig = sig; // 结构未变：已就地更新文本
-      el._admDecisionKey = decisionState;
+      el._agentSig = sig; // 结构未变：已就地更新文本
+      el._agentDecisionKey = decisionState;
     } else {
       var fresh = buildMessageNode(msg, key, callResultMap, allowDecision, decisionCardKey);
       if (!fresh) { if (el) el.remove(); return; } // 无内容消息跳过
-      /** @type {any} */ (fresh)._admSig = sig;
-      /** @type {any} */ (fresh)._admDecisionKey = decisionState;
+      /** @type {any} */ (fresh)._agentSig = sig;
+      /** @type {any} */ (fresh)._agentDecisionKey = decisionState;
       if (el) {
-        // 重建时恢复旧节点中已展开的折叠块（msg-reasoning 由自身 _admDetailsState + toggle
+        // 重建时恢复旧节点中已展开的折叠块（msg-reasoning 由自身 _agentDetailsState + toggle
         // 监听在 msg 级别维护，此处跳过，避免"流式展开 → 完成后又被强制展开"）
         var openKeys = {};
         el.querySelectorAll("details[data-key][open]").forEach(function(d) {
@@ -725,10 +725,10 @@ function alignMessagesInContainer(container, items, allowDecision, decisionCardK
           }
         });
         // 移交用户手动 toggle 状态，并按其同步 reasoning 的 open（否则新元素上状态丢失，退回默认值）
-        /** @type {any} */ (fresh)._admDetailsState = /** @type {any} */ (el)._admDetailsState;
-        if (/** @type {any} */ (el)._admDetailsState) {
+        /** @type {any} */ (fresh)._agentDetailsState = /** @type {any} */ (el)._agentDetailsState;
+        if (/** @type {any} */ (el)._agentDetailsState) {
           fresh.querySelectorAll("details.msg-reasoning[data-key]").forEach(function(d) {
-            var us = /** @type {any} */ (el)._admDetailsState[d.getAttribute("data-key")];
+            var us = /** @type {any} */ (el)._agentDetailsState[d.getAttribute("data-key")];
             if (us !== undefined) /** @type {HTMLDetailsElement} */ (d).open = us;
           });
         }
@@ -778,7 +778,7 @@ function msgThinkingOpen(parts) {
   return hasThinking && !hasText && !hasFinish;
 }
 
-// 消息元信息里的 provider 显示名：msg.provider 存的是 admAgent.json providers 的 JSON 键
+// 消息元信息里的 provider 显示名：msg.provider 存的是 tigerAgent.json providers 的 JSON 键
 // （添加云端模型时由「模型名称」slug 派生，见 src-tauri/src/pages/agent.rs 的
 // slugify_provider_key），直接展示是一串无分隔符小写（如 deepseekv4flashvisionexp）。
 // 这里按磁盘配置与 /providers 快照反查可读名称，都查不到才回退原始键。
@@ -839,7 +839,7 @@ function buildMessageNode(msg, key, callResultMap, allowDecision, decisionCardKe
 
   // 本地常驻错误气泡（不落库、不进 LLM 上下文）：加标记与弹窗提示节点区分，
   // 供 renderMessages 按消息列表生命周期管理（切会话/刷新时随列表移除）
-  if (msg._error) div.setAttribute("data-adm-local-error", "1");
+  if (msg._error) div.setAttribute("data-agent-local-error", "1");
 
   // 消息元信息：模型 · provider 显示名 · 时间。provider 与模型同名时省略
   // （添加云端模型时 provider 名称默认取模型名称，重复展示没有信息量）
@@ -857,7 +857,7 @@ function buildMessageNode(msg, key, callResultMap, allowDecision, decisionCardKe
     div.appendChild(meta);
   }
 
-  /** @type {any} */ (div)._admStruct = msgStructSig(msg, role, callResultMap);
+  /** @type {any} */ (div)._agentStruct = msgStructSig(msg, role, callResultMap);
   return div;
 }
 
@@ -868,7 +868,7 @@ function updateMessageNode(el, msg, callResultMap, allowDecision, decisionCardKe
   // 始终交给 buildMessageNode 重建（就地更新按 part 就位对齐，跳过 part 会写错元素）
   if (decisionCardKey && role !== "user") return false;
   var struct = msgStructSig(msg, role, callResultMap);
-  if (struct === "plain" || el._admStruct !== struct) return false;
+  if (struct === "plain" || el._agentStruct !== struct) return false;
   var partEls = el.querySelectorAll(":scope > [data-pk]");
   var hiddenCallIds = unavailableToolCallIds(msg.parts);
   var map = callResultMap || {};
@@ -916,7 +916,7 @@ function updateMessageNode(el, msg, callResultMap, allowDecision, decisionCardKe
         // 结构未变的就地更新不会触发全量重建，思考状态转换时在此同步折叠/展开；
         // 用户已有手动选择（msg 级状态表）则不覆盖
         var rKey = el.getAttribute("data-msgid") + ":" + i;
-        var rState = el._admDetailsState ? el._admDetailsState[rKey] : undefined;
+        var rState = el._agentDetailsState ? el._agentDetailsState[rKey] : undefined;
         if (rState === undefined) pe.open = msgThinkingOpen(msg.parts);
         break;
       case "tool_call":
@@ -1052,7 +1052,7 @@ function renderTextBody(container, text, role, allowDecision) {
 }
 
 // 构建单个 part 的根元素（供全量渲染与就地更新时局部重建共用）
-// msgEl 仅 reasoning 使用：在 msg 元素上挂 _admDetailsState[partKey] 保存用户手动 toggle 的选择，
+// msgEl 仅 reasoning 使用：在 msg 元素上挂 _agentDetailsState[partKey] 保存用户手动 toggle 的选择，
 // 流式期间频繁重建时也能保留用户偏好（不展开 / 不折叠）
 function buildPartElement(part, partIdx, role, msgKey, msgEl, thinkingOpen, resultPart, allowDecision) {
   var partType = part.type;
@@ -1084,12 +1084,12 @@ function buildPartElement(part, partIdx, role, msgKey, msgEl, thinkingOpen, resu
           textDiv.appendChild(mdDiv);
           textDiv.appendChild(buildSystemInfoEl(info, partKey + ":sys"));
           if (allowDecision) appendDecisionResult(textDiv, rawText);
-          /** @type {any} */ (textDiv)._admMdText = rawText;
+          /** @type {any} */ (textDiv)._agentMdText = rawText;
           return textDiv;
         }
       }
       renderTextBody(textDiv, rawText, role, allowDecision);
-      /** @type {any} */ (textDiv)._admMdText = rawText;
+      /** @type {any} */ (textDiv)._agentMdText = rawText;
       return textDiv;
 
     case "reasoning":
@@ -1098,13 +1098,13 @@ function buildPartElement(part, partIdx, role, msgKey, msgEl, thinkingOpen, resu
       details.setAttribute("data-key", partKey);
       // 默认：仅当消息处于“纯思考中”状态（无正文、无 finish part）才展开，
       // 其余（思考结束开始写正文 / 已完成 / 历史）折叠；用户手动 toggle 过则采用用户选择
-      var userState = msgEl && msgEl._admDetailsState ? msgEl._admDetailsState[partKey] : undefined;
+      var userState = msgEl && msgEl._agentDetailsState ? msgEl._agentDetailsState[partKey] : undefined;
       details.open = (userState !== undefined) ? userState : thinkingOpen;
       (function(d, key, mEl) {
         d.addEventListener("toggle", function() {
           if (!mEl) return;
-          if (!mEl._admDetailsState) mEl._admDetailsState = {};
-          mEl._admDetailsState[key] = d.open;
+          if (!mEl._agentDetailsState) mEl._agentDetailsState = {};
+          mEl._agentDetailsState[key] = d.open;
         });
       })(details, partKey, msgEl);
       var summary = document.createElement("summary");

@@ -6,7 +6,7 @@ import { t as _t } from "../i18n.js";
 import { friendlyError } from "./agent/error.js";
 
 /** @type {(...args: any[]) => Promise<any>} */
-const invoke = window.__adm_invoke;
+const invoke = window.__agent_invoke;
 
 const STORE_INSTALLED_PREFIX = "skills_installed_";
 /** 商店显示名 → zip 包内真实目录名（中文显示名无法作为目录名，安装后记录映射用于卸载时反向清理） */
@@ -390,7 +390,7 @@ const template = `
 
 // ===== 通用 UI =====
 
-/** 调试日志（走 Rust 端 agent_debug_log → adm_api_debug.log，自动加 UI: 前缀与时间戳） */
+/** 调试日志（走 Rust 端 agent_debug_log → tigerAgent_debug.log，自动加 UI: 前缀与时间戳） */
 function apiLog(level, msg) {
   console.log("[skills][" + level + "] " + msg);
   if (invoke) invoke("agent_debug_log", { line: "[skills][" + level + "] " + msg }).catch(function () {});
@@ -529,7 +529,7 @@ function parseSkillError(err) {
   return { kind: "", message: msg };
 }
 
-/** admAgent HTTP API 客户端（与 agent/api.js 同构，独立实现避免跨视图耦合） */
+/** Agent HTTP API 客户端（与 agent/api.js 同构，独立实现避免跨视图耦合） */
 async function api(method, path, body) {
   return await invoke("agent_http_request", { method, path, body: body || null });
 }

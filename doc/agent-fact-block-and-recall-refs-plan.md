@@ -1,10 +1,10 @@
-# admAgent 改动清单（供审核）：确定性事实块 + 归档条目标号
+# Agent 改动清单（供审核）：确定性事实块 + 归档条目标号
 
 > 借鉴 [pi-vcc](https://github.com/sting8k/pi-vcc) 的两项：**确定性事实段**（`src/extract/*`）与
 > **会话级 `#N` 标号 + 区间/展开取回**（`src/core/global-indices.ts`、`src/core/recall-run.ts`）。
 >
-> 范围：**仅 admAgent（服务端 Go）**，桌面端 / TUI 代码不改。按项目约定，本文件只是清单，
-> admAgent 目录未做任何写入；确认后再实施，改完需 `build.ps1` 重编译并 `pnpm agent:push` 推送 sidecar 才在 ADM 生效。
+> 范围：**仅 Agent（服务端 Go）**，桌面端 / TUI 代码不改。按项目约定，本文件只是清单，
+> Agent 目录未做任何写入；确认后再实施，改完需 `build.ps1` 重编译并 `pnpm agent:push` 推送 sidecar 才在 Tiger 生效。
 >
 > 文中所有行号对应当前工作区代码，实施时以实际为准。
 
@@ -14,13 +14,13 @@
 
 上一轮实测结论（同一语料、同一相关性标注、双侧生产代码）：
 
-| | admAgent | pi-vcc |
+| | Agent | pi-vcc |
 |---|---|---|
 | 关键字查询 recall@10 / MRR | **4.12 / 0.92** | 2.73 / 0.74 |
 | 整句查询 recall@10 / MRR | **3.80 / 0.70** | 2.10 / 0.59（出厂 0.69） |
 | 有 `#N` 指针时取回精度 | 无此能力（只能靠关键词碰） | **确定性定位 ≈100%** |
 
-结论：**排序准确率 admAgent 更高，不需要动检索栈**；要借的是另外两件事——
+结论：**排序准确率 Agent 更高，不需要动检索栈**；要借的是另外两件事——
 把"事实"从 LLM 手里拿走（消除路径/commit 幻觉），以及给摘要装上指针（把"模糊检索"变成"精确取回"）。
 
 ---
@@ -61,7 +61,7 @@
 | Commits | bash 的 `ToolCall.Input`（JSON 字符串） | 正则 `git commit ... -m "…"`（含 heredoc `-m "$(cat <<EOF …` 首行）；hash 从紧随的 `ToolResult.Content` 抓 `\[branch ([0-9a-f]{7,12})\]` |
 | Archived | 本次归档条目的编号区间，见改动 B | `#<min>–#<max>` |
 
-路径参数：admAgent 的编辑/读取工具**统一用 `file_path`**（已核对 `tools/edit.go:27`、`write.go:28`、`multiedit.go:30`、`view.go:50`、`lsp_replace_symbol.go:21`），解析函数不需要多键名兼容；但要对 `ToolCall.Input` 的 JSON 解析失败做静默跳过（流式截断可能产生坏 JSON）。
+路径参数：Agent 的编辑/读取工具**统一用 `file_path`**（已核对 `tools/edit.go:27`、`write.go:28`、`multiedit.go:30`、`view.go:50`、`lsp_replace_symbol.go:21`），解析函数不需要多键名兼容；但要对 `ToolCall.Input` 的 JSON 解析失败做静默跳过（流式截断可能产生坏 JSON）。
 
 路径裁剪：照搬 pi-vcc `extract/files.ts` 的 `longestCommonDirPrefix` —— 对所有绝对路径求最长公共目录前缀并剥掉，能省掉大量重复前缀（会话都在同一工作区）。
 
@@ -126,7 +126,7 @@ summaryMessage.PrependContent("---\n" + res.Anchors + "\n\n" + res.Facts + "\n--
 ### A.6 风险 / 回滚
 
 - 风险：事实块占用摘要注意力与 token。控制手段：整块 ≤600 字符（相对 `deriveSummaryMaxTokens` 的 512–3072 token 上限占比很小）。
-- 回滚：`options.fact_block = false`（admAgent.json 顶层，走现有 config/set 热重载）；默认 `true`。
+- 回滚：`options.fact_block = false`（tigerAgent.json 顶层，走现有 config/set 热重载）；默认 `true`。
 - 不影响：TUI / 桌面对摘要的展示（只是多几行结构化文本）；`session show` 不受影响。
 
 ---
@@ -246,7 +246,7 @@ A 与 B1 无依赖冲突，可并行；B2 依赖 B1 的编号。
 
 ## 6. 实施记录（已按本文档执行）
 
-范围：**A + B1 + B2**（B3"每文件最后引用"未做，留作后续）；**只改 admAgent（服务端）**，桌面端 / TUI 无需改动。
+范围：**A + B1 + B2**（B3"每文件最后引用"未做，留作后续）；**只改 Agent（服务端）**，桌面端 / TUI 无需改动。
 按 §5 的建议执行：复用 `turn` + 一次性回填、事实块默认开且 Read 默认关、Archived 行显示、只显示数字编号。
 
 ### 改动文件
@@ -274,7 +274,7 @@ A 与 B1 无依赖冲突，可并行；B2 依赖 B1 的编号。
 - `go build ./...` 通过；对新增/改动文件按 LF 规范化后 `gofmt` 无差异（`config.go` 里有一处**既有**的 struct 对齐问题，未动以保持 diff 最小）。
 - `go test ./internal/context/ ./internal/agent/ ./internal/config/ -count=1` 全绿。
 - 全量 `go test ./internal/...`：仅 `internal/shell`（shebang，依赖 `/bin/bash`）、`internal/server`（TempDir 下 `rail3.db` 文件锁）与 `internal/backend`（`TestBackend_ReloadSkills`，TempDir 句柄）失败；三者都已用 `git worktree` 在**未改动的 HEAD** 上复现同样失败，确认是既有环境问题，与本次改动无关（AGENTS.md 的测试说明已同步补充）。
-- **未做**：真实会话端到端验收。需按 AGENTS.md 重编译并推送 sidecar 后，在 ADM 里跑一次压缩，观察摘要是否出现 `[Session Facts]` 与 `Archived: entries #a..#b`，并试一次 `recall(range:[a,b])` / `expand:[N]`。
+- **未做**：真实会话端到端验收。需按 AGENTS.md 重编译并推送 sidecar 后，在 Tiger 里跑一次压缩，观察摘要是否出现 `[Session Facts]` 与 `Archived: entries #a..#b`，并试一次 `recall(range:[a,b])` / `expand:[N]`。
 
 ### 评审修复记录（8 项，全部已修）
 
@@ -357,7 +357,7 @@ usableRequestBudget(cw, fixedOverhead) − 2×deriveSummaryMaxTokens(cw)
 
 ## 9. 第五轮：字段日志驱动的三处参数修正
 
-来源：2026-10-15 现场日志（`admAgent.log`，128k 与 1M 窗口模型混跑）。压缩链路本身健康——4 次压缩全部落地、无 `summarize skipped` / `max summarize resumes` / `could not bring`、事实块 203–205 字符稳定、无 ERROR——但暴露三处参数问题：
+来源：2026-10-15 现场日志（`Agent.log`，128k 与 1M 窗口模型混跑）。压缩链路本身健康——4 次压缩全部落地、无 `summarize skipped` / `max summarize resumes` / `could not bring`、事实块 203–205 字符稳定、无 ERROR——但暴露三处参数问题：
 
 | 级别 | 现象（日志证据） | 修复 |
 |---|---|---|

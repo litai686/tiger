@@ -7,12 +7,13 @@
 //
 // 能回退到多早由服务端快照决定（确认文案必须如实写出来，不能让用户以为文件一定回退了）：
 //   1) 每个会话只保留最近 N 轮文件快照（options.undo_checkpoints，默认 10；见
-//      admAgent internal/undo 的 DefaultMaxCheckpoints），更早的轮次没有快照 →
+//      Agent internal/undo 的 DefaultMaxCheckpoints），更早的轮次没有快照 →
 //      只能回滚对话记录，文件改动会残留；
 //   2) 工作目录不是 git 仓库（或没装 git）时服务端从不开快照 → 同样只能回滚对话记录。
-// 第 2 条用 Rust 命令 check_git_repo 探测（见 doc/rust-backend.md）。
+// 第 2 条用服务端 GET /v1/workspaces/{id}/git-info 探测（工作目录在服务端主机，
+// 桌面端起进程探测只会得到“不是 git 仓库”）。
 import { t as _t } from "../../i18n.js";
-import { S, invoke } from "./store.js";
+import { S } from "./store.js";
 import { api } from "./api.js";
 import { log } from "./log.js";
 import { showConfirm, showInfo, showWarning, reportError } from "./ui.js";
@@ -33,7 +34,7 @@ export function initUndo(opts) {
 
 // 撤销入口的可用性：空串 = 可用，否则是给用户看的原因（同时作为按钮 tooltip）。
 // 服务端 undo 是整仓库回滚，因此「同工作区其它会话在跑」也必须拦住：否则会连带回滚
-// 别人的改动与提交（见 doc/admAgent-parallel-sessions-file-guards.md）。
+// 别人的改动与提交（见 doc/Agent-parallel-sessions-file-guards.md）。
 function undoBlockReason() {
   if (!S.currentConvId) return _t("请先选择一个会话");
   if (undoInFlight) return _t("正在撤销，请稍候");
@@ -88,21 +89,19 @@ function undoUrl(convId) {
   return "/v1/workspaces/" + S.serverInfo.workspace_id + "/agent/sessions/" + convId + "/undo";
 }
 
-// 工作目录的 git 能力（Rust 侧 check_git_repo）。按工作目录路径缓存：
-// 撤销能否回退文件完全取决于它，但每次点击都跑一次 git 没必要。
+// 工作目录的 git 能力（服务端 GET /workspaces/{id}/git-info）。按 workspace 缓存：
+// 撤销能否回退文件完全取决于它，但每次点击都跑一次 git 没必要。探测必须在
+// 服务端做——工作目录在服务端主机上，桌面端起进程探测只会得到“不是 git 仓库”。
 var gitCapabilityCache = {};
 
 async function undoCapability() {
-  var path = (S.workspaceInfo && S.workspaceInfo.path) || "";
-  if (!path) {
-    try { path = (await invoke("get_agent_workdir")) || ""; } catch (_) { path = ""; }
-  }
-  if (!path) return null;
-  if (gitCapabilityCache[path]) return gitCapabilityCache[path];
+  var wsId = S.serverInfo && S.serverInfo.workspace_id;
+  if (!wsId) return null;
+  if (gitCapabilityCache[wsId]) return gitCapabilityCache[wsId];
   try {
-    var info = await invoke("check_git_repo", { path: path });
+    var info = await api("GET", "/v1/workspaces/" + wsId + "/git-info");
     if (info) {
-      gitCapabilityCache[path] = info;
+      gitCapabilityCache[wsId] = info;
       return info;
     }
   } catch (e) {
@@ -132,7 +131,9 @@ export function undoToRound(anchorId) {
     if (turns > 1) {
       msg += "\n\n" + _t("注意：跨轮撤销的文件回退依赖服务端保留的每轮快照（默认最近 10 轮），更早轮次只能回退对话记录。");
     }
-    if (cap && cap.git_installed === false) {
+    if (cap && cap.exists === false) {
+      msg += "\n\n" + _t("服务端找不到当前工作目录（") + (cap.path || S.workspaceInfo && S.workspaceInfo.path || "") + _t("）：只能回退对话记录，文件修改不会被回退。");
+    } else if (cap && cap.git_installed === false) {
       msg += "\n\n" + _t("当前工作目录未安装 git：只能回退对话记录，文件修改不会被回退。");
     } else if (cap && !cap.is_repo) {
       msg += "\n\n" + _t("当前工作目录不是 git 仓库：只能回退对话记录，文件修改不会被回退。");

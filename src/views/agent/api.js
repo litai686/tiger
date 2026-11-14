@@ -1,4 +1,4 @@
-// admAgent HTTP API 客户端
+// Agent HTTP API 客户端
 import { invoke } from "./store.js";
 
 // 敏感字段值脱敏（只处理一层对象），避免 API Key 等凭据泄露到 devtools 控制台

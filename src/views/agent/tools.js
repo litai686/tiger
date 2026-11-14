@@ -23,7 +23,7 @@ export async function loadTools() {
   };
 
   // 并行请求四个端点（工作区详情用于 skill 状态快照），外加本地磁盘扫描兜底
-  // + admAgent.json 中的 MCP 配置（可编辑来源）
+  // + tigerAgent.json 中的 MCP 配置（可编辑来源）
   var results = await Promise.allSettled([
     api("GET", "/v1/workspaces/" + wsId + "/skills"),
     api("GET", "/v1/workspaces/" + wsId + "/mcp/states"),
@@ -100,7 +100,7 @@ export async function loadTools() {
     });
   }
 
-  // MCP clients：配置（admAgent.json 顶层 mcp）为可编辑来源，
+  // MCP clients：配置（tigerAgent.json 顶层 mcp）为可编辑来源，
   // /mcp/states 提供运行状态；两者按名称合并展示：
   // - 已配置：有点击编辑入口；有运行状态则显示状态，否则显示「待重启生效」（新增/修改需重启 server 初始化）
   // - 仅运行状态存在（配置文件里没有）：只读展示

@@ -138,19 +138,6 @@ const template = `
   .theme-card .theme-check { color: var(--c-accent); font-weight: 700; visibility: hidden; }
   .theme-card.active .theme-check { visibility: visible; }
 
-  .btn-danger {
-    background: #d32f2f;
-    color: #fff;
-    border: none;
-    padding: 3px 12px;
-    border-radius: 4px;
-    font-size: 12px;
-    cursor: pointer;
-    transition: background 0.2s;
-    vertical-align: middle;
-  }
-  .btn-danger:hover { background: #b71c1c; }
-
   .version-table { width: 100%; max-width: 500px; }
   .version-table tr { border-bottom: 1px solid var(--c-border-soft); }
   .version-table td { padding: 12px 0; font-size: 14px; }
@@ -195,33 +182,13 @@ const template = `
     to { transform: translateX(0); opacity: 1; }
   }
 
-  .confirm-overlay {
-    display: none;
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(0, 0, 0, 0.6);
-    z-index: 9999;
-    justify-content: center;
-    align-items: center;
-  }
-  .confirm-overlay.show { display: flex; }
-  .confirm-dialog {
-    background: var(--c-panel);
-    border: 1px solid var(--c-border);
-    border-radius: 12px;
-    padding: 28px 32px;
-    max-width: 400px;
-    width: 90%;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-    text-align: center;
-  }
-  .confirm-dialog .confirm-title { font-size: 18px; font-weight: 600; color: var(--c-text-hi); margin-bottom: 12px; }
-  .confirm-dialog .confirm-message { font-size: 14px; color: var(--c-text-2); line-height: 1.6; margin-bottom: 24px; white-space: pre-line; }
-  .confirm-dialog .confirm-buttons { display: flex; gap: 12px; justify-content: center; }
-  .confirm-dialog .btn-confirm { background: #d32f2f; color: #fff; border: none; padding: 8px 28px; border-radius: 8px; font-size: 14px; cursor: pointer; transition: background 0.2s; }
-  .confirm-dialog .btn-confirm:hover { background: #b71c1c; }
-  .confirm-dialog .btn-cancel { background: var(--c-overlay); color: var(--c-text); border: none; padding: 8px 28px; border-radius: 8px; font-size: 14px; cursor: pointer; transition: background 0.2s; }
-  .confirm-dialog .btn-cancel:hover { background: var(--c-overlay-strong); }
+  /* 服务端配置引导 / 检测结果 */
+  .server-guide-block { margin-bottom: 16px; padding: 12px 14px; background: var(--c-panel-2); border: 1px solid var(--c-border); border-radius: 8px; }
+  .server-guide-title { font-size: 13px; font-weight: 600; color: var(--c-text); margin-bottom: 8px; }
+  .server-guide { margin: 0; padding-left: 20px; font-size: 12px; color: var(--c-text-3); line-height: 1.9; }
+  .server-guide li { margin-bottom: 2px; }
+  .server-guide code { font-family: Consolas, Monaco, monospace; font-size: 12px; color: var(--c-text); background: var(--c-overlay); padding: 1px 5px; border-radius: 4px; word-break: break-all; }
+  .server-health-line { white-space: pre-line; line-height: 1.8; font-size: 12px; word-break: break-all; }
 </style>
 <div id="settings-app">
   <div id="settings-header">
@@ -231,7 +198,6 @@ const template = `
   <div id="settings-layout">
     <nav id="settings-nav">
       <div class="nav-item active" data-panel="appearance" id="nav-appearance">${_t("外观主题")}</div>
-      <div class="nav-item" data-panel="wxbot" id="nav-wxbot">${_t("微信 Bot")}</div>
       <div class="nav-item" data-panel="proxy" id="nav-proxy">${_t("网络代理")}</div>
       <div class="nav-item" data-panel="server" id="nav-server">${_t("服务端连接")}</div>
       <div class="nav-item" data-panel="version" id="nav-version">${_t("系统版本号")}</div>
@@ -258,70 +224,22 @@ const template = `
         </div>
       </div>
 
-      <div id="panel-wxbot" class="panel">
-        <div class="panel-title">${_t("微信 Bot（iLink）")}</div>
-
-        <div class="param-group">
-          <div class="param-group-title">${_t("绑定状态")}</div>
-          <div class="param-row">
-            <div class="param-label">${_t("状态")}</div>
-            <div class="param-input"><span id="wxbot-state" style="font-size:13px;color:var(--c-text-2);">${_t("加载中…")}</span></div>
-          </div>
-          <div class="param-row">
-            <div class="param-label">Bot ID</div>
-            <div class="param-input"><span id="wxbot-botid" style="font-size:13px;color:var(--c-text-2);">-</span></div>
-          </div>
-          <div class="param-row">
-            <div class="param-label">${_t("主人微信")}</div>
-            <div class="param-input">
-              <span id="wxbot-owner" style="font-size:13px;color:var(--c-text-2);">-</span>
-              <div class="param-desc">${_t("首个给 Bot 发消息的微信号自动成为主人，其余人消息忽略")}</div>
-            </div>
-          </div>
-          <div class="param-row">
-            <div class="param-label">${_t("消息统计")}</div>
-            <div class="param-input"><span id="wxbot-stats" style="font-size:13px;color:var(--c-text-2);">${_t("收 ")}0 ${_t(" / 发 ")}0</span></div>
-          </div>
-          <div class="param-row">
-            <div class="param-label"></div>
-            <div class="param-input" style="display:flex;gap:10px;max-width:none;">
-              <button id="wxbot-bind-btn" style="background:var(--c-accent);color:#fff;border:none;padding:8px 20px;border-radius:8px;font-size:13px;cursor:pointer;">${_t("绑定微信")}</button>
-              <button id="wxbot-toggle-btn" style="display:none;background:var(--c-overlay);color:var(--c-text);border:none;padding:8px 20px;border-radius:8px;font-size:13px;cursor:pointer;">${_t("暂停")}</button>
-              <button id="wxbot-unbind-btn" class="btn-danger" style="display:none;padding:8px 20px;border-radius:8px;font-size:13px;">${_t("解绑")}</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="param-group">
-          <div class="param-group-title">${_t("Bot 行为")}</div>
-          <div class="param-row">
-            <div class="param-label">${_t("工作目录")}</div>
-            <div class="param-input"><span style="font-size:13px;color:var(--c-text-2);">${_t("跟随 Agent 页工作目录")}</span><div class="param-desc">${_t("微信 Bot 与 Agent 页使用同一工作目录，在 Agent 页修改")}</div></div>
-          </div>
-        </div>
-
-        <div class="param-group">
-          <div class="param-group-title">${_t("最近活动")}</div>
-          <div id="wxbot-activity" style="font-size:12px;color:var(--c-text-3);line-height:1.8;max-height:200px;overflow-y:auto;background:var(--c-panel-2);border:1px solid var(--c-border);border-radius:6px;padding:10px 12px;">${_t("暂无活动")}</div>
-        </div>
-      </div>
-
       <div id="panel-proxy" class="panel">
         <div class="panel-title">${_t("网络代理")}</div>
         <div class="param-group">
           <div class="param-group-title">${_t("代理设置")}</div>
           <div class="param-row">
-            <div class="param-label">${_t("启用代理")}<div class="param-key">agent_proxy.enabled</div></div>
+                        <div class="param-label">${_t("启用代理")}<div class="param-key">agent_proxy.enabled</div></div>
             <div class="param-input">
-              <div class="checkbox-wrap"><input type="checkbox" id="proxy_enabled"><span>${_t("为 admAgent 的 LLM 请求启用代理")}</span></div>
-              <div class="param-desc">${_t("仅影响 admAgent 跟大模型交互的请求，桌面端下载等不走代理")}</div>
+              <div class="checkbox-wrap"><input type="checkbox" id="proxy_enabled"><span>${_t("为服务端的 Agent 请求启用代理")}</span></div>
+              <div class="param-desc">${_t("代理在服务端主机上生效，作用于 Agent 的 LLM 请求与网络工具；桌面端下载/更新不走代理")}</div>
             </div>
           </div>
           <div class="param-row">
             <div class="param-label">${_t("代理地址")}<div class="param-key">agent_proxy.url</div></div>
             <div class="param-input">
               <input type="text" id="proxy_url" placeholder="http://127.0.0.1:7890" style="max-width:400px;">
-              <div class="param-desc">${_t("支持 http / https / socks5 协议，如 http://127.0.0.1:7890")}</div>
+              <div class="param-desc">${_t("支持 http / https / socks5 协议，如 http://127.0.0.1:7890；地址以服务端主机为准（127.0.0.1 = 服务端本机）")}</div>
             </div>
           </div>
         </div>
@@ -330,64 +248,78 @@ const template = `
       <div id="panel-server" class="panel">
         <div class="panel-title">${_t("服务端连接")}</div>
         <div class="param-group">
-          <div class="param-group-title">${_t("连接模式")}</div>
+          <div class="param-group-title">${_t("连接检测")}</div>
           <div class="param-row">
-            <div class="param-label">${_t("模式")}<div class="param-key">server.mode</div></div>
-            <div class="param-input">
-              <select id="server-mode" style="max-width:400px;">
-                <option value="local">${_t("本地（同机，自动管理 admAgent 进程）")}</option>
-                <option value="remote">${_t("远程（服务端在另一台机器，TLS 加密）")}</option>
-              </select>
-              <div class="param-desc" id="server-mode-desc">${_t("本地模式不启用 TLS：服务端与桌面端同机，靠操作系统权限隔离。修改后需重启应用生效。")}</div>
+            <div class="param-label">${_t("当前状态")}</div>
+            <div class="param-input" style="max-width:none;">
+              <span id="server-health" style="font-size:13px;color:var(--c-text-2);">${_t("尚未检测")}</span>
+              <div class="param-desc server-health-line" id="server-health-detail" style="margin-top:6px;"></div>
+            </div>
+          </div>
+          <div class="param-row">
+            <div class="param-label"></div>
+            <div class="param-input" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;max-width:none;">
+              <button id="server-check-btn" style="background:var(--c-accent);color:#fff;border:none;padding:8px 20px;border-radius:8px;font-size:13px;cursor:pointer;">${_t("检测服务端")}</button>
+              <span class="param-desc" style="margin-top:0;">${_t("检查连接串完整性 → TLS 指纹校验 → /v1/health → 带 token 的接口")}</span>
             </div>
           </div>
         </div>
+        <div class="param-group" id="server-migrate-group" style="display:none;">
+          <div class="param-group-title">${_t("旧配置迁移")}</div>
+          <div class="param-desc" style="margin-bottom:12px;" id="server-migrate-desc"></div>
+          <div class="param-row">
+            <div class="param-label"></div>
+            <div class="param-input" style="max-width:none;">
+              <button id="server-migrate-btn" style="background:var(--c-accent);color:#fff;border:none;padding:8px 20px;border-radius:8px;font-size:13px;cursor:pointer;">${_t("导入本机旧配置到服务端")}</button>
+              <div class="param-desc" style="margin-top:8px;">${_t("导入内容：provider（含密钥）、MCP、代理、多模态模型、工具开关。工作目录不迁移（本机路径与服务端通常不同）。导入后本机文件只读保留，便于回滚。")}</div>
+            </div>
+          </div>
+        </div>
+        <div class="param-group">
+          <div class="param-group-title">${_t("配置引导")}</div>
+          <div class="param-desc" style="margin-bottom:12px;">${_t("服务端由你自行启动并长期运行；桌面端只负责连接（TCP + TLS 1.3），不会自动拉起或结束任何服务端进程。按下面顺序配置：")}</div>
+          <div class="server-guide-block">
+            <div class="server-guide-title">${_t("① 在服务端机器启动服务")}</div>
+            <ol class="server-guide">
+              <li>${_t("启动服务：")} <code>tigerAgent --host tcp://0.0.0.0:18471</code>${_t("（仅本机使用可绑 127.0.0.1），端口按需修改")}</li>
+              <li>${_t("保持该进程常驻（systemd / 计划任务 / tmux 等）：桌面端不会自动拉起，也不会随桌面端退出而停止")}</li>
+              <li>${_t("复制启动日志里的连接串，或执行 ")}<code>tigerAgent --print-connection</code>${_t(" 重新打印（含地址、服务端指纹与 token）")}</li>
+              <li>${_t("管理 token / 查看客户端连接：浏览器打开服务端 ")}<code>https://&lt;服务端地址&gt;/admin/</code>${_t("（用指纹 + 任一 token 登录）")}</li>
+            </ol>
+          </div>
+          <div class="server-guide-block">
+            <div class="server-guide-title">${_t("② 在桌面端粘贴连接串")}</div>
+            <ol class="server-guide">
+              <li>${_t("把整条连接串粘贴到下方输入框，不需要分别填写地址、指纹和 token")}</li>
+              <li>${_t("点「保存并应用」：保存后自动检测连通性，成功会立即刷新底部服务端状态栏")}</li>
+              <li>${_t("失败时按提示排查：服务端是否在跑、端口/防火墙、指纹是否一致、token 是否最新（服务端执行 --rotate-token 后旧连接串失效）")}</li>
+            </ol>
+          </div>
+        </div>
         <div class="param-group" id="server-remote-group">
-          <div class="param-group-title">${_t("远程服务端")}</div>
+          <div class="param-group-title">${_t("服务端参数")}</div>
           <div class="param-row">
-            <div class="param-label">${_t("服务端地址")}<div class="param-key">server.remote.addr</div></div>
-            <div class="param-input">
-              <input type="text" id="server-addr" placeholder="192.168.1.20:18471" style="max-width:400px;">
-              <div class="param-desc">${_t("服务端启动时用 --host tcp://0.0.0.0:18471 监听，端口按实际填写")}</div>
-            </div>
-          </div>
-          <div class="param-row">
-            <div class="param-label">${_t("服务端指纹")}<div class="param-key">server.remote.fingerprint</div></div>
-            <div class="param-input">
-              <input type="text" id="server-fingerprint" placeholder="sha256:..." style="max-width:400px;">
-              <div class="param-desc">${_t("必须带外获取：服务端启动日志、tigerAgent --print-fingerprint，或 tigerAgent pair --qr。未配对时无法通过首连探测拿到指纹。")}</div>
-            </div>
-          </div>
-          <div class="param-row">
-            <div class="param-label">${_t("SNI")}<div class="param-key">server.remote.sni</div></div>
-            <div class="param-input">
-              <input type="text" id="server-sni" placeholder="tigerAgent.local" style="max-width:400px;">
-              <div class="param-desc">${_t("默认 tigerAgent.local，与服务端证书 SAN 一致；真正的身份校验靠上面的指纹")}</div>
-            </div>
-          </div>
-          <div class="param-row">
-            <div class="param-label">${_t("本设备指纹")}<div class="param-key">device.fingerprint</div></div>
-            <div class="param-input">
-              <span id="server-device-fp" style="font-size:12px;color:var(--c-text-2);word-break:break-all;">-</span>
-              <div class="param-desc" id="server-device-desc">${_t("首次使用远程模式时生成；在服务端执行 tigerAgent pair --approve <指纹> --name <设备名> 完成配对")}</div>
+            <div class="param-label">${_t("连接串")}<div class="param-key">server.remote.connection</div></div>
+            <div class="param-input" style="max-width:none;">
+              <textarea id="server-connection" rows="3" style="width:100%;max-width:680px;font-family:monospace;font-size:12px;" placeholder="tigerAgent://192.168.1.20:18471?fp=sha256:...&amp;token=..."></textarea>
+              <div class="param-desc">${_t("服务端启动时打印的完整连接串：地址、服务端指纹（防中间人）与 token（身份凭据）三部分都在这一条串里")}</div>
             </div>
           </div>
           <div class="param-row">
             <div class="param-label"></div>
             <div class="param-input" style="display:flex;gap:10px;flex-wrap:wrap;max-width:none;">
-              <button id="server-prepare-btn" style="background:var(--c-overlay);color:var(--c-text);border:none;padding:8px 20px;border-radius:8px;font-size:13px;cursor:pointer;">${_t("生成设备身份")}</button>
-              <button id="server-test-btn" style="background:var(--c-overlay);color:var(--c-text);border:none;padding:8px 20px;border-radius:8px;font-size:13px;cursor:pointer;">${_t("测试连接")}</button>
               <button id="server-save-btn" style="background:var(--c-accent);color:#fff;border:none;padding:8px 20px;border-radius:8px;font-size:13px;cursor:pointer;">${_t("保存并应用")}</button>
             </div>
           </div>
           <div class="param-desc" id="server-status" style="margin-top:6px;"></div>
+          <div class="param-desc">${_t("保存并应用会先写入连接串，再自动检测连通性（TLS 指纹 + 健康检查）；成功会立即刷新底部服务端状态栏（CPU / 内存 / 硬盘）")}</div>
         </div>
       </div>
 
       <div id="panel-version" class="panel">
         <div class="panel-title">${_t("系统版本号")}</div>
         <table class="version-table">
-          <tr><td>${_t("Tiger 版本")}</td><td id="v-adm">${_t("检测中...")} <span id="update-badge" style="display:none;color:#4caf50;font-size:12px;margin-left:6px;">${_t("✓ 最新")}</span></td></tr>
+          <tr><td>${_t("Tiger 版本")}</td><td id="v-tiger">${_t("检测中...")} <span id="update-badge" style="display:none;color:#4caf50;font-size:12px;margin-left:6px;">${_t("✓ 最新")}</span></td></tr>
           <tr>
             <td style="padding-top:20px;" colspan="2">
               <button class="btn-save" id="check-update-btn" style="margin-top:0;font-size:13px;padding:8px 20px;">${_t("检查新版本")}</button>
@@ -395,7 +327,7 @@ const template = `
             </td>
           </tr>
           <tr><td>${_t("Tauri 版本")}</td><td id="v-tauri">${_t("检测中...")}</td></tr>
-          <tr><td>${_t("admAgent 版本")}</td><td id="v-admagent">${_t("检测中...")}</td></tr>
+          <tr><td>${_t("Agent 版本")}</td><td id="v-agent">${_t("检测中...")}</td></tr>
           <tr><td>${_t("操作系统")}</td><td id="v-os">${_t("检测中...")}</td></tr>
         </table>
       </div>
@@ -405,7 +337,7 @@ const template = `
         <div class="about-content">
           <h3>Tiger</h3>
           <div class="about-subtitle">Tiger Agent</div>
-          <p>${_t("Tiger 是一个面向智能体（Agent）工作流的桌面客户端，内置 admAgent，接入云端模型即可完成编码与自动化任务。")}</p>
+          <p>${_t("Tiger 是一个面向智能体（Agent）工作流的桌面客户端，内置 Agent，接入云端模型即可完成编码与自动化任务。")}</p>
           <p>${_t("如需定制服务 联系方式：微信: litai686")}</p>
           <p>${_t("项目官网：")}<a href="https://adm.tuduoduo.top/" target="_blank">https://adm.tuduoduo.top/</a></p>
         </div>
@@ -414,44 +346,9 @@ const template = `
   </div>
 </div>
 
-<div class="confirm-overlay" id="confirm-overlay">
-  <div class="confirm-dialog">
-    <div class="confirm-title" id="confirm-title">${_t("删除提示")}</div>
-    <div class="confirm-message" id="confirm-message"></div>
-    <div class="confirm-buttons">
-      <button class="btn-cancel" id="confirm-cancel-btn">${_t("取消")}</button>
-      <button class="btn-confirm" id="confirm-ok-btn">${_t("确定")}</button>
-    </div>
-  </div>
-</div>
-
-<div class="confirm-overlay" id="wxbot-qr-overlay">
-  <div class="confirm-dialog">
-    <div class="confirm-title">${_t("微信扫码绑定")}</div>
-    <div id="wxbot-qr-box" style="display:flex;justify-content:center;align-items:center;min-height:220px;width:220px;background:#fff;border-radius:8px;margin:0 auto 16px;">
-      <span style="color:#333;font-size:13px;">${_t("二维码加载中…")}</span>
-    </div>
-    <div class="confirm-message">${_t("使用微信「扫一扫」确认开启 Bot 功能")}</div>
-    <div class="confirm-buttons">
-      <button class="btn-cancel" id="wxbot-qr-cancel-btn">${_t("取消")}</button>
-    </div>
-  </div>
-</div>
-
-<div class="confirm-overlay" id="wxbot-code-overlay">
-  <div class="confirm-dialog">
-    <div class="confirm-title">${_t("输入配对码")}</div>
-    <div class="confirm-message" id="wxbot-code-hint">${_t("请输入微信手机端显示的配对数字：")}</div>
-    <input id="wxbot-code-input" type="text" inputmode="numeric" autocomplete="off" style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid var(--c-overlay-strong);background:rgba(255,255,255,0.06);color:#fff;font-size:16px;letter-spacing:2px;text-align:center;margin-bottom:16px;">
-    <div class="confirm-buttons">
-      <button class="btn-cancel" id="wxbot-code-cancel-btn">${_t("取消")}</button>
-      <button class="btn-confirm" id="wxbot-code-ok-btn">${_t("确定")}</button>
-    </div>
-  </div>
-</div>
 `;
 
-const invoke = () => window.__adm_invoke;
+const invoke = () => window.__agent_invoke;
 
 // HTML 转义：远端 update.json 下发的版本号 / 地址会拼进弹窗 innerHTML，需真实转义防注入
 function escHtml(s) {
@@ -496,7 +393,10 @@ async function saveProxy() {
     let s = await invoke()("load_settings");
     s.agent_proxy = proxy;
     await invoke()("save_settings", { settings: s });
-    showToast(_t("代理设置已保存"));
+    // 代理必须落到服务端主机上：远程部署时本机文件对服务端不可见。
+    // 这里显式等待服务端确认，失败直接把原因显示给用户（不再静默）。
+    await invoke()("apply_server_settings", { patch: { agent_proxy: proxy } });
+    showToast(_t("代理已应用到服务端"));
   } catch (e) {
     console.error("[settings] 保存代理设置失败:", e);
     showToast(friendlyError(e, { prefix: "保存失败: " }), true);
@@ -511,100 +411,178 @@ function setupProxyPanel() {
   }
 }
 
-// ===== 服务端连接（本地 / 远程，docs/tcp-tls-ed25519.md §11）=====
-
-function refreshServerModeUI() {
-  var modeEl = document.getElementById("server-mode");
-  var group = document.getElementById("server-remote-group");
-  var desc = document.getElementById("server-mode-desc");
-  if (!modeEl || !group) return;
-  var remote = modeEl.value === "remote";
-  group.style.display = remote ? "" : "none";
-  if (desc) {
-    desc.textContent = remote
-      ? _t("远程模式强制 TLS 1.3 + Ed25519 双向认证：工作目录、会话、附件与配置全部留在服务端，桌面端只是操作界面。修改后需重启应用生效。")
-      : _t("本地模式不启用 TLS：服务端与桌面端同机，靠操作系统权限隔离。修改后需重启应用生效。");
-  }
-}
+// ===== 服务端连接（TCP + TLS，docs/tcp-tls-ecdsa.md §11）=====
+// 桌面端不再有本地/远程之分：服务端由用户自行启动，这里只维护一条连接串
+// （地址 + 服务端指纹 + token）。
 
 async function loadServerConnection() {
   try {
     const info = await invoke()("get_server_connection");
-    const modeEl = document.getElementById("server-mode");
-    if (modeEl) modeEl.value = info.mode === "remote" ? "remote" : "local";
-    const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ""; };
-    setVal("server-addr", info.addr);
-    setVal("server-sni", info.sni || "tigerAgent.local");
-    setVal("server-fingerprint", info.fingerprint);
-    const fpEl = document.getElementById("server-device-fp");
-    if (fpEl) fpEl.textContent = info.device_ready ? info.device_fingerprint : _t("尚未生成（点“生成设备身份”）");
+    const el = document.getElementById("server-connection");
+    if (el) el.value = info.connection || "";
     const status = document.getElementById("server-status");
     if (status) {
       status.textContent = info.error || "";
       status.style.color = info.error ? "#d32f2f" : "var(--c-text-3)";
     }
-    refreshServerModeUI();
   } catch (e) {
     console.error("[settings] 加载服务端连接失败:", e);
   }
 }
 
 async function saveServerConnection() {
-  const mode = document.getElementById("server-mode").value;
-  const addr = document.getElementById("server-addr").value.trim();
-  const sni = document.getElementById("server-sni").value.trim();
-  const fingerprint = document.getElementById("server-fingerprint").value.trim();
+  const connection = document.getElementById("server-connection").value.trim();
+  const status = document.getElementById("server-status");
+  const btn = document.getElementById("server-save-btn");
+  if (btn) { btn.disabled = true; btn.textContent = _t("检测中…"); }
   try {
-    await invoke()("set_server_connection", { mode, addr, sni, fingerprint });
-    showToast(_t("服务端连接已保存，重启应用后生效"));
-    loadServerConnection();
+    await invoke()("set_server_connection", { connection });
+    // 保存成功后立刻验证连通性：成功提示「保存成功」并刷新底部服务端状态栏；
+    // 失败只提示「连接失败」，详细原因由 runServerCheck 写进上方「连接检测」区域。
+    const healthy = await runServerCheck();
+    if (status) {
+      status.textContent = healthy ? "" : _t("连接失败，请检查连接串与服务端状态（详细原因见上方「连接检测」）");
+      status.style.color = healthy ? "var(--c-text-3)" : "#ef5350";
+    }
+    if (healthy) {
+      showToast(_t("保存成功"));
+      if (window.Agent && window.Agent.refreshSystemInfo) window.Agent.refreshSystemInfo();
+    } else {
+      showToast(_t("连接失败"), true);
+    }
   } catch (e) {
     console.error("[settings] 保存服务端连接失败:", e);
     showToast(friendlyError(e, { prefix: "保存失败: " }), true);
+    if (status) { status.textContent = errText(e); status.style.color = "#ef5350"; }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = _t("保存并应用"); }
   }
 }
 
-async function prepareServerDeviceIdentity() {
-  try {
-    const fp = await invoke()("prepare_device_identity");
-    const fpEl = document.getElementById("server-device-fp");
-    if (fpEl) fpEl.textContent = fp;
-    showToast(_t("设备身份已生成，请在服务端批准：") + " tigerAgent pair --approve " + fp);
-  } catch (e) {
-    console.error("[settings] 生成设备身份失败:", e);
-    showToast(friendlyError(e, { prefix: "生成失败: " }), true);
-  }
+// 连接串里包含 token，检测结果只展示地址和指纹前缀，绝不回显 token
+function connectionSummary(raw) {
+  const s = (raw || "").trim();
+  const m = s.match(/^tigerAgent:\/\/([^?]+)\?(.*)$/);
+  if (!m) return s;
+  let fp = "";
+  m[2].split("&").forEach(function (pair) {
+    const kv = pair.split("=");
+    if (kv[0] === "fp") fp = kv.slice(1).join("=");
+  });
+  return m[1] + (fp ? "（指纹 " + fp.slice(0, 16) + "…）" : "");
 }
 
-async function testServerConnection() {
-  const status = document.getElementById("server-status");
-  if (status) { status.textContent = _t("正在测试连接…"); status.style.color = "var(--c-text-3)"; }
+// 原始错误文本：检测结果要给用户可排查的细节（地址、TLS 报文、路径），
+// 不做友好化改写，否则「连不上」和「指纹不匹配」会变得无法区分
+function errText(e) {
+  if (e == null) return "";
+  if (typeof e === "string") return e;
+  return e.message || String(e);
+}
+
+// 逐项检测：连接串完整性 → TLS 指纹校验 → 带 token 的接口。
+// 与启动时的自检（index.html 的 checkServerOnStartup）用同一组命令，
+// 区别是这里不轮询（用户手动点，服务端要么在跑要么没跑），并输出逐行结果。
+async function runServerCheck() {
+  const statusEl = document.getElementById("server-health");
+  const detailEl = document.getElementById("server-health-detail");
+  const lines = [];
+  const push = (ok, text) => lines.push((ok ? "✅ " : "❌ ") + text);
+  if (statusEl) { statusEl.textContent = _t("检测中…"); statusEl.style.color = "var(--c-text-3)"; }
+  if (detailEl) { detailEl.textContent = ""; detailEl.style.color = "var(--c-text-3)"; }
+  const started = Date.now();
+
+  let configured = false;
   try {
-    const msg = await invoke()("test_server_connection");
-    if (status) { status.textContent = msg; status.style.color = "#4caf50"; }
+    const conn = await invoke()("get_server_connection");
+    if (conn.error) {
+      push(false, _t("连接串不完整：") + conn.error);
+    } else {
+      configured = true;
+      push(true, _t("服务端地址：") + connectionSummary(conn.connection));
+    }
   } catch (e) {
-    const text = friendlyError(e, { prefix: "" });
-    if (status) { status.textContent = text; status.style.color = "#d32f2f"; }
+    push(false, _t("读取服务端配置失败：") + errText(e));
   }
+
+  let healthy = false;
+  if (configured) {
+    if (statusEl) statusEl.textContent = _t("检测中…（健康检查）");
+    try {
+      const msg = await invoke()("test_server_connection");
+      healthy = true;
+      push(true, _t("健康检查通过：") + msg);
+    } catch (e) {
+      push(false, _t("健康检查失败：") + errText(e));
+      push(false, _t("请确认服务端已启动（tigerAgent --host tcp://0.0.0.0:<端口>）、地址/端口可达、连接串里的指纹与 token 与当前服务端一致"));
+    }
+  }
+
+  lines.push(_t("耗时 ") + (Date.now() - started) + " ms");
+  if (detailEl) {
+    detailEl.textContent = lines.join("\n");
+    detailEl.style.color = healthy ? "var(--c-text-2)" : "#ef5350";
+  }
+  if (statusEl) {
+    statusEl.textContent = healthy ? _t("服务端正常") : _t("服务端异常，请检查配置");
+    statusEl.style.color = healthy ? "#4caf50" : "#ef5350";
+  }
+  return healthy;
 }
 
 function setupServerPanel() {
-  var modeEl = document.getElementById("server-mode");
-  if (modeEl) modeEl.addEventListener("change", refreshServerModeUI);
   var saveBtn = document.getElementById("server-save-btn");
   if (saveBtn) saveBtn.addEventListener("click", saveServerConnection);
-  var prepareBtn = document.getElementById("server-prepare-btn");
-  if (prepareBtn) prepareBtn.addEventListener("click", prepareServerDeviceIdentity);
-  var testBtn = document.getElementById("server-test-btn");
-  if (testBtn) testBtn.addEventListener("click", testServerConnection);
+  var migrateBtn = document.getElementById("server-migrate-btn");
+  if (migrateBtn) migrateBtn.addEventListener("click", importLocalConfig);
+  // 「检测服务端」仍可手动重新检测（保存并应用已内置同一套检测）
+  var checkBtn = document.getElementById("server-check-btn");
+  if (checkBtn) checkBtn.addEventListener("click", runServerCheck);
+  refreshMigrationNotice();
+}
+
+// 旧配置迁移提示：本机仍留着改造前写的 tigerAgent.json 时展示导入入口。
+async function refreshMigrationNotice() {
+  const group = document.getElementById("server-migrate-group");
+  const desc = document.getElementById("server-migrate-desc");
+  if (!group || !desc) return;
+  try {
+    const diff = await invoke()("local_agent_config_diff");
+    if (!diff || !diff.available) {
+      group.style.display = "none";
+      return;
+    }
+    const parts = [];
+    if (diff.providers) parts.push(_t("provider ") + diff.providers + _t(" 个"));
+    if (diff.mcp) parts.push("MCP " + diff.mcp + _t(" 个"));
+    if (diff.agent_proxy) parts.push(_t("网络代理"));
+    if (diff.agent_vision_model) parts.push(_t("多模态模型"));
+    if (diff.options) parts.push(_t("工具开关"));
+    desc.textContent = _t("检测到本机仍保存着旧版 Agent 配置：") + parts.join(_t("、")) +
+      _t("。远程部署下这些配置对服务端无效，建议导入到服务端。");
+    group.style.display = "";
+  } catch (e) {
+    group.style.display = "none";
+  }
+}
+
+async function importLocalConfig() {
+  try {
+    await invoke()("import_local_agent_config");
+    showToast(_t("旧配置已导入服务端"));
+    refreshMigrationNotice();
+  } catch (e) {
+    console.error("[settings] 导入旧配置失败:", e);
+    showToast(friendlyError(e, { prefix: _t("导入失败: ") }), true);
+  }
 }
 
 async function loadVersionInfo() {
   try {
-    const admVersion = await invoke()("get_app_version");
-    document.getElementById("v-adm").innerHTML = admVersion + ' <span id="update-badge" style="display:none;color:#4caf50;font-size:12px;margin-left:6px;">' + _t("✓ 最新") + '</span>';
+    const tigerVersion = await invoke()("get_app_version");
+    document.getElementById("v-tiger").innerHTML = tigerVersion + ' <span id="update-badge" style="display:none;color:#4caf50;font-size:12px;margin-left:6px;">' + _t("✓ 最新") + '</span>';
     // 后台静默下载已就绪时给出可升级提示（用户此前选了「稍后再说」也能在这里手动触发）
-    const pending = window.ADM && window.ADM.getAppUpdate ? window.ADM.getAppUpdate() : null;
+    const pending = window.Agent && window.Agent.getAppUpdate ? window.Agent.getAppUpdate() : null;
     if (pending && pending.status === "ready") {
       const statusEl = document.getElementById("update-status");
       if (statusEl) {
@@ -613,7 +591,7 @@ async function loadVersionInfo() {
       }
     }
   } catch (e) {
-    document.getElementById("v-adm").textContent = _t("未知");
+    document.getElementById("v-tiger").textContent = _t("未知");
   }
   try {
     const tauriVersion = await invoke()("get_tauri_version");
@@ -622,10 +600,11 @@ async function loadVersionInfo() {
     document.getElementById("v-tauri").textContent = _t("未知");
   }
   try {
-    const agentVersion = await invoke()("get_adm_agent_version");
-    document.getElementById("v-admagent").textContent = agentVersion || _t("未知");
+    // 服务端版本只能向远端查询（GET /v1/version）：桌面端不再管理本地服务进程
+    const serverVersion = await invoke()("get_server_version");
+    document.getElementById("v-agent").textContent = serverVersion || _t("未连接");
   } catch (e) {
-    document.getElementById("v-admagent").textContent = _t("未知");
+    document.getElementById("v-agent").textContent = _t("未连接");
   }
   const platform = navigator.platform || navigator.userAgent;
   let osName = _t("未知");
@@ -633,21 +612,6 @@ async function loadVersionInfo() {
   else if (platform.includes("Mac")) osName = "macOS";
   else if (platform.includes("Linux")) osName = "Linux";
   document.getElementById("v-os").textContent = osName;
-}
-
-let _confirmResolve = null;
-
-function showConfirmDialog(message, title) {
-  const overlay = document.getElementById("confirm-overlay");
-  document.getElementById("confirm-title").textContent = title || _t("删除提示");
-  document.getElementById("confirm-message").textContent = message;
-  overlay.classList.add("show");
-  return new Promise((resolve) => { _confirmResolve = resolve; });
-}
-
-function closeConfirmDialog(result) {
-  document.getElementById("confirm-overlay").classList.remove("show");
-  if (_confirmResolve) { _confirmResolve(result); _confirmResolve = null; }
 }
 
 async function checkUpdateNow() {
@@ -660,12 +624,16 @@ async function checkUpdateNow() {
     if (result.has_update) {
       statusEl.textContent = _t("发现新版本 v") + result.remote_version;
       statusEl.style.color = "#ff9800";
-      if (result.download_url && window.ADM && window.ADM.startAppUpdate) {
+      if (result.download_url && window.Agent && window.Agent.startAppUpdate) {
         // 与启动时的静默更新走同一条链路：后台下载（此处展示进度）→ 下载完成后提示升级
-        window.ADM.startAppUpdate(result, { manual: true });
+        window.Agent.startAppUpdate(result, { manual: true });
       } else {
         // 平台未提供安装包地址（update.json 无对应平台字段）：只提示版本
-        window.ADM.showUpdateDialog(`
+        // 升级日志按钮复用壳层实现：地址只记在模块变量里，不拼进 onclick
+        const changelogBtn = (window.Agent && window.Agent.changelogButton && result.changelog_url)
+          ? window.Agent.changelogButton(result.changelog_url)
+          : "";
+        window.Agent.showUpdateDialog(`
           <div class="update-icon" style="font-size:40px;text-align:center;margin-bottom:12px;">📥</div>
           <div class="update-title" style="font-size:20px;font-weight:600;color:#fff;text-align:center;margin-bottom:8px;">${_t("发现新版本")}</div>
           <div class="update-desc" style="font-size:14px;color:var(--c-text-2);text-align:center;margin-bottom:20px;line-height:1.6;">${_t("有新版本可用，是否前往下载？")}</div>
@@ -674,7 +642,8 @@ async function checkUpdateNow() {
             <div class="info-item" style="text-align:center;"><div class="info-label" style="color:var(--c-text-3);font-size:11px;">${_t("最新版本")}</div><div class="info-value" style="color:var(--c-text);font-weight:500;margin-top:2px;">v${escHtml(result.remote_version)}</div></div>
           </div>
           <div class="update-buttons" style="display:flex;gap:12px;justify-content:center;">
-            <button class="update-btn-secondary" style="background:var(--c-overlay);color:var(--c-text);border:none;padding:10px 28px;border-radius:8px;font-size:14px;cursor:pointer;" onclick="window.ADM.hideUpdateDialog()">${_t("稍后再说")}</button>
+            ${changelogBtn}
+            <button class="update-btn-secondary" style="background:var(--c-overlay);color:var(--c-text);border:none;padding:10px 28px;border-radius:8px;font-size:14px;cursor:pointer;" onclick="window.Agent.hideUpdateDialog()">${_t("稍后再说")}</button>
           </div>`);
       }
     } else {
@@ -696,7 +665,7 @@ function goBack() { location.hash = "#/agent"; }
 function renderThemeGrid() {
   const grid = document.getElementById("theme-grid");
   if (!grid) return;
-  const themes = window.__ADM_THEMES || [];
+  const themes = window.__AGENT_THEMES || [];
   const current = (typeof window.getTheme === "function" ? window.getTheme() : "default");
   grid.innerHTML = themes.map(function (t) {
     const active = t.id === current ? " active" : "";
@@ -719,195 +688,14 @@ function renderThemeGrid() {
   });
 }
 
-// ===== 微信 Bot（iLink） =====
-
-let wxbotUnlistens = [];
-let wxbotActivities = [];
-
-function renderWxbotStatus(s) {
-  const stateEl = document.getElementById("wxbot-state");
-  if (!stateEl) return;
-  const map = {
-    stopped: s.bound ? _t("已暂停") : _t("未绑定"),
-    waiting_scan: _t("等待扫码…"),
-    running: _t("运行中"),
-    error: _t("错误"),
-  };
-  stateEl.textContent = (map[s.state] || s.state) + (s.error ? "：" + s.error : "");
-  stateEl.style.color = s.state === "running" ? "#4caf50" : (s.state === "error" ? "#f44336" : "var(--c-text-2)");
-  document.getElementById("wxbot-botid").textContent = s.bot_id || "-";
-  document.getElementById("wxbot-owner").textContent = s.owner || "-";
-  document.getElementById("wxbot-stats").textContent = _t("收 ") + (s.msg_in || 0) + _t(" / 发 ") + (s.msg_out || 0);
-  const bindBtn = document.getElementById("wxbot-bind-btn");
-  const toggleBtn = document.getElementById("wxbot-toggle-btn");
-  const unbindBtn = document.getElementById("wxbot-unbind-btn");
-  bindBtn.textContent = s.bound ? _t("重新扫码") : _t("绑定微信");
-  toggleBtn.style.display = s.bound ? "" : "none";
-  toggleBtn.textContent = s.state === "running" ? _t("暂停") : _t("启动");
-  toggleBtn.dataset.running = s.state === "running" ? "1" : "0";
-  unbindBtn.style.display = s.bound ? "" : "none";
-}
-
-async function refreshWxbotStatus() {
-  try {
-    const s = await invoke()("get_ilink_status");
-    renderWxbotStatus(s);
-  } catch (e) {
-    console.error("[settings] 获取微信 Bot 状态失败:", e);
-  }
-}
-
-function showWxbotQr(payload) {
-  const overlay = document.getElementById("wxbot-qr-overlay");
-  const box = document.getElementById("wxbot-qr-box");
-  overlay.classList.add("show");
-  const img = payload && payload.qrcode_img ? String(payload.qrcode_img) : "";
-  const url = payload && payload.qrcode_url ? String(payload.qrcode_url) : "";
-  if (img) {
-    // qrcode_img_content 可能是 data URL / 图片地址 / 裸 base64
-    const src = img.startsWith("data:") ? img : (img.startsWith("http") ? img : "data:image/png;base64," + img);
-    box.innerHTML = '<img alt="二维码" style="width:200px;height:200px;" src="' + escHtml(src) + '">';
-  } else if (url) {
-    box.innerHTML = '<span style="color:#333;font-size:12px;word-break:break-all;padding:8px;">' + escHtml(url) + "</span>";
-  } else {
-    box.innerHTML = '<span style="color:#333;font-size:13px;">' + _t("二维码加载中…") + '</span>';
-  }
-}
-
-function hideWxbotQr() {
-  const overlay = document.getElementById("wxbot-qr-overlay");
-  if (overlay) overlay.classList.remove("show");
-}
-
-function showWxbotCode(retry) {
-  hideWxbotQr();
-  const overlay = document.getElementById("wxbot-code-overlay");
-  if (!overlay) return;
-  const hint = document.getElementById("wxbot-code-hint");
-  if (hint) hint.textContent = retry ? _t("配对码错误，请重新输入微信手机端显示的数字：") : _t("请输入微信手机端显示的配对数字：");
-  const input = document.getElementById("wxbot-code-input");
-  if (input) input.value = "";
-  overlay.classList.add("show");
-  if (input) setTimeout(function () { input.focus(); }, 50);
-}
-
-function hideWxbotCode() {
-  const overlay = document.getElementById("wxbot-code-overlay");
-  if (overlay) overlay.classList.remove("show");
-}
-
-async function submitWxbotCode() {
-  const input = document.getElementById("wxbot-code-input");
-  const code = input ? String(input.value || "").trim() : "";
-  if (!code) {
-    showToast(_t("请先输入配对码"), true);
-    return;
-  }
-  try {
-    await invoke()("submit_ilink_verify_code", { code: code });
-    hideWxbotCode();
-  } catch (e) {
-    showToast(friendlyError(e, { prefix: "提交配对码失败: " }), true);
-  }
-}
-
-function pushWxbotActivity(p) {
-  wxbotActivities.unshift(p);
-  if (wxbotActivities.length > 50) wxbotActivities.pop();
-  const el = document.getElementById("wxbot-activity");
-  if (!el) return;
-  el.innerHTML = wxbotActivities.map(function (a) {
-    const t = new Date(a.ts || Date.now());
-    const hh = ("0" + t.getHours()).slice(-2) + ":" + ("0" + t.getMinutes()).slice(-2) + ":" + ("0" + t.getSeconds()).slice(-2);
-    const dir = a.direction === "in" ? _t("⬅️ 收") : (a.direction === "out" ? _t("➡️ 发") : "⚠️");
-    return "<div>[" + hh + "] " + dir + " " + escHtml(a.summary || "") + "</div>";
-  }).join("");
-}
-
-async function setupWxbotPanel() {
-  document.getElementById("wxbot-bind-btn").addEventListener("click", async function () {
-    try {
-      showWxbotQr(null);
-      await invoke()("start_ilink_login");
-    } catch (e) {
-      hideWxbotQr();
-      showToast(friendlyError(e, { prefix: "启动绑定失败: " }), true);
-    }
-  });
-  document.getElementById("wxbot-qr-cancel-btn").addEventListener("click", async function () {
-    hideWxbotQr();
-    try { await invoke()("cancel_ilink_login"); } catch (_) {}
-  });
-  document.getElementById("wxbot-code-ok-btn").addEventListener("click", submitWxbotCode);
-  document.getElementById("wxbot-code-input").addEventListener("keydown", function (e) {
-    if (e.key === "Enter") submitWxbotCode();
-  });
-  document.getElementById("wxbot-code-cancel-btn").addEventListener("click", async function () {
-    hideWxbotCode();
-    try { await invoke()("cancel_ilink_login"); } catch (_) {}
-  });
-  document.getElementById("wxbot-toggle-btn").addEventListener("click", async function () {
-    const running = this.dataset.running === "1";
-    try {
-      if (running) {
-        await invoke()("stop_ilink_bridge");
-        showToast(_t("微信 Bot 已暂停"));
-      } else {
-        await invoke()("start_ilink_bridge");
-        showToast(_t("微信 Bot 已启动"));
-      }
-    } catch (e) {
-      showToast(friendlyError(e, { prefix: "操作失败: " }), true);
-    }
-    refreshWxbotStatus();
-  });
-  document.getElementById("wxbot-unbind-btn").addEventListener("click", async function () {
-    const ok = await showConfirmDialog(_t("确定要解绑微信 Bot 吗？\n解绑将删除登录凭据与会话映射，需重新扫码才能使用。"));
-    if (!ok) return;
-    try {
-      await invoke()("unbind_ilink");
-      showToast(_t("已解绑微信 Bot"));
-    } catch (e) {
-      showToast(friendlyError(e, { prefix: "解绑失败: " }), true);
-    }
-    refreshWxbotStatus();
-  });
-
-  // 事件订阅（unmount 时统一释放，防重复绑定）
-  try {
-    const un1 = await window.__adm_listen("ilink-status", function (ev) {
-      const p = ev.payload || {};
-      if (p.state === "waiting_scan") {
-        showWxbotQr(p);
-      } else if (p.state === "waiting_verify_code") {
-        showWxbotCode(!!p.retry);
-      } else {
-        hideWxbotQr();
-        hideWxbotCode();
-        if (p.state === "running") showToast(_t("微信 Bot 已连接"));
-        if (p.state === "error" && p.error) showToast(friendlyError(p.error, { prefix: "微信 Bot: " }), true);
-      }
-      refreshWxbotStatus();
-    });
-    wxbotUnlistens.push(un1);
-    const un2 = await window.__adm_listen("ilink-activity", function (ev) {
-      pushWxbotActivity(ev.payload || {});
-    });
-    wxbotUnlistens.push(un2);
-  } catch (e) {
-    console.error("[settings] 订阅微信 Bot 事件失败:", e);
-  }
-  refreshWxbotStatus();
-}
-
 export default {
   template,
-  mount(root) {
+  mount(root, params) {
     console.log("[settings] mount()");
     root.innerHTML = template;
 
-    // 禁用页面右键（屏蔽浏览器默认菜单；#confirm-overlay / #wxbot-qr-overlay 是 #settings-app 的兄弟节点，需各自绑定）
-    ["settings-app", "confirm-overlay", "wxbot-qr-overlay", "wxbot-code-overlay"].forEach(function(id) {
+    // 禁用页面右键（屏蔽浏览器默认菜单）
+    ["settings-app"].forEach(function(id) {
       var el = document.getElementById(id);
       if (el) el.addEventListener("contextmenu", function(e) { e.preventDefault(); });
     });
@@ -916,9 +704,12 @@ export default {
     document.querySelectorAll(".nav-item").forEach(function(el) {
       el.addEventListener("click", function() { switchPanel(el.dataset.panel); });
     });
+    // 路由参数 ?panel=xxx：启动自检弹窗「去配置服务端」直接落到「服务端连接」面板
+    const initialPanel = (params && params.panel && document.getElementById("panel-" + params.panel))
+      ? params.panel
+      : "appearance";
+    switchPanel(initialPanel);
     document.getElementById("check-update-btn").addEventListener("click", checkUpdateNow);
-    document.getElementById("confirm-cancel-btn").addEventListener("click", function() { closeConfirmDialog(false); });
-    document.getElementById("confirm-ok-btn").addEventListener("click", function() { closeConfirmDialog(true); });
 
     // 语言切换：保存到 Settings.language + localStorage，并立即重建当前视图生效
     const langSelect = document.getElementById("ui-lang-select");
@@ -938,7 +729,6 @@ export default {
 
     setupProxyPanel();
     setupServerPanel();
-    setupWxbotPanel();
     renderThemeGrid();
 
     (async function() {
@@ -954,15 +744,11 @@ export default {
       }
       loadServerConnection();
       loadVersionInfo();
+      // 从启动自检弹窗进来时自动跑一次检测，用户不用多点一步
+      if (initialPanel === "server") runServerCheck();
     })();
   },
   unmount() {
     console.log("[settings] unmount()");
-    // 释放微信 Bot 事件监听，防止重复绑定泄漏
-    wxbotUnlistens.forEach(function (un) {
-      try { un(); } catch (_) {}
-    });
-    wxbotUnlistens = [];
-    wxbotActivities = [];
   }
 };

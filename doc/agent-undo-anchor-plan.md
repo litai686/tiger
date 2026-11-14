@@ -4,7 +4,7 @@
 > 当前行为以 `doc/server-api.md` §4.11 与 `doc/frontend-agent-conventions.md` 为准；本文件保留为方案记录。
 > 前端实现见 `src/views/agent/undo.js`，行为约定见 `doc/frontend-agent-conventions.md`
 > 的「撤销入口挂在每个对话容器上」。
-> 本文件是**审核材料**：列出现状约束、需要改的点、风险与验证方式。审核通过后再动 admAgent。
+> 本文件是**审核材料**：列出现状约束、需要改的点、风险与验证方式。审核通过后再动 Agent。
 
 ---
 

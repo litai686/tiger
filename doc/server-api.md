@@ -1,6 +1,6 @@
-# admAgent Server 模式 API 文档
+# Agent Server 模式 API 文档
 
-> 本文档面向 GUI 客户端开发者，涵盖 admAgent server 模式下所有 HTTP API 端点。
+> 本文档面向 GUI 客户端开发者，涵盖 Agent server 模式下所有 HTTP API 端点。
 >
 > 路由注册源码：`internal/server/server.go` → `installHandler()`
 >
@@ -34,7 +34,7 @@
 
 ## 概述
 
-admAgent server 模式通过 HTTP/1.1 + HTTP/2 (unencrypted h2c) 提供全部 RESTful API，所有路径以 `/v1/` 为前缀。Swagger 文档可通过 `/v1/docs/` 访问。
+Agent server 模式通过 HTTP/1.1 + HTTP/2 (unencrypted h2c) 提供全部 RESTful API，所有路径以 `/v1/` 为前缀。Swagger 文档可通过 `/v1/docs/` 访问。
 
 ### 基础信息
 
@@ -50,15 +50,29 @@ admAgent server 模式通过 HTTP/1.1 + HTTP/2 (unencrypted h2c) 提供全部 RE
 
 ## 传输协议
 
-admAgent server 支持三种传输方式（由 host 参数决定）：
+Agent server 支持三种传输方式（由 host 参数决定）：
 
 | 协议 | 格式 | 平台 | 默认值 |
 |------|------|------|--------|
-| Unix Socket | `unix:///path/to/socket` | Linux/macOS | `unix:///tmp/admAgent-<uid>.sock` |
-| Named Pipe | `npipe:////./pipe/admAgent.sock` | Windows | `npipe:////./pipe/admAgent.sock` |
+| Unix Socket | `unix:///path/to/socket` | Linux/macOS | `unix:///tmp/Agent-<uid>.sock` |
+| Named Pipe | `npipe:////./pipe/Agent.sock` | Windows | `npipe:////./pipe/Agent.sock` |
 | TCP | `tcp://host:port` | 全平台 | 无 |
 
 GUI 客户端需根据运行平台选择合适的传输方式连接 server。
+
+---
+
+## 认证与加密
+
+`tcp://` 监听默认启用 TLS 1.3：服务端使用自签 ECDSA P-256 证书，客户端通过 SPKI 指纹 pin 住服务端身份；客户端身份由服务端生成的随机 token 证明（服务端启动时打印的连接串 `tigerAgent://host:port?fp=…&token=…` 含全部参数）。除匿名端点 `GET /v1/health`、`GET /v1/version`、`GET /v1/tls/info` 外，所有请求需带：
+
+```
+Authorization: Bearer <token>
+```
+
+缺少或带错 token 返回 `401 Unauthorized` + `WWW-Authenticate: Bearer`。`unix` / `npipe` 不启用 TLS 与 token，依靠文件系统 / 管道 ACL 保护。细节见仓库根 `docs/tcp-tls-ecdsa.md`。
+
+服务端还内嵌管理界面 `https://<服务端地址>/admin/`：用**服务端指纹 + 任一有效 token** 登录后可生成/删除/查看 token、复制连接串、查看客户端活跃连接与最近使用地址（管理界面仅 TLS 下可用）。
 
 ---
 
@@ -435,6 +449,55 @@ GUI 客户端在退出时应调用此接口，确保服务器端清理客户端�
 
 ---
 
+### 1.6 服务端硬件信息
+
+```
+GET /v1/system/info
+```
+
+返回**服务端主机**的硬件快照（桌面端底部状态栏数据源，客户端每 5s 轮询一次）。响应字段：
+
+```json
+{
+  "hostname": "server-host",
+  "os": "linux",
+  "arch": "amd64",
+  "cpu_model": "Example CPU @ 3.60GHz",
+  "cpu_physical_cores": 8,
+  "cpu_logical_cores": 16,
+  "cpu_usage": 0.12,
+  "total_ram": 34359738368,
+  "used_ram": 12884901888,
+  "disk_total": 511000000000,
+  "disk_used": 102000000000,
+  "disk_available": 409000000000,
+  "uptime_seconds": 86400
+}
+```
+
+- `cpu_usage`：0..1 的占比，来自 1s 后台采样（Linux `/proc/stat`，Windows `GetSystemTimes`）；其它平台恒为 0（未知）。
+- `disk_total` / `disk_used` / `disk_available`：**服务端数据目录所在卷**的字节数（Unix `statfs`，Windows `GetDiskFreeSpaceEx`）。
+- 显卡探测已移除：响应中没有 `has_gpu` / `gpus` / `total_vram` / `used_vram` / `warnings`（不再执行 `nvidia-smi`）。
+
+---
+
+### 1.9 服务端目录浏览 / 路径校验
+
+（与仓库根 `docs/server-api.md` §1.9 同步）
+
+```
+GET /v1/fs/list?path=/srv
+POST /v1/fs/validate
+```
+
+`list` 返回 `{ "path": "...", "entries": [{ "name", "path", "is_dir", "size", "mtime" }] }`（目录在前，最多 2000 项）；`path` 为空时返回服务端用户主目录。桌面端「添加工作目录」用它浏览服务端目录树（`src/views/agent/workspace.js`）——客户端本机选择框只能看到客户端路径，远程部署时不可用。
+
+`validate` 请求体 `{ "paths": ["/srv/proj/a"] }`，响应 `{ "results": [{ "path", "exists", "is_dir", "writable" }] }`；越界路径额外带 `error`。
+
+**安全边界**：只允许访问服务端用户主目录、服务端工作目录与已配置的工作目录（先 `EvalSymlinks` 再判前缀），越界返回 `403`；不提供读取文件内容的接口。
+
+---
+
 ## 2. 工作区接口
 
 ### 2.1 列出所有工作区
@@ -606,6 +669,84 @@ GET /v1/workspaces/{id}/events?client_id={client_id}
 **响应** `200 OK`：`text/event-stream`
 
 详见 [SSE 事件流](#sse-事件流) 章节。
+
+---
+
+### 2.10 获取工作区 git 信息
+
+```
+GET /v1/workspaces/{id}/git-info
+```
+
+在**服务端所在主机**上探测工作区目录（撤销能力提示用）。工作目录在服务端，客户端本地
+跑 `git rev-parse` 只会得到「不是 git 仓库」。
+
+**响应** `200 OK`（`GitInfo`）：
+
+```json
+{
+  "path": "/srv/projects/demo",
+  "exists": true,
+  "git_installed": true,
+  "is_repo": true
+}
+```
+
+- `exists=false`：服务端找不到该目录（已被删除/移动），撤销只能回退对话记录。
+- `git_installed=false`：服务端没装 git（或不在 PATH）。
+- `is_repo=false`：装了 git，但该目录不是工作树。
+
+---
+
+### 2.11 读取项目记忆
+
+```
+GET /v1/workspaces/{id}/project-memory
+```
+
+读取跨会话项目记忆（`project_memory.json`，上下文压缩时沉淀的 durable 约束/决策）。
+数据来自服务端进程内的 `ProjectStore`，不是按 workspace `data_dir` 拼本地路径。
+
+**响应** `200 OK`（`ProjectAnchor[]`）：
+
+```json
+[
+  {
+    "kind": "constraint",
+    "key": "constraint:不要改 internal/agent 的公共接口",
+    "value": "不要改 internal/agent 的公共接口",
+    "why": "外部插件依赖",
+    "updated_at": 1763000000
+  }
+]
+```
+
+**失败**：工作区不存在 → `404`；Agent 尚未初始化 → `500`（先建会话触发初始化）。
+
+---
+
+### 2.12 覆盖项目记忆
+
+```
+POST /v1/workspaces/{id}/project-memory
+```
+
+桌面端编辑器按「整表提交」写入。服务端只保留 `constraint` / `decision`、丢弃空
+`value`、同名 `key` 合并、超预算按 salience 裁剪，然后原子落盘（`.tmp` + rename）。
+注意 Agent 下一次压缩仍会把内存里的 anchors 合并回写，手工删除的条目可能被再次沉淀。
+
+**请求体**（`ProjectMemoryRequest`）：
+
+```json
+{
+  "anchors": [
+    { "kind": "decision", "value": "日志统一写 tigerAgent.log", "why": "排查习惯" }
+  ]
+}
+```
+
+**响应** `200 OK`：规范化后的完整列表（`ProjectAnchor[]`，含补全的 `key` 与
+`updated_at`）。
 
 ---
 
@@ -848,7 +989,7 @@ POST /v1/workspaces/{id}/agent
 | `decision.tool_policy` | string | 否 | 目前仅支持 `none`（默认）；决策轮是"给结论"，不执行任何操作 |
 | `decision.structured_output` | string | 否 | `auto`（默认）或 `off`；`auto` 当前等同提示词约束（`response_format` 强制为后续阶段） |
 
-服务端在该轮的系统提示词里注入输出契约（不进用户消息、不落历史），要求整条回复只包含一个 `<adm_decision_result>` JSON 块：
+服务端在该轮的系统提示词里注入输出契约（不进用户消息、不落历史），要求整条回复只包含一个 `<agent_decision_result>` JSON 块：
 
 ```json
 {"type":"choice","selected":"value","reason":"...","candidates":[{"value":"...","label":"...","rationale":"..."}]}
@@ -864,7 +1005,7 @@ POST /v1/workspaces/{id}/agent
 { "type": "decision", "data": { "kind": "bool", "mode": "bool", "value": true, "reason": "…", "raw": "{…}" } }
 ```
 
-`kind` 为 `choice`（带 `selected` + `candidates[]`）/ `bool`（`value`）/ `score`（`score`/`min`/`max`/`level`）；`raw` 是模型原文，便于排查。未知 kind 的 part 应被客户端忽略或折叠展示，不要当作错误（前向兼容）。旧会话历史里仍是正文 `<adm_decision_result>` 标签。
+`kind` 为 `choice`（带 `selected` + `candidates[]`）/ `bool`（`value`）/ `score`（`score`/`min`/`max`/`level`）；`raw` 是模型原文，便于排查。未知 kind 的 part 应被客户端忽略或折叠展示，不要当作错误（前向兼容）。旧会话历史里仍是正文 `<agent_decision_result>` 标签。
 
 **结构化输出**：`decision.structured_output=auto`（默认）时服务端会附带 `response_format: {type: "json_schema", …}`；上游明确拒绝该参数时自动去掉它重试一次，并按 `base URL + model` 记住不支持，后续请求不再探测（模型此时可能返回无标签的裸 JSON，服务端解析同样接受）。传 `off` 可完全关闭。
 
@@ -1008,7 +1149,7 @@ POST /v1/workspaces/{id}/agent/sessions/{sid}/undo
 
 **响应**：`200 OK`（无响应体）；body 存在但不是合法 JSON 时 `400`（不静默退化成"回滚最后一轮"，否则会把用户指定的更早一轮撤错）。
 
-**语义与限制**（客户端依赖这些行为，改 admAgent 前先看）：
+**语义与限制**（客户端依赖这些行为，改 Agent 前先看）：
 
 - 一次调用回滚的粒度是「轮」：删掉这些轮产生的消息与 file-history 版本，并把整棵工作树还原到目标轮开始前的 git 快照（`git reset --hard` + `checkout-index` + `clean`）。
 - 目标轮没有文件快照（该轮没改文件 / 已被保留窗口淘汰 / 目录不是 git 仓库）时退化为**只回滚对话**：消息被删，文件原样保留。anchor 必须是本会话真实存在的 user 消息，否则返回 `ErrNothingToUndo`（防止按时间戳兜底删错行）。
@@ -1122,7 +1263,7 @@ POST /v1/workspaces/{id}/config/model
 }
 ```
 
-DeepSeek 非思考模式支持以下两种等价写法，admAgent 会兼容并按配置透传：
+DeepSeek 非思考模式支持以下两种等价写法，Agent 会兼容并按配置透传：
 
 ```json
 { "reasoning_effort": "none" }
@@ -1132,7 +1273,7 @@ DeepSeek 非思考模式支持以下两种等价写法，admAgent 会兼容并�
 { "thinking": { "type": "disabled" } }
 ```
 
-桌面端只负责把选定的写法写进模型配置（关闭思考时默认写 `reasoning_effort: "none"`），**回退不发生在桌面端**：admAgent 调用上游 LLM 时，若上游明确返回 `400`（包括只给 `invalid_request_error / invalid request` 的通用参数错误），且不属于上下文超限、配额、内容安全、鉴权等其它错误，admAgent 会自动用另一种写法重试一次，并按 `base URL + model` 在进程内存中记住成功的那一种；网络错误、超时、`5xx` 不会触发该回退。两种写法都被拒绝时返回 `400`（`thinking mode unsupported`），错误文本以 **`thinking_mode_unsupported`** 开头并附两次失败原因摘要——这是前后端契约 token（`internal/llm/client_test.go` 有单测锁定）：桌面端据此分类并提示「本模型不支持关闭思考，请切回思考模式」，同时中断本轮。admAgent **不会**为此静默去掉参数继续跑，也**不会**改写用户设置的推理档位（该模型只能显式切回思考档）。
+桌面端只负责把选定的写法写进模型配置（关闭思考时默认写 `reasoning_effort: "none"`），**回退不发生在桌面端**：Agent 调用上游 LLM 时，若上游明确返回 `400`（包括只给 `invalid_request_error / invalid request` 的通用参数错误），且不属于上下文超限、配额、内容安全、鉴权等其它错误，Agent 会自动用另一种写法重试一次，并按 `base URL + model` 在进程内存中记住成功的那一种；网络错误、超时、`5xx` 不会触发该回退。两种写法都被拒绝时返回 `400`（`thinking mode unsupported`），错误文本以 **`thinking_mode_unsupported`** 开头并附两次失败原因摘要——这是前后端契约 token（`internal/llm/client_test.go` 有单测锁定）：桌面端据此分类并提示「本模型不支持关闭思考，请切回思考模式」，同时中断本轮。Agent **不会**为此静默去掉参数继续跑，也**不会**改写用户设置的推理档位（该模型只能显式切回思考档）。
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -1288,6 +1429,84 @@ POST /v1/workspaces/{id}/lsps/stop
 停止工作区内所有 LSP 服务器。
 
 **响应**：`200 OK`（无响应体）
+
+---
+
+### 6.5 列出 LSP 安装目标
+
+```
+GET /v1/lsp/fix-targets
+```
+
+服务端认识的 LSP 及其安装方式（与工作区无关）。`command` 非空 = 服务端可自动安装；
+其余条目只带 `hint` / `url`，表示需要手工安装。安装命令表固定在服务端
+（`internal/lsp/fix.go`），客户端只传服务器名，不能借接口执行任意命令。
+
+**响应** `200 OK`（`LSPFixTarget[]`）：
+
+```json
+[
+  {
+    "name": "gopls",
+    "command": "go install golang.org/x/tools/gopls@latest",
+    "requires": "Go (go)"
+  },
+  {
+    "name": "clangd",
+    "hint": "winget install LLVM.LLVM / brew install llvm / apt install clangd",
+    "url": "https://clangd.llvm.org/installation"
+  }
+]
+```
+
+---
+
+### 6.6 修复（安装 + 启动）LSP
+
+```
+POST /v1/workspaces/{id}/lsps/{lsp}/fix
+GET  /v1/workspaces/{id}/lsps/{lsp}/fix
+```
+
+`POST` 在**服务端所在主机**上调度一次安装作业（候选包管理器按顺序取第一个可用的；超时
+10 分钟；串行执行），装完复查二进制在 PATH 中，随后立即启动该服务器（跳过文件类型与
+自动启动白名单判断，并清除上次失败留下的 30s 冷却窗口）。安装动辄数分钟，远超客户端
+HTTP 超时，所以 `POST` **只调度并立即返回**（`running: true`），同一服务器重复 `POST`
+不会重复装包；`GET` 返回作业状态，客户端轮询到 `running: false`。客户端只发这两个请
+求，不执行任何安装命令。
+
+**路径参数**：
+
+| 参数 | 说明 |
+|------|------|
+| `lsp` | LSP 客户端名称（如 `gopls`），需在 6.5 的 `command` 非空列表中 |
+
+**响应** `200 OK`（`LSPFixResult`）：
+
+```json
+{
+  "name": "gopls",
+  "running": true,
+  "state": 0
+}
+```
+
+作业结束后同一结构变为（`output` = 安装输出尾部，最多 3000 字符）：
+
+```json
+{
+  "name": "gopls",
+  "running": false,
+  "state": 2,
+  "output": "go: downloading golang.org/x/tools ..."
+}
+```
+
+`state` 与 6.1 一致（`0` 未启动、`1` 启动中、`2` 已连接、`3` 错误、`4` 已停止、`5` 已
+禁用）。安装失败或启动失败时 `error` 非空，`state` 保持实际状态。
+
+**失败**：`lsp` 不在安装表内 → `500`；工作区不存在 → `404`。安装命令非 0 退出、二进制
+不在 PATH、包管理器缺失都体现在作业的 `error`（不是 HTTP 错误）。
 
 ---
 
@@ -1872,6 +2091,55 @@ interface LSPEvent {
 }
 ```
 
+### LSPFixTarget 结构
+
+```typescript
+interface LSPFixTarget {
+  name: string;
+  command?: string;              // 非空 = 服务端可自动安装
+  requires?: string;             // 安装该命令需要的工具链/包管理器
+  hint?: string;                 // 手工安装提示（command 为空时有意义）
+  url?: string;                  // 安装文档链接
+}
+```
+
+### LSPFixResult 结构
+
+```typescript
+interface LSPFixResult {
+  name: string;
+  running: boolean;              // true = 服务端仍在装包/启动，需继续轮询 6.6 的 GET
+  state: number;                 // 与 LSPClientInfo.state 同取值
+  output?: string;               // 安装命令输出尾部（最多 3000 字符）
+  error?: string;                // 安装或启动失败原因
+}
+```
+
+### GitInfo 结构
+
+```typescript
+interface GitInfo {
+  path: string;
+  exists: boolean;               // 服务端能否看到该目录
+  git_installed: boolean;        // 服务端是否装了 git
+  is_repo: boolean;              // 是否处于 git 工作树内
+}
+```
+
+### ProjectAnchor 结构
+
+```typescript
+interface ProjectAnchor {
+  kind: "constraint" | "decision";
+  key: string;                   // 去重键，服务端会按 kind:value 补全
+  value: string;
+  why?: string;
+  source?: string;
+  salience?: number;
+  updated_at?: number;           // unix 秒
+}
+```
+
 ### SkillsEvent 结构
 
 ```typescript
@@ -1950,8 +2218,8 @@ interface SelectedModel {
 
 ```typescript
 enum Scope {
-  Global = 0,      // ~/.local/share/admAgent/admAgent.json
-  Workspace = 1,   // .admAgent/admAgent.json
+  Global = 0,      // ~/.local/share/tigerAgent/tigerAgent.json
+  Workspace = 1,   // .Agent/tigerAgent.json
 }
 ```
 
@@ -2087,4 +2355,10 @@ GUI 准备退出或升级：
 | 60 | POST | `/v1/workspaces/{id}/mcp/refresh-resources` | 刷新 MCP Resources |
 | 61 | POST | `/v1/workspaces/{id}/mcp/docker/enable` | 启用 Docker MCP |
 | 62 | POST | `/v1/workspaces/{id}/mcp/docker/disable` | 禁用 Docker MCP |
-| 63 | GET | `/v1/docs/` | Swagger 文档 |
+| 63 | GET | `/v1/lsp/fix-targets` | LSP 安装目标 |
+| 64 | POST | `/v1/workspaces/{id}/lsps/{lsp}/fix` | 调度 LSP 安装 + 启动 |
+| 65 | GET | `/v1/workspaces/{id}/lsps/{lsp}/fix` | LSP 修复作业状态 |
+| 66 | GET | `/v1/workspaces/{id}/git-info` | 工作区 git 信息 |
+| 67 | GET | `/v1/workspaces/{id}/project-memory` | 读取项目记忆 |
+| 68 | POST | `/v1/workspaces/{id}/project-memory` | 覆盖项目记忆 |
+| 69 | GET | `/v1/docs/` | Swagger 文档 |

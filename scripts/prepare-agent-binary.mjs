@@ -1,11 +1,11 @@
-// 构建/开发前置钩子：把 admAgent 压缩包解压到临时目录，
-// 取出二进制放到 src-tauri/binaries/admAgent-<target-triple>[.exe]，
+// 构建/开发前置钩子：把 Agent 压缩包解压到临时目录，
+// 取出二进制放到 src-tauri/binaries/Agent-<target-triple>[.exe]，
 // 供 tauri.conf.json 的 bundle.externalBin（sidecar）机制按平台自动打包进安装包。
 //
-// 压缩包目录：adm-binaries/（本地由 admAgent 编译脚本直写，CI 由工作流
+// 压缩包目录：adm-binaries/（本地由 Agent 编译脚本直写，CI 由工作流
 // 从 adm-binaries 仓库检出到同名目录）。
 // 平台选择：优先读 Tauri 2 传入的 TAURI_ENV_TARGET_TRIPLE（--target 交叉构建也正确），
-// 否则按宿主平台推断。压缩包按 admAgent_*_<平台>.{zip|tar.gz} glob，不硬编码版本号。
+// 否则按宿主平台推断。压缩包按 tigerAgent_*_<平台>.{zip|tar.gz} glob，不硬编码版本号。
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -31,14 +31,15 @@ function resolveTargetTriple() {
 /** triple → 压缩包文件名匹配规则 + 二进制文件名 */
 function platformSpec(triple) {
   if (triple.includes("windows")) {
-    return { pattern: /^admAgent_(.+)_Windows_x86_64\.zip$/, binName: "admAgent.exe", ext: ".exe" };
+    return { pattern: /^tigerAgent_(.+)_Windows_x86_64\.zip$/, binName: "tigerAgent.exe", ext: ".exe" };
   }
   if (triple === "aarch64-apple-darwin") {
-    return { pattern: /^admAgent_(.+)_Darwin_arm64\.tar\.gz$/, binName: "admAgent", ext: "" };
+    // 包内二进制名以 Go 构建脚本为准（build.sh 产出 tigerAgent）；重命名只发生在 destPath
+    return { pattern: /^tigerAgent_(.+)_Darwin_arm64\.tar\.gz$/, binName: "tigerAgent", ext: "" };
   }
   // Linux 目前只发布 x86_64 包（adm-binaries 无 aarch64）
   if (triple === "x86_64-unknown-linux-gnu") {
-    return { pattern: /^admAgent_(.+)_Linux_x86_64\.tar\.gz$/, binName: "admAgent", ext: "" };
+    return { pattern: /^tigerAgent_(.+)_Linux_x86_64\.tar\.gz$/, binName: "tigerAgent", ext: "" };
   }
   return null;
 }
@@ -93,20 +94,20 @@ function main() {
   const triple = resolveTargetTriple();
   const spec = platformSpec(triple);
   if (!spec) {
-    console.error(`[prepare-agent] 不支持的构建目标: ${triple}（adm-binaries/ 下无对应 admAgent 压缩包）`);
+    console.error(`[prepare-agent] 不支持的构建目标: ${triple}（adm-binaries/ 下无对应 Agent 压缩包）`);
     process.exit(1);
   }
 
   const archive = findArchive(spec);
   if (!archive) {
-    console.error(`[prepare-agent] adm-binaries/ 下未找到匹配 ${spec.pattern} 的压缩包，无法打包 admAgent`);
-    console.error("[prepare-agent] 本地编译 admAgent（build.ps1 / build.sh）会自动写入 adm-binaries/；");
+    console.error(`[prepare-agent] adm-binaries/ 下未找到匹配 ${spec.pattern} 的压缩包，无法打包 Agent`);
+    console.error("[prepare-agent] 本地编译 Agent（build.ps1 / build.sh）会自动写入 adm-binaries/；");
     console.error("[prepare-agent] 也可从 https://github.com/autoDeploymentModel/adm-binaries 克隆到 adm-binaries/");
     process.exit(1);
   }
   const archivePath = path.join(ADM_BINARIES_DIR, archive.name);
   const archiveLabel = path.relative(ROOT, archivePath);
-  const destPath = path.join(BINARIES_DIR, `admAgent-${triple}${spec.ext}`);
+  const destPath = path.join(BINARIES_DIR, `Agent-${triple}${spec.ext}`);
 
   // 增量跳过：目标文件已存在且比压缩包新则不再解压（tauri dev 每次启动都会跑本脚本）
   if (fs.existsSync(destPath)) {
@@ -118,7 +119,7 @@ function main() {
     }
   }
 
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "adm-agent-"));
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-push-"));
   try {
     // Windows 10+ 自带 bsdtar，zip / tar.gz 均可解；macOS 系统 tar 解 tar.gz 天然保留执行位
     execFileSync("tar", ["-xf", archivePath, "-C", tmpDir], { stdio: "inherit" });

@@ -7,7 +7,7 @@ import { S, invoke, listen, store } from "./agent/store.js";
 import { log, setLogEnabled } from "./agent/log.js";
 import { api } from "./agent/api.js";
 import { generateUUID, isFullyAtBottom, autoResize, $input, applyReasoningSetting } from "./agent/utils.js";
-import { updateStatusBar, updateContextUsage, updateSendButton, exitManualScrollMode, startSendSafetyTimer, clearSendSafetyTimer, showError, showWarning, showInfo, showConfirm, showCopyPasteMenu, updateScrollBottomBtn, reportError, showInitProgress, hideInitProgress } from "./agent/ui.js";
+import { updateStatusBar, updateContextUsage, updateSendButton, exitManualScrollMode, startSendSafetyTimer, clearSendSafetyTimer, showError, showWarning, showInfo, showCopyPasteMenu, updateScrollBottomBtn, reportError, showInitProgress, hideInitProgress } from "./agent/ui.js";
 import { loadConversations, selectConversation, newConversation, clearAllConversations, toggleOutlinePanel, setOutlinePanelOpen, renderConversationList } from "./agent/session.js";
 import { syncWorkingIndicator, onAreaScroll, scrollChatToBottom, beginSelectGuard, endSelectGuard, resetSelectGuard } from "./agent/render.js";
 import { sendMessage, cancelCurrentRun, sendMessageWithFiles } from "./agent/send.js";
@@ -15,7 +15,7 @@ import { setupSSEListener, cancelScheduledLoadTools, cancelRunCompleteFallback, 
 import { syncModeToServer } from "./agent/permission.js";
 import { loadTools, activateToolsTab } from "./agent/tools.js";
 import { switchModel, refreshServerProviders, resolveAgentModel, updateModelDropdown, updateModelBtn, refreshAgentInfo, setAddCloudModelHandler } from "./agent/model.js";
-import { enableAutoCompact, updateWorkspaceSelector, toggleWorkDirDropdown, closeWorkDirDropdown, validateWorkDirs } from "./agent/workspace.js";
+import { enableAutoCompact, updateWorkspaceSelector, toggleWorkDirDropdown, closeWorkDirDropdown, validateWorkDirs, initWorkdirBrowserUI } from "./agent/workspace.js";
 import { showSettings, hideSettings, updateSettingsUI, saveSettings, showAddModelDialog, hideAddModelDialog, addModel, renderVisionModelSelect, updateProviderKeyHint, initModelIdFetch, BUILTIN_VISION_KEY } from "./agent/settings_dialog.js";
 import { addPendingFiles, parseUriListPaths, addPastedPaths, looksLikeFilePath } from "./agent/attach.js";
 import { bindSkillSelectorEvents, initSkillSelector, clearAttachedSkillsAfterSend } from "./agent/skill_selector.js";
@@ -25,15 +25,14 @@ import { initMcpDialogUI } from "./agent/mcp_dialog.js";
 import { initPdfBatching, reconcilePdfBatching } from "./agent/pdf_batch.js";
 import { bindDecisionModeEvents, updateDecisionModeUI } from "./agent/decision_mode.js";
 import { initProjectMemoryUI } from "./agent/memory.js";
+import { initServerLogsUI } from "./agent/server_logs.js";
 
 // ===== 初始化 =====
 //
 // 阶段拆解（按依赖关系，越往下越靠后）：
-//   Phase A: 并行启动所有不依赖 Go 服务的步骤（load_settings / check_adm_agent /
-//            get_agent_server_status / get_agent_workdir / validateWorkDirs /
-//            list_cloud_providers）
-//            → 这些步骤可与 Go 服务冷启动完全并行，省下几百 ms 到几秒
-//   Phase B: 启动或复用 admAgent 服务（仅在服务未运行时调用 start_agent_server）
+//   Phase A: 并行启动所有不依赖服务端的步骤（load_settings /
+//            get_agent_workdir / validateWorkDirs / list_cloud_providers）
+//   Phase B: 连接用户自行启动的服务端（start_agent_server：TCP + TLS，不托管进程）
 //   Phase C: 工作区创建 / 拉取 + 服务端 provider 列表（独立，可并行）
 //   Phase D: Agent 初始化（/agent/init + /agent），随后 syncModeToServer + enableAutoCompact 并行
 //   Phase E: 订阅 SSE → 加载会话列表 + 加载工具列表（可并行）
@@ -74,12 +73,10 @@ async function init() {
 async function _doInit(seq) {
 
   // ===== Phase A: 并行执行所有服务无关的初始化步骤 =====
-  // 这些步骤不依赖 Go 服务，全部并行触发，最大化与冷启动重叠时间
-  var [settingsRes, admAgentRes, serverStatusRes, workdirRes, cloudProvidersRes] =
+  // 这些步骤不依赖服务端，全部并行触发，最大化与连接重叠时间
+  var [settingsRes, workdirRes, cloudProvidersRes] =
     await Promise.allSettled([
       invoke("load_settings"),
-      invoke("check_adm_agent"),
-      invoke("get_agent_server_status"),
       invoke("get_agent_workdir"),
       invoke("list_cloud_providers"),
     ]);
@@ -92,43 +89,43 @@ async function _doInit(seq) {
   setLogEnabled(!!S.settings.debug_logging);
   updateStatusBar("ready", null, 0);
 
-  // 本地模式需要本机已安装服务端；远程模式只连远端，不依赖本机二进制。
-  // 桌面端默认不打包服务端，所以“缺少二进制”不再等于安装损坏。
-  const serverMode = (S.settings && S.settings.server && S.settings.server.mode) || "local";
-  const isRemoteMode = String(serverMode).toLowerCase() === "remote";
-  if (!isRemoteMode && (admAgentRes.status !== "fulfilled" || !admAgentRes.value || !admAgentRes.value.exists)) {
-    hideInitProgress();
-    showError(_t("未找到 admAgent 服务端：桌面端默认不打包服务端，请先安装 admAgent 并加入 PATH，或在设置 → 服务端连接中改用远程模式"));
-    updateStatusBar("error", null, 0);
-    return;
-  }
-
-  // 解析 workdir / 云端 provider（仅供 UI 使用，不阻塞服务启动）
+  // 解析 workdir / 云端 provider（仅供 UI 使用，不阻塞连接）
   var workdir = (workdirRes.status === "fulfilled" && typeof workdirRes.value === "string") ? workdirRes.value : "";
   S.providers = (cloudProvidersRes.status === "fulfilled" && Array.isArray(cloudProvidersRes.value)) ? cloudProvidersRes.value : [];
 
   // 工作目录校验（与上述步骤独立；fire-and-forget，失败仅 warn）
   validateWorkDirs().catch(function(e) { console.warn("[agent] validateWorkDirs 失败:", e); });
 
-  // ===== Phase B: 启动 / 复用 admAgent 服务 =====
-  var serverStatus = (serverStatusRes.status === "fulfilled") ? serverStatusRes.value : null;
-  if (serverStatus && serverStatus.running && serverStatus.host) {
-    S.serverInfo = { host: serverStatus.host, workspace_id: serverStatus.workspace_id || "" };
-    // 复用已运行的 server 时必须同步 client_id：remount 后 S.clientId 已重新生成，
-    // 若不更新则 current-session 等接口会因 client_id 不匹配返回 404
-    if (serverStatus.client_id) S.clientId = serverStatus.client_id;
-  } else {
-    showInitProgress(_t("正在启动 Agent 服务..."));
-    try {
-      S.serverInfo = await invoke("start_agent_server", { clientId: S.clientId });
-      console.log("[agent] Agent 服务已启动, host:", S.serverInfo?.host);
-    } catch (e) {
-      console.error("[agent] 启动 Agent 服务失败:", e);
-      hideInitProgress();
-      reportError(e, { prefix: _t("启动 Agent 服务失败: ") });
-      updateStatusBar("error", null, 0);
-      return;
+  // ===== Phase B: 连接服务端（TCP + TLS，连接串来自设置页）=====
+  // 服务端由用户自行启动：这里只做连接 + 建工作区会话，失败了直接提示去设置页检查配置。
+  showInitProgress(_t("正在连接服务端..."));
+  try {
+    S.serverInfo = await invoke("start_agent_server", { clientId: S.clientId });
+    // 复用已有 workspace 会话时后端返回的是原 client_id：必须同步，否则 remount 后
+    // 新生成的 S.clientId 会与 SSE/current-session 上登记的不一致，导致 404 client not attached
+    if (S.serverInfo && S.serverInfo.client_id) S.clientId = S.serverInfo.client_id;
+    console.log("[agent] 已连接服务端, host:", S.serverInfo?.host);
+  } catch (e) {
+    console.error("[agent] 连接服务端失败:", e);
+    hideInitProgress();
+    // 不走 reportError：后端错误文本含 tcp:// / tigerAgent 命令行等英文片段，
+    // friendlyError 会在中文界面把细节整段丢掉，反而看不到"该去哪儿改"。
+    showError(_t("连接服务端失败：请在设置 → 服务端连接中粘贴服务端连接串（tigerAgent://…），并确保服务端已启动（tigerAgent --host tcp://0.0.0.0:<端口>）"));
+    updateStatusBar("error", null, 0);
+    return;
+  }
+  if (seq !== S.initSeq) return;
+
+  // 工作目录以服务端为准：Phase A 拿到的 get_agent_workdir 是**本机**默认目录，远程部署
+  // 下服务端根本没有这个路径。服务端列表非空时改用它的默认项，避免用无效路径建工作区。
+  try {
+    var serverDirs = await invoke("get_workdirs");
+    if (Array.isArray(serverDirs) && serverDirs.length > 0) {
+      var defaultDir = serverDirs.find(function(d) { return d && d.is_default; }) || serverDirs[0];
+      if (defaultDir && defaultDir.path) workdir = defaultDir.path;
     }
+  } catch (e) {
+    console.warn("[agent] 读取服务端工作目录失败，沿用本机默认:", e);
   }
   if (seq !== S.initSeq) return;
 
@@ -298,7 +295,7 @@ async function setupWorkspace(workdir) {
 // 重新挂载后校准残留的发送态。
 //
 // 难点：发送后到模型真正产出 token 之间有「启动窗口」（服务端 readyWg/UpdateModels、
-// 本地模型加载，可达数秒）。旧版 admAgent 在此窗口内 is_busy=false，单次快照会把
+// 本地模型加载，可达数秒）。旧版 Agent 在此窗口内 is_busy=false，单次快照会把
 // 「仍在启动的运行」误判为已结束、抹掉指示器（日志实测：is_busy=false 后 4s 才出首个 token）。
 //
 // 策略：SSE 已在此前重订，运行若仍活跃，其 run_complete 结束时必会到达并收尾发送态。
@@ -364,45 +361,45 @@ function lastAssistantTurnFinished() {
   return Array.isArray(last.parts) && last.parts.some(function(p) { return p && p.type === "finish"; });
 }
 
-// ===== admAgent server 意外退出自愈 =====
-// 后端 SSE 转发循环检测到 admAgent 进程消失时 emit "agent-server-died"，
-// 这里防重入地重跑一遍 init（重启 server、恢复工作区与会话）
+// ===== 服务端连接断开后的重连 =====
+// 后端 SSE 转发连续失败达阈值时 emit "agent-connection-lost"（服务端由用户自行运行，
+// 桌面端探测不到进程状态），这里防重入地重跑一遍 init 重连并恢复工作区与会话。
 var serverRestarting = false;
 
-// 重启 Agent 服务并恢复工作区/会话（防重入），init() 负责最终收尾。
-// 供意外退出自愈复用；MCP 配置变更后（mcp_dialog.js 动态导入）也走这里。
+// 重连服务端并恢复工作区/会话（防重入），init() 负责最终收尾。
+// 供断线重连复用；MCP 配置变更后（mcp_dialog.js 动态导入）也走这里。
 export async function restartAgentService() {
   if (serverRestarting) return;
   serverRestarting = true;
   try {
-    // 运行中的任务会随服务重启中断：先清本地运行态，避免按钮/指示器残留
+    // 运行中的任务会随重连中断：先清本地运行态，避免按钮/指示器残留
     store.cancelRun(store.activeWsId);
     updateSendButton();
     clearSendSafetyTimer();
-    // 主动重启时先停掉旧服务，避免 start_agent_server 复用仍在运行的会话
+    // 先断开旧会话（只停 SSE 与本地会话，不会结束用户自行启动的服务端）
     await invoke("stop_agent_server").catch(function() {});
-    // 自愈流程与首次 init 共享同一进度条，init() 的 finally 会负责收尾
-    showInitProgress(_t("正在重启 Agent 服务..."));
+    // 重连流程与首次 init 共享同一进度条，init() 的 finally 会负责收尾
+    showInitProgress(_t("正在重新连接服务端..."));
     await init();
   } finally {
     serverRestarting = false;
   }
 }
 
-async function handleServerDied() {
+async function handleConnectionLost() {
   if (serverRestarting) return;
-  console.warn("[agent] admAgent server 意外退出，自动重启中...");
-  showError(_t("admAgent 服务异常退出，正在自动重启..."));
+  console.warn("[agent] 与服务端连接已断开，尝试重连...");
+  showError(_t("与服务端连接已断开，正在尝试重连（请确认服务端仍在运行）"));
   updateStatusBar("error", null, S.contextUsage.used);
   try {
     await restartAgentService();
   } catch (e) {
-    console.error("[agent] admAgent 自动重启失败:", e);
-    reportError(e, { prefix: _t("admAgent 自动重启失败: ") });
+    console.error("[agent] 重连服务端失败:", e);
+    reportError(e, { prefix: _t("重连服务端失败: ") });
   }
 }
 
-// ===== admAgent.json 损坏恢复后的自愈 =====
+// ===== tigerAgent.json 损坏恢复后的自愈 =====
 // 后端检测到配置文件损坏时弹原生对话框引导从备份恢复；恢复成功 emit
 // "agent-config-restored"：若服务此前因配置损坏未能启动（init 在启动阶段
 // 失败返回），在这里重跑 init 把服务带起来；服务已在运行则仅提示
@@ -414,10 +411,10 @@ async function handleConfigRestored(ev) {
   try {
     var payload = (ev && ev.payload) || {};
     if (!payload.ok) {
-      showError(_t("admAgent 配置文件恢复失败: ") + (payload.error || ""));
+      showError(_t("Agent 配置文件恢复失败: ") + (payload.error || ""));
       return;
     }
-    showInfo(_t("admAgent 配置文件已从备份恢复，服务配置已重新加载"));
+    showInfo(_t("Agent 配置文件已从备份恢复，服务配置已重新加载"));
     if (!S.serverInfo || !S.serverInfo.workspace_id) {
       await init();
     } else {
@@ -438,36 +435,6 @@ function bindEvents() {
   document.getElementById("agent-new-chat").addEventListener("click", newConversation);
   // 一键清除所有对话（当前工作区）
   document.getElementById("agent-conv-clear-all").addEventListener("click", clearAllConversations);
-
-  // 微信消息开关（模型选择旁）：开 = 微信 Bot 消息注入当前打开的会话
-  // 只有微信 Bot 服务已启动（state===running）才允许开启；未启动弹提示引导去设置页。
-  (function() {
-    var wxBtn = document.getElementById("agent-wx-follow-btn");
-    if (!wxBtn) return;
-    // 读取持久化的开关状态（仅当服务运行中时才显示为开）
-    invoke("get_ilink_status").then(function(st) {
-      wxBtn.classList.toggle("on", !!(st && st.follow && st.state === "running"));
-    }).catch(function() {});
-    wxBtn.addEventListener("click", async function() {
-      var turningOn = !wxBtn.classList.contains("on");
-      if (turningOn) {
-        // 开启前先确认微信 Bot 服务已绑定且运行中
-        var st = null;
-        try { st = await invoke("get_ilink_status"); } catch (_) {}
-        if (!st || !st.bound || st.state !== "running") {
-          showConfirm(_t("微信 Bot 服务未启动。请先到「设置 → 微信 Bot」扫码绑定并启动服务，再开启微信消息接收。"), function() {});
-          return; // 不打开开关
-        }
-      }
-      wxBtn.classList.toggle("on", turningOn);
-      try {
-        await invoke("set_ilink_follow", { enabled: turningOn });
-      } catch (e) {
-        wxBtn.classList.toggle("on", !turningOn); // 失败回滚显示
-        reportError(e, { prefix: _t("切换微信消息开关失败: ") });
-      }
-    });
-  })();
 
   // 悬浮「对话记录导航」按钮：点击展开/收起右侧消息大纲面板
   var outlineFab = document.getElementById("agent-outline-fab");
@@ -509,6 +476,8 @@ function bindEvents() {
   document.getElementById("agent-settings-close").addEventListener("click", hideSettings);
   // 项目记忆弹窗交互（toolbar 按钮 / 条目增删改 / 压缩时自动提取开关）
   initProjectMemoryUI();
+  // 添加工作目录弹窗：浏览服务端目录（工作目录在服务端主机，不能用本机原生选择框）
+  initWorkdirBrowserUI();
 
   // 工作区选择器点击 → 下拉列表
   var wsSelector = document.getElementById("agent-workspace-selector");
@@ -525,7 +494,7 @@ function bindEvents() {
     $input(id).addEventListener("change", applySettings);
   });
 
-  // 打开调试日志目录（在系统文件管理器中定位 adm_api_debug.log）
+  // 打开调试日志目录（在系统文件管理器中定位 tigerAgent_debug.log）
   document.getElementById("settings-open-log-dir").addEventListener("click", async function() {
     try {
       await invoke("open_debug_log_dir");
@@ -544,7 +513,7 @@ function bindEvents() {
     var tempVal = $input("settings-temperature").value;
     S.settings.agent_temperature = tempVal ? parseFloat(tempVal) : null;
     S.settings.agent_vision_model = $input("settings-vision-model").value || BUILTIN_VISION_KEY;
-    // 开启所有工具调用：关闭 admAgent 内置 bash 命令黑名单（写入 admAgent.json 的 options.bash_allow_all）
+    // 开启所有工具调用：关闭 Agent 内置 bash 命令黑名单（写入 tigerAgent.json 的 options.bash_allow_all）
     S.settings.agent_allow_all_tools = $input("settings-allow-all-tools").checked;
     // 同目录多会话并行：纯桌面端发送策略（服务端本就按会话分发），无需同步服务端
     S.settings.agent_concurrent_sessions = $input("settings-concurrent-sessions").checked;
@@ -626,6 +595,9 @@ function bindEvents() {
 
   // MCP 管理（MCP tab 添加按钮 + 列表点击编辑 + 添加/修改弹窗）
   initMcpDialogUI();
+
+  // 服务端日志查看/下载弹窗（设置 → 服务端日志）
+  initServerLogsUI();
 
   // 附件按钮
   document.getElementById("agent-attach-btn").addEventListener("click", function() {
@@ -975,9 +947,9 @@ export default {
         roundMaxHeightObserver.observe(wrapEl);
       }
     }
-    // 监听 admAgent server 意外退出（unmount 时经 S.unlisteners 统一解绑）
+    // 监听与服务端连接断开（unmount 时经 S.unlisteners 统一解绑）
     if (typeof listen === "function") {
-      listen("agent-server-died", handleServerDied)
+      listen("agent-connection-lost", handleConnectionLost)
         .then(function(u) { S.unlisteners.push(u); })
         .catch(function() {});
       // 配置文件损坏恢复完成（后端原生弹窗确认后）：服务未起来时自动重跑 init

@@ -5,7 +5,7 @@ import { api } from "./api.js";
 import { getErrorMessage, classifyError, friendlyError, ERROR_STEP_CAP, ERROR_CANCEL } from "./error.js";
 import { updateSendButton, updateStatusBar, startSendSafetyTimer, clearSendSafetyTimer, showError, showWarning, showInfo, showNotice, reportError, updateContextUsage } from "./ui.js";
 import { renderMessages, renderTodos, scheduleRenderMessages } from "./render.js";
-import { loadConversations, refreshMessages, renderConversationList, selectConversation, syncWxFollowSession } from "./session.js";
+import { loadConversations, refreshMessages, renderConversationList, selectConversation } from "./session.js";
 import { handlePermissionRequest, resetPermissionState } from "./permission.js";
 import { loadTools } from "./tools.js";
 import { onLspStateEvent } from "./lsp_fix.js";
@@ -57,7 +57,7 @@ function messageDecisionText(message) {
 }
 
 function hasCompletedDecisionResult(messages) {
-  // 本轮起点 = 最后一条用户消息：旧协议在它的正文里带 <adm_decision_request>，
+  // 本轮起点 = 最后一条用户消息：旧协议在它的正文里带 <agent_decision_request>，
   // 新协议（服务端契约走系统提示词）用户消息里没有请求块，但起点位置一样。
   var start = -1;
   for (var i = messages.length - 1; i >= 0; i--) {
@@ -410,12 +410,12 @@ function onMessageSSEEvent(ev) {
     store.promoteQueuedRun(S.queuedRun.workspaceId, S.queuedRun.sessionId);
     renderConversationList();
   }
-  // 未打开任何会话时，后台会话（如微信 Bot）来消息 → 自动打开该会话实时跟踪
+  // 未打开任何会话时，后台会话（如其它客户端 / 并行会话）来消息 → 自动打开该会话实时跟踪
   if (!S.currentConvId && actualData.session_id) {
     selectConversation(actualData.session_id);
     return; // selectConversation 会拉取全量消息，本条事件无需重复处理
   }
-  // SSE 是工作区级广播：非当前打开会话的消息（如微信 Bot 会话的运行）不得进入当前消息列表，
+  // SSE 是工作区级广播：非当前打开会话的消息（如后台会话的运行）不得进入当前消息列表，
   // 否则先被 push 显示、run_complete 后 refreshMessages 按当前会话拉取又被清掉（表现为消息闪现后消失）
   if (actualData.session_id && actualData.session_id !== S.currentConvId) {
     log.warn("SSE", "message DROPPED (session mismatch): " + actualData.session_id + " vs " + S.currentConvId);
@@ -452,7 +452,7 @@ function onRunCompleteSSEEvent(ev, ctx) {
   // 若提前解除，父运行的布防会被误清，本轮完成事件丢失时将失去兜底。
   if (belongsToCurrent) clearRunCompleteFallback();
   if (!belongsToCurrent) {
-    // 其它会话（并行运行 / 微信 Bot 会话）完成：只刷新本工作区的列表与运行标识，
+    // 其它会话（并行运行 / 后台会话）完成：只刷新本工作区的列表与运行标识，
     // 当前会话的运行态/安全计时器/决策轮校验一概不动
     console.log("[agent] 其它会话运行完成，仅刷新列表: session=" + (sid || "").slice(0, 8));
     onPdfBatchRunComplete(sid, classifyRunComplete(actualData, false).kind, actualData.run_id || "", false);
@@ -632,12 +632,12 @@ function onConfigChangedSSEEvent() {
   // 配置变更，刷新 Agent 信息
 }
 
-// 服务端「丢弃半成品并重试」的通知 token（admAgent agent_loop_llm.go 的 notifyDiscard）：
+// 服务端「丢弃半成品并重试」的通知 token（Agent agent_loop_llm.go 的 notifyDiscard）：
 // 与 message deleted 事件属于同一次丢弃（token 先发出，但两者走不同 broker，到达顺序不保证），
 // 按 token 出本地化文案，并以此抑制下方按消息内容猜测的兜底提示，避免双提示。
-// 取值须与 admAgent 的 discardReasoningOverrun / discardStreamInterrupted 常量保持一致。
+// 取值须与 Agent 的 discardReasoningOverrun / discardStreamInterrupted 常量保持一致。
 // discard_reasoning_timeout 已不由新服务端发出（300s 无可见输出看门狗已删除），但保留一个
-// 版本周期：桌面端与内置 sidecar 分别发布，仍可能跑着旧 admAgent，而删掉该映射会让用户
+// 版本周期：桌面端与内置 sidecar 分别发布，仍可能跑着旧 Agent，而删掉该映射会让用户
 // 在提示里直接看到未翻译的英文 token 原文。
 var DISCARD_NOTICE_TEXT = {
   discard_reasoning_overrun: "模型思考量超出本轮上限，已丢弃该段思考并重新生成",
@@ -731,7 +731,7 @@ function handleMessageSSEEvent(action, msgData) {
 // 里的 token，由 onAgentEventSSEEvent 给出精确原因并抑制本提示）。
 // 服务端在「推理超量」（reasoningOverrunMaxTokens ≈ 120000 tokens，按估算：ASCII 约 4 字节
 // /token、非 ASCII rune 计 1 token；不再按推理强度分档）时会中止当前 step、删掉那条只含
-// 思考的 assistant 消息（message.Delete → 本条 deleted 事件）并带 nudge 重试，见 admAgent
+// 思考的 assistant 消息（message.Delete → 本条 deleted 事件）并带 nudge 重试，见 Agent
 // agent_loop_llm.go 的 errOutputDegraded 分支。前端此前只让思考气泡凭空消失，用户看到的
 // 是「思考很久 → 突然清屏 → 又继续思考」却没有任何说明，这里补上原因。
 // 只认「纯思考气泡」：带正文/工具调用的删除与空消息删除（上下文溢出、无 step 结果、
@@ -829,7 +829,6 @@ function handleSessionSSEEvent(action, sessData, ctx) {
     if ((ctx && ctx.prevCurrentConvId) === sessData.id) {
       updateDecisionModeUI();
       resetPermissionState();
-      syncWxFollowSession();
       renderMessages();
       renderTodos([]);
       document.getElementById("agent-conv-title").textContent = _t("选择或创建一个会话");

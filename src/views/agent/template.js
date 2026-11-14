@@ -966,25 +966,6 @@ export const template = `
     border-top: 1px solid var(--c-raise-2);
   }
 
-  /* 微信消息跟随开关（模型选择旁）：开启时微信 Bot 消息注入当前打开的会话 */
-  .toolbar-wx-btn {
-    background: rgba(255,255,255,0.08);
-    border: none;
-    color: var(--c-text-2);
-    padding: 4px 10px;
-    border-radius: 6px;
-    font-size: 13px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    transition: all 0.15s;
-    white-space: nowrap;
-  }
-  .toolbar-wx-btn:hover { background: rgba(255,255,255,0.15); }
-  .toolbar-wx-btn.on { background: #07c160; color: #fff; }
-  .toolbar-wx-btn.on:hover { background: #06a552; }
-
   /* 手动压缩上下文按钮（技能按钮旁）：运行中禁用防止竞态 */
   .toolbar-compact-btn {
     background: rgba(255,255,255,0.08);
@@ -1716,6 +1697,59 @@ export const template = `
   }
   .add-model-overlay.show { display: flex; }
 
+  /* 添加工作目录：浏览服务端目录树（工作目录在服务端主机，客户端原生选择框只看得到本机路径） */
+  .workdir-browser-list {
+    height: 240px;
+    overflow-y: auto;
+    padding: 4px;
+    border: 1px solid var(--c-border);
+    border-radius: 6px;
+    background: var(--c-bg);
+  }
+  .workdir-browser-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    border-radius: 4px;
+    font-size: 13px;
+    color: var(--c-text);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .workdir-browser-item:hover { background: var(--c-overlay-strong); }
+  .workdir-browser-item.parent { color: var(--c-text-2); }
+  .workdir-browser-empty {
+    padding: 8px;
+    font-size: 12px;
+    color: var(--c-text-4);
+  }
+
+  /* 服务端日志弹窗：等宽正文，保留原始换行并可滚动（10MB 级日志也不撑破布局） */
+  .server-log-content {
+    margin: 0;
+    padding: 10px 12px;
+    height: min(58vh, 520px);
+    overflow: auto;
+    background: var(--c-bg);
+    border: 1px solid var(--c-border);
+    border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--c-text-2);
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .server-log-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
   /* 空状态 */
   .empty-state {
     display: flex;
@@ -2083,11 +2117,6 @@ export const template = `
             <span class="compact-icon">🧠</span>
             <span class="compact-text">${_t("项目记忆")}</span>
           </button>
-          <!-- ②b 微信消息开关：开 = 微信 Bot 消息进入当前打开的会话；关 = 不接收微信消息 -->
-          <button class="toolbar-wx-btn" id="agent-wx-follow-btn" title="${_t("微信消息开关：开启后微信 Bot 消息进入当前打开的会话；关闭后不再接收微信消息")}">
-            <span class="wx-icon">💬</span>
-            <span class="wx-text">${_t("微信")}</span>
-          </button>
           <!-- ③ 上下文用量 -->
           <div class="toolbar-context-usage" id="agent-context-usage">
             <span class="usage-current">0</span>
@@ -2143,7 +2172,14 @@ export const template = `
               <span>${_t("记录调试日志")}</span>
               <button type="button" class="browse-btn" id="settings-open-log-dir" style="margin-left:auto;">${_t("打开日志目录")}</button>
             </div>
-            <div class="param-desc">${_t("开启后在 app 数据目录写入 adm_api_debug.log（记录与 admAgent 的关键 API/事件交互，含你发送的消息正文，供排查对话中断）；关闭或重启软件会自动清空日志")}</div>
+            <div class="param-desc">${_t("开启后在 app 数据目录写入 tigerAgent_debug.log（记录与 Agent 的关键 API/事件交互，含你发送的消息正文，供排查对话中断）；关闭或重启软件会自动清空日志")}</div>
+          </div>
+        </div>
+        <div class="param-row">
+          <div class="param-label">${_t("服务端日志")}</div>
+          <div class="param-input">
+            <button type="button" class="browse-btn" id="settings-open-server-logs">${_t("查看/下载服务端日志")}</button>
+            <div class="param-desc">${_t("服务端日志（tigerAgent.log / tigerAgent-panic.log）在服务端主机上，本机可能没有该文件：通过 HTTP API 按行数查看，也可整文件下载")}</div>
           </div>
         </div>
         <div class="param-row">
@@ -2153,7 +2189,7 @@ export const template = `
               <input type="checkbox" id="settings-allow-all-tools">
               <span>${_t("取消内置命令黑名单")}</span>
             </div>
-            <div class="param-desc">${_t("开启后 admAgent 不再拦截 sudo / apt / systemctl / curl 等提权、包管理与系统管理命令（Linux 上装依赖、改系统服务需要它）。由 admAgent 的 options.bash_allow_all 生效，需使用支持该配置的 admAgent 版本；请仅在你信任本机与当前项目时打开")}</div>
+            <div class="param-desc">${_t("开启后 Agent 不再拦截 sudo / apt / systemctl / curl 等提权、包管理与系统管理命令（Linux 上装依赖、改系统服务需要它）。由 Agent 的 options.bash_allow_all 生效，需使用支持该配置的 Agent 版本；请仅在你信任本机与当前项目时打开")}</div>
           </div>
         </div>
         <div class="param-row">
@@ -2193,7 +2229,7 @@ export const template = `
           <div class="param-label">${_t("多模态模型")}</div>
           <div class="param-input">
             <select class="settings-select" id="settings-vision-model"></select>
-            <div class="param-desc">${_t("用于识别会话中的图片；默认为内置 adm-models（自动轮询可用图片后端）")}</div>
+            <div class="param-desc">${_t("用于识别会话中的图片；默认为内置 agent-models（自动轮询可用图片后端）")}</div>
           </div>
         </div>
       </div>
@@ -2302,7 +2338,7 @@ export const template = `
   </div>
 </div>
 
-<!-- MCP 添加/修改弹窗（配置写入 admAgent.json 顶层 mcp；保存后需重启 Agent 服务生效） -->
+<!-- MCP 添加/修改弹窗（配置写入 tigerAgent.json 顶层 mcp；保存后需重启 Agent 服务生效） -->
 <div class="add-model-overlay" id="agent-mcp-overlay">
   <div class="settings-modal" style="width:480px;">
     <div class="settings-header">
@@ -2334,6 +2370,58 @@ export const template = `
         <div style="display:flex;gap:8px;">
           <button class="settings-btn settings-btn-primary" id="mcp-dialog-submit">${_t("添加")}</button>
           <button class="settings-btn settings-btn-secondary" id="mcp-dialog-delete" style="display:none;">${_t("删除")}</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 服务端日志弹窗：内容来自服务端 GET /v1/logs（远程部署时本机没有该文件） -->
+<div class="add-model-overlay" id="agent-server-log-overlay">
+  <div class="settings-modal" style="width:900px;max-width:94vw;">
+    <div class="settings-header">
+      <span class="settings-title">${_t("服务端日志")}</span>
+      <button class="settings-close" id="server-log-close">✕</button>
+    </div>
+    <div class="settings-body">
+      <div class="server-log-toolbar" style="margin-bottom:8px;">
+        <select class="settings-select" id="server-log-file" style="min-width:240px;width:auto;"></select>
+        <select class="settings-select" id="server-log-tail" style="width:auto;">
+          <option value="200">${_t("最后 200 行")}</option>
+          <option value="1000" selected>${_t("最后 1000 行")}</option>
+          <option value="5000">${_t("最后 5000 行")}</option>
+          <option value="0">${_t("整个文件")}</option>
+        </select>
+        <button class="settings-btn settings-btn-secondary" id="server-log-refresh">${_t("刷新")}</button>
+        <button class="settings-btn settings-btn-secondary" id="server-log-download">${_t("下载")}</button>
+        <span id="server-log-status" style="font-size:12px;color:var(--c-text-3);"></span>
+      </div>
+      <div id="server-log-dir" style="font-size:11px;color:var(--c-text-4);word-break:break-all;margin-bottom:6px;"></div>
+      <pre id="server-log-content" class="server-log-content"></pre>
+    </div>
+  </div>
+</div>
+
+<!-- 添加工作目录：浏览服务端目录（工作目录在服务端主机，客户端原生目录选择框只能列出本机路径） -->
+<div class="add-model-overlay" id="agent-workdir-browser-overlay">
+  <div class="settings-modal" style="width:560px;max-width:94vw;">
+    <div class="settings-header">
+      <span class="settings-title">${_t("添加工作目录")}</span>
+      <button class="settings-close" id="workdir-browser-close">✕</button>
+    </div>
+    <div class="settings-body">
+      <div class="param-row" style="flex-direction:column;gap:8px;">
+        <div class="param-desc">${_t("工作目录在服务端主机上，这里浏览的是服务端目录（客户端可能不在同一台机器）。")}</div>
+        <div style="display:flex;gap:6px;">
+          <input type="text" class="settings-input" id="workdir-browser-path" style="flex:1;" placeholder="${_t("服务端目录路径（可手动输入）")}">
+          <button class="settings-btn settings-btn-secondary" id="workdir-browser-home">${_t("主目录")}</button>
+          <button class="settings-btn settings-btn-secondary" id="workdir-browser-go">${_t("转到")}</button>
+        </div>
+        <div class="workdir-browser-list" id="workdir-browser-list"></div>
+        <div id="workdir-browser-msg" style="font-size:12px;min-height:18px;line-height:18px;"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;">
+          <button class="settings-btn settings-btn-secondary" id="workdir-browser-cancel">${_t("取消")}</button>
+          <button class="settings-btn settings-btn-primary" id="workdir-browser-confirm">${_t("使用此目录")}</button>
         </div>
       </div>
     </div>

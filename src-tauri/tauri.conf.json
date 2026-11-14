@@ -3,6 +3,7 @@
   "productName": "Tiger",
   "version": "0.0.1",
   "identifier": "com.tiger.agent",
+  "mainBinaryName": "Tiger",
   "build": {
     "frontendDist": "../src"
   },

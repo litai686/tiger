@@ -189,27 +189,6 @@
       font-weight: 600;
     }
 
-    /* 多卡下拉：替代 vram-info 文本显示，允许逐卡查看（放宽宽度尽量显示完整卡名） */
-    #gpu-select {
-      color: var(--c-text-hi);
-      font-weight: 600;
-      font-size: 12px;
-      height: 18px;
-      line-height: 18px;
-      padding: 0 2px;
-      background: transparent;
-      border: none;
-      cursor: pointer;
-      max-width: 260px;
-      outline: none;
-      text-align: right;
-      vertical-align: bottom;
-    }
-    #gpu-select option {
-      background: var(--c-panel-2);
-      color: var(--c-text);
-    }
-
     /* 更新弹窗样式 */
     #update-overlay {
       display: none;
@@ -253,6 +232,36 @@
     .update-progress-bar { width: 100%; height: 6px; background: var(--c-border); border-radius: 3px; margin-top: 12px; overflow: hidden; }
     .update-progress-fill { height: 100%; background: var(--c-accent); border-radius: 3px; transition: width 0.3s ease; }
     .update-status-text { font-size: 12px; color: var(--c-text-3); margin-top: 6px; text-align: center; }
+
+    /* 服务端自检失败弹窗（启动时检测配置完整性与健康状态） */
+    #server-alert-overlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.6);
+      z-index: 10000;
+      justify-content: center;
+      align-items: center;
+    }
+    #server-alert-overlay.show { display: flex; }
+    #server-alert-dialog {
+      background: var(--c-panel);
+      border: 1px solid var(--c-border);
+      border-radius: 12px;
+      padding: 28px 32px;
+      max-width: 460px;
+      width: 90%;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    #server-alert-dialog .server-alert-icon { font-size: 40px; text-align: center; margin-bottom: 12px; }
+    #server-alert-dialog .server-alert-title { font-size: 18px; font-weight: 600; color: var(--c-text-hi); text-align: center; margin-bottom: 10px; }
+    #server-alert-dialog .server-alert-detail { font-size: 13px; color: var(--c-text-2); line-height: 1.6; margin-bottom: 22px; white-space: pre-line; word-break: break-all; max-height: 220px; overflow-y: auto; }
+    #server-alert-dialog .server-alert-buttons { display: flex; justify-content: center; }
+    #server-alert-dialog .server-alert-btn { background: var(--c-accent); color: #fff; border: none; padding: 10px 28px; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; transition: background 0.2s; }
+    #server-alert-dialog .server-alert-btn:hover { background: var(--c-accent-2); }
 
     /* ===== 视图切换全局过渡 =====
        流程：fade-out 当前视图（160ms）→ 可选展示顶部进度条 + 居中 spinner →
@@ -338,7 +347,7 @@
   <script>
     // 主题：尽早同步应用（在 body 渲染前），避免首屏闪烁
     // 名称字段为显示文案（设置页主题卡片用），id 才是持久化键；i18n 未就绪时保持中文
-    window.__ADM_THEMES = [
+    window.__AGENT_THEMES = [
       { id: "default", name: "暗夜紫",      colors: ["#1a1a2e", "#16213e", "#6c63ff"] },
       { id: "vscode",  name: "VS Code 深色", colors: ["#1e1e1e", "#252526", "#4a9eff"] },
       { id: "onedark", name: "One Dark",     colors: ["#282c34", "#21252b", "#61afef"] },
@@ -348,14 +357,14 @@
       { id: "sepia",   name: "淡黄护眼",    colors: ["#fdf6e3", "#eee8d5", "#b5651d"] }
     ];
     window.getTheme = function () {
-      try { return localStorage.getItem("adm-theme") || "vscode"; } catch (_) { return "vscode"; }
+      try { return localStorage.getItem("tiger-theme") || "vscode"; } catch (_) { return "vscode"; }
     };
     window.applyTheme = function (id) {
-      var valid = window.__ADM_THEMES.some(function (t) { return t.id === id; });
+      var valid = window.__AGENT_THEMES.some(function (t) { return t.id === id; });
       var theme = valid ? id : "default";
       if (theme === "default") document.documentElement.removeAttribute("data-theme");
       else document.documentElement.setAttribute("data-theme", theme);
-      try { localStorage.setItem("adm-theme", theme); } catch (_) {}
+      try { localStorage.setItem("tiger-theme", theme); } catch (_) {}
     };
     window.applyTheme(window.getTheme());
   </script>
@@ -365,6 +374,18 @@
   <div id="update-overlay">
     <div id="update-dialog">
       <div id="update-content"></div>
+    </div>
+  </div>
+
+  <!-- 服务端自检失败提示（启动时） -->
+  <div id="server-alert-overlay">
+    <div id="server-alert-dialog">
+      <div class="server-alert-icon">&#9888;&#65039;</div>
+      <div class="server-alert-title" id="server-alert-title" data-i18n="服务端异常，请检查配置">服务端异常，请检查配置</div>
+      <div class="server-alert-detail" id="server-alert-detail"></div>
+      <div class="server-alert-buttons">
+        <button class="server-alert-btn" id="server-alert-ok" data-i18n="去配置服务端">去配置服务端</button>
+      </div>
     </div>
   </div>
 
@@ -385,19 +406,21 @@
         <span class="btn-icon">&#9881;</span>
         <span class="btn-text" data-i18n="设置">设置</span>
       </div>
-      <div id="hw-items">
+      <div id="hw-items" title="以下为服务端硬件信息（每 5 秒自动刷新）">
+        <div class="hw-item">
+          <span class="hw-label" id="hw-scope" data-i18n="服务端">服务端</span>
+        </div>
+        <div class="hw-item">
+          <span class="hw-label">CPU</span>
+          <span class="hw-value" id="cpu-info">--</span>
+        </div>
         <div class="hw-item">
           <span class="hw-label" data-i18n="内存">内存</span>
           <span class="hw-value" id="ram-info">--</span>
         </div>
         <div class="hw-item">
-          <span class="hw-label" id="gpu-label" data-i18n="显存">显存</span>
-          <select id="gpu-select" class="hw-value" style="display:none;"></select>
-          <span class="hw-value" id="vram-info">--</span>
-        </div>
-        <div class="hw-item">
-          <span class="hw-label">CPU</span>
-          <span class="hw-value" id="cpu-info">--</span>
+          <span class="hw-label" data-i18n="硬盘">硬盘</span>
+          <span class="hw-value" id="disk-info">--</span>
         </div>
       </div>
 
@@ -410,8 +433,8 @@
     // ===== 全局基础设施 =====
     const invoke = window.__TAURI__?.core?.invoke || window.__TAURI_INTERNALS__?.invoke;
     const listen = window.__TAURI__?.event?.listen || window.__TAURI_INTERNALS__?.listen;
-    window.__adm_invoke = invoke;
-    window.__adm_listen = listen;
+    window.__agent_invoke = invoke;
+    window.__agent_listen = listen;
 
     // 预加载 i18n 模块并同步绑定 t()（顶层 await，后续所有动态文本走 t）
     const _i18n = await import("./i18n.js");
@@ -427,13 +450,12 @@
     document.getElementById("hardware-bar").addEventListener("contextmenu", function(e) { e.preventDefault(); });
 
     // 共享状态（跨视图共享）
-    window.__adm_state = {
+    window.__agent_state = {
       // agent 是否正在工作（由 agent 视图 store.js syncAgentBusy 维护，用于导航拦截）
       agentBusy: false,
     };
 
     let systemInfo = null;
-    let hwinfo = { cpu: null, ram: null, gpu: null, os: null };
 
     function formatBytes(bytes) {
       if (bytes === 0) return "0 B";
@@ -450,6 +472,19 @@
     }
 
 
+
+    // 升级日志（update.json 各平台 content 字段指向的升级说明页）：
+    // 地址不拼进 onclick（远端可控，避免转义逃逸），先记在模块变量里，由固定函数读取
+    let pendingChangelogUrl = "";
+    function changelogButton(url) {
+      const target = String(url || "").trim();
+      if (!target) return "";
+      pendingChangelogUrl = target;
+      return `<button class="update-btn-secondary" onclick="openChangelog()">${t("查看升级日志")}</button>`;
+    }
+    function openChangelog() {
+      if (pendingChangelogUrl) openUrl(pendingChangelogUrl);
+    }
 
     // ===== 导航激活态 =====
     function setActiveNav(id) {
@@ -503,10 +538,10 @@
         const result = await invoke("check_update");
 
         if (result.has_update && result.download_url) {
-          // 新版本：启动时静默后台下载（不打扰用户），下载完成后才弹窗询问是否升级；
-          // 用户主动点「检查新版本」时（silent=false）跟随弹窗展示下载进度
+          // 新版本：一检测到就弹出升级窗口（含「查看升级日志」入口），窗口内继续后台下载；
+          // 用户主动点「检查新版本」时（silent=false）同样跟随弹窗展示下载进度
           if (silent) {
-            startAppUpdateDownload(result);
+            if (startAppUpdateDownload(result)) renderAppUpdateDialog();
           } else {
             startAppUpdate(result, { manual: true });
             return;
@@ -524,6 +559,7 @@
                 <div class="info-item"><div class="info-label">${t("最新版本")}</div><div class="info-value">v${escHtml(result.remote_version)}</div></div>
               </div>
               <div class="update-buttons">
+                ${changelogButton(result.changelog_url)}
                 <button class="update-btn-secondary" onclick="onSystemUpdateDismiss()">${t("稍后再说")}</button>
               </div>`;
             showUpdateDialog(html);
@@ -557,10 +593,10 @@
       hideUpdateDialog();
     }
 
-    // ===== 应用自升级（静默下载安装包 → 下载完成后提示升级）=====
-    // 启动时的更新检查只做后台静默下载，不打断用户；安装包落盘后才弹窗询问是否立即升级。
+    // ===== 应用自升级（检测到新版本即弹窗 → 后台下载 → 下载完成后提示升级）=====
+    // 启动检查发现新版本时立即弹窗（窗口内继续后台下载、可查看升级日志），安装包落盘后在同一窗口询问是否立即升级。
     // 安装包保留在本地（get_base_dir/updates），用户「稍后再说」后重启即已就绪、无需重下。
-    const APP_UPDATE_SKIP_KEY = "adm_skip_update_version";
+    const APP_UPDATE_SKIP_KEY = "tiger_skip_update_version";
     let appUpdate = null;              // { version, currentVersion, path, status: downloading|ready|error, progress, error, manual, prompted }
     let appUpdatePromptPending = false; // 升级提示被其它弹窗推迟
 
@@ -588,6 +624,7 @@
             <button class="update-btn-secondary" onclick="onSystemUpdateDismiss()">${t("稍后再说")}</button>
           </div>
           <div class="update-buttons" style="margin-top:10px;">
+            ${changelogButton(appUpdate.changelogUrl)}
             <button class="update-btn-secondary" style="font-size:12px;padding:6px 18px;" onclick="onAppUpdateSkipVersion()">${t("跳过此版本")}</button>
           </div>`, "app-update");
         return;
@@ -621,6 +658,7 @@
         <div class="update-progress-bar"><div class="update-progress-fill" id="app-update-progress-fill" style="width: ${Number(appUpdate.progress) || 0}%"></div></div>
         <div class="update-status-text" id="app-update-status-text">${t("正在下载... ")}${Number(appUpdate.progress) || 0}%</div>
         <div class="update-buttons" style="margin-top:16px;">
+          ${changelogButton(appUpdate.changelogUrl)}
           <button class="update-btn-secondary" onclick="hideUpdateDialog()">${t("后台下载，稍后再说")}</button>
         </div>`, "app-update");
     }
@@ -652,6 +690,7 @@
         version: result.remote_version,
         currentVersion: result.current_version,
         downloadUrl: result.download_url,
+        changelogUrl: result.changelog_url || "",
         path: null,
         status: "downloading",
         progress: 0,
@@ -731,6 +770,7 @@
         download_url: appUpdate.downloadUrl,
         remote_version: appUpdate.version,
         current_version: appUpdate.currentVersion,
+        changelog_url: appUpdate.changelogUrl,
       };
       if (!result.download_url) { hideUpdateDialog(); return; }
       // 必须先把状态挪出 downloading/ready：startAppUpdateDownload 对同版本的这两种
@@ -819,7 +859,7 @@
     // Agent 正在工作时禁止切换到其它页面（壳层底部导航统一入口）。
     // agentBusy 由 agent 视图 store.js syncAgentBusy 维护（startRun/completeRun/cancelRun 时更新）。
     function navigateTo(path) {
-      if (window.__adm_state && window.__adm_state.agentBusy) {
+      if (window.__agent_state && window.__agent_state.agentBusy) {
         showAgentBusyTip();
         return;
       }
@@ -842,13 +882,18 @@
     }
 
     // 暴露给视图模块（如 settings 调用）
-    window.ADM = {
+    window.Agent = {
       showUpdateDialog,
       hideUpdateDialog,
       checkForUpdate,
       // 应用自升级：下载/升级状态查询与触发（settings 页「检查新版本」复用同一流程）
       startAppUpdate,
       getAppUpdate: function () { return appUpdate; },
+      // 升级日志：settings 页复用同一个按钮（地址同样不进 onclick）
+      changelogButton,
+      openChangelog,
+      // 服务端硬件信息：保存连接成功后立即刷新底部状态栏
+      refreshSystemInfo,
     };
     window.hideUpdateDialog = hideUpdateDialog;
     window.goAgent = goAgent;
@@ -859,81 +904,162 @@
     window.onAppUpdateRetry = onAppUpdateRetry;
     window.onAppUpdateReveal = onAppUpdateReveal;
     window.onAppUpdateSkipVersion = onAppUpdateSkipVersion;
+    window.openChangelog = openChangelog;
 
     // ===== 硬件栏 =====
-    // 显卡栏：多张显卡时渲染下拉逐卡查看（卡名 + 显存），单卡/无卡维持原文本显示
-    function updateGpuBar() {
-      const select = document.getElementById("gpu-select");
-      const vramEl = document.getElementById("vram-info");
-      const gpuLabel = document.getElementById("gpu-label");
-      const gpus = (systemInfo.gpus || []).filter(function(g) { return g && g.name; });
+    // 数据源固定为服务端 GET /v1/system/info：CPU 使用率 / 内存已用-总量 / 数据卷可用-总量。
+    // 显卡探测已从服务端删除（不再执行 nvidia-smi），状态栏也不再显示显存。
+    const SYSTEM_INFO_POLL_MS = 5000;
+    let systemInfoPollTimer = null;
+    let systemInfoLoading = false;
+    let systemInfoLoadedOnce = false;
+    let systemInfoWarned = false;
 
-      if (gpus.length > 1) {
-        // 多卡：下拉选卡（独显排前），右侧显示所选卡的显存用量（已用 / 总量）
-        select.style.display = "";
-        const prev = select.value;
-        const ordered = gpus.slice().sort(function(a, b) {
-          return (a.is_integrated ? 1 : 0) - (b.is_integrated ? 1 : 0);
-        });
-        select.innerHTML = "";
-        ordered.forEach(function(g, i) {
-          const opt = document.createElement("option");
-          opt.value = String(i);
-          // 核显显存是共享内存占位值（专用显存常为一两百 MB），不可信，只标注不显示数字
-          opt.textContent = g.name + (g.is_integrated ? " (" + t("集成显卡") + ")" : "");
-          opt.title = g.name;
-          select.appendChild(opt);
-        });
-        if (prev !== "" && ordered[Number(prev)]) select.value = prev;
-        const showVram = function(g) {
-          if (!g) { vramEl.textContent = ""; return; }
-          vramEl.textContent = g.total_vram > 0 ? formatBytes(g.total_vram) : "";
-        };
-        select.onchange = function() { showVram(ordered[Number(select.value)]); };
-        vramEl.style.display = "";
-        showVram(ordered[Number(select.value)]);
-        if (gpuLabel.getAttribute("data-i18n") !== "显存") {
-          gpuLabel.textContent = t("显存");
-          gpuLabel.setAttribute("data-i18n", "显存");
-        }
-        return;
-      }
+    // 「已用 / 总量」；总量缺失显示 --，内存类在 used=0 时视为未知（macOS 只报总量）
+    function formatPair(used, total, zeroMeansUnknown) {
+      if (!total) return "--";
+      if (zeroMeansUnknown && !used) return "-- / " + formatBytes(total);
+      return formatBytes(used) + " / " + formatBytes(total);
+    }
 
-      select.style.display = "none";
-      vramEl.style.display = "";
-      if (systemInfo.has_gpu && systemInfo.total_vram > 0) {
-        // 单卡：优先逐卡枚举值（nvidia-smi 准确），只显示总量
-        const one = gpus.length === 1 ? gpus[0] : null;
-        const oneTotal = one && one.total_vram > 0 ? one.total_vram : systemInfo.total_vram;
-        vramEl.textContent = formatBytes(oneTotal);
-        // 型号优先：hwinfo 插件 > 单卡枚举结果 > 默认"显存"
-        const model = (hwinfo.gpu && hwinfo.gpu.model) || (one ? one.name : null);
-        if (model) {
-          gpuLabel.textContent = one && one.is_integrated ? model + " (" + t("集成显卡") + ")" : model;
-          gpuLabel.removeAttribute("data-i18n"); // 型号优先，语言切换不再覆盖
-        }
-      } else {
-        vramEl.textContent = t("无显卡");
-      }
+    function setHardwareBarOffline() {
+      ["cpu-info", "ram-info", "disk-info"].forEach(function (id) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = t("未连接");
+        el.removeAttribute("title");
+      });
     }
 
     function updateHardwareBar() {
       if (!systemInfo) return;
       try {
-        document.getElementById("ram-info").textContent = formatBytes(systemInfo.total_ram);
-        updateGpuBar();
-        const cpuCores = systemInfo.cpu_physical_cores;
-        const cpuThreads = systemInfo.cpu_logical_cores;
-        if (hwinfo.cpu && hwinfo.cpu.model) {
-          document.getElementById("cpu-info").textContent = hwinfo.cpu.model + " " + cpuCores + "C/" + cpuThreads + "T";
-        } else {
-          document.getElementById("cpu-info").textContent = cpuCores + "C/" + cpuThreads + "T";
+        const cpuEl = document.getElementById("cpu-info");
+        const usage = systemInfo.cpu_usage;
+        const usageText = typeof usage === "number" && isFinite(usage) && usage >= 0
+          ? Math.min(100, usage * 100).toFixed(1) + "%"
+          : "--";
+        if (cpuEl) {
+          cpuEl.textContent = usageText;
+          const cores = (systemInfo.cpu_physical_cores || "?") + "C/" + (systemInfo.cpu_logical_cores || "?") + "T";
+          cpuEl.title = [systemInfo.cpu_model, cores, systemInfo.hostname].filter(Boolean).join(" · ");
         }
+        const ramEl = document.getElementById("ram-info");
+        if (ramEl) ramEl.textContent = formatPair(systemInfo.used_ram, systemInfo.total_ram, true);
+        const diskEl = document.getElementById("disk-info");
+        if (diskEl) diskEl.textContent = formatPair(systemInfo.disk_available, systemInfo.disk_total, false);
+        const scopeEl = document.getElementById("hw-scope");
+        if (scopeEl) scopeEl.title = systemInfo.hostname || "";
       } catch (e) {
         console.error("更新硬件栏失败:", e);
-        document.getElementById("ram-info").textContent = t("加载失败");
       }
     }
+
+    // 读取一次服务端硬件信息并刷新状态栏；定时器与「保存连接成功」共用同一入口。
+    async function refreshSystemInfo() {
+      if (systemInfoLoading) return systemInfo;
+      systemInfoLoading = true;
+      try {
+        const info = await invoke("get_system_info");
+        systemInfo = info;
+        window.__agent_state.systemInfo = info;
+        systemInfoLoadedOnce = true;
+        systemInfoWarned = false;
+        updateHardwareBar();
+        return systemInfo;
+      } catch (e) {
+        // 服务端未连接 / 重启中：首次失败显示「未连接」，之后保留上次数值并降噪日志
+        if (!systemInfoWarned) {
+          console.warn("[index] 读取服务端硬件信息失败（每 5s 重试）:", e);
+          systemInfoWarned = true;
+        }
+        if (!systemInfoLoadedOnce) setHardwareBarOffline();
+        return null;
+      } finally {
+        systemInfoLoading = false;
+      }
+    }
+
+    function startSystemInfoPolling() {
+      if (systemInfoPollTimer) return;
+      systemInfoPollTimer = setInterval(function () {
+        if (!document.hidden) refreshSystemInfo();
+      }, SYSTEM_INFO_POLL_MS);
+      document.addEventListener("visibilitychange", function () {
+        if (!document.hidden) refreshSystemInfo();
+      });
+    }
+
+    // ===== 启动自检：服务端连接配置 + 健康状态 =====
+    // 桌面端只有一种连接方式：用户自行启动的 TCP + TLS 服务端，连接串在设置页粘贴
+    // （地址 + 服务端指纹 + token）。顺序是 ① 连接串是否可解析 → ② 已配置则确认能否连上（/v1/health）；
+    // 任一不满足都弹窗提示，确认后跳到「设置 → 服务端连接」面板
+    // （`?panel=server` 由 settings 视图消费）。
+    const SERVER_CHECK_INTERVAL_MS = 1500;
+    const SERVER_CHECK_TIMEOUT_MS = 15000;
+    let serverAlertShown = false;
+
+    function errText(e) {
+      if (e == null) return "";
+      if (typeof e === "string") return e;
+      return e.message || String(e);
+    }
+
+    function showServerAlert(detail) {
+      if (serverAlertShown) return;
+      serverAlertShown = true;
+      const detailEl = document.getElementById("server-alert-detail");
+      if (detailEl) detailEl.textContent = detail || "";
+      document.getElementById("server-alert-overlay").classList.add("show");
+      console.warn("[index] 服务端自检失败:", detail);
+      logRouteDebug("[SERVER-CHECK] 服务端异常弹窗: " + (detail || ""));
+    }
+
+    function hideServerAlert() {
+      document.getElementById("server-alert-overlay").classList.remove("show");
+    }
+
+    // 返回 null 表示服务端可用；返回字符串表示失败原因（直接展示给用户）
+    async function probeServer() {
+      let conn = null;
+      try {
+        conn = await invoke("get_server_connection");
+      } catch (e) {
+        return t("读取服务端配置失败: ") + errText(e);
+      }
+
+      // ① 配置完整性：连接串（地址 + 服务端指纹 + token）必须可解析（后端会给出具体缺哪项）
+      if (!conn || !conn.configured || conn.error) {
+        return (conn && conn.error) || t("服务端连接未配置：请在设置 → 服务端连接中粘贴服务端连接串（tigerAgent://…）");
+      }
+
+      // ② 可用性：轮询 /v1/health。服务端由用户自行启动，可能刚启动或正在重启，
+      // 短暂重试比一次判定更贴近真实情况。
+      const deadline = Date.now() + SERVER_CHECK_TIMEOUT_MS;
+      let lastErr = "";
+      while (Date.now() < deadline) {
+        try {
+          await invoke("test_server_connection");
+          return null;
+        } catch (e) {
+          lastErr = errText(e);
+        }
+        await sleep(SERVER_CHECK_INTERVAL_MS);
+      }
+      return lastErr || t("服务端健康检查超时");
+    }
+
+    async function checkServerOnStartup() {
+      const reason = await probeServer();
+      if (!reason) return;
+      showServerAlert(reason);
+    }
+
+    document.getElementById("server-alert-ok").addEventListener("click", function () {
+      hideServerAlert();
+      // 设置页会读 ?panel=server 直接切到「服务端连接」并自动跑一次检测
+      navigateTo("/settings?panel=server");
+    });
 
     // ===== 路由器 =====
     const routes = {
@@ -980,13 +1106,13 @@
       return new Promise(function (resolve) { setTimeout(resolve, ms); });
     }
 
-    // 路由诊断日志：把 hash 变化与拦截情况写进 adm_api_debug.log（调试模式关闭时
+    // 路由诊断日志：把 hash 变化与拦截情况写进 tigerAgent_debug.log（调试模式关闭时
     // 服务端直接丢弃，无文件开销）。用于复盘「运行中偶发离开 Agent 页」这类浏览器级
     // 导航问题：对比相邻两行的 href 与 history.length 可判断是历史前进/后退
     // （href 无 #、len 不增）还是落到空 fragment（href 以 # 结尾）。
     function logRouteDebug(msg) {
       try {
-        if (window.__adm_invoke) window.__adm_invoke("agent_debug_log", { line: "[ROUTE] " + msg });
+        if (window.__agent_invoke) window.__agent_invoke("agent_debug_log", { line: "[ROUTE] " + msg });
       } catch (_) {}
     }
 
@@ -1010,7 +1136,7 @@
 
       const route = routes[path] || routes["/agent"];
       logRouteDebug("hashchange href=" + location.href + " len=" + history.length +
-        " busy=" + !!(window.__adm_state && window.__adm_state.agentBusy) +
+        " busy=" + !!(window.__agent_state && window.__agent_state.agentBusy) +
         " cur=" + (currentRoutePath || "-"));
 
       // Agent 运行中禁止离开 Agent 页面：底部导航点击由 navigateTo 拦截，但浏览器级
@@ -1019,7 +1145,7 @@
       // （routes["/agent"]），表现为运行中界面被卸载重挂。
       // 这里在卸载旧视图之前拦下：用 replace 纠正 hash（不新增历史记录），视图保持挂载。
       // 仅在 Agent 视图确实挂载时生效：视图已卸载/渲染失败时不该把用户困在拦截里。
-      if (window.__adm_state && window.__adm_state.agentBusy && currentView &&
+      if (window.__agent_state && window.__agent_state.agentBusy && currentView &&
           currentRoutePath === "/agent" && route.nav !== "agent-btn") {
         logRouteDebug("busy 拦截离开 Agent 页面（hash=" + (location.hash || "空") + "），已回退 #/agent");
         showAgentBusyTip();
@@ -1122,53 +1248,29 @@
       console.log("[index] init() 开始初始化");
       try {
         setupAppUpdateProgressListener();
-        systemInfo = await window.__adm_systemInfoPromise;
-        updateHardwareBar();
+        await refreshSystemInfo();
         setActiveNav("agent-btn");
         console.log("[index] 系统信息获取完成:", systemInfo);
       } catch (e) {
         console.error("[index] 获取系统信息失败:", e);
-        document.getElementById("ram-info").textContent = t("加载失败");
-        return;
       }
+      // 服务端状态栏定时刷新（5s）：服务端没连上时也会继续重试，连接成功后自动恢复
+      startSystemInfoPolling();
       console.log("[index] init() 完成");
-      // hwinfo 兜底数据（含一次 PowerShell 调用）放后台补齐，不拖住首屏
-      enrichHardwareInfo();
     }
 
-    async function enrichHardwareInfo() {
-      try {
-        hwinfo.cpu = await invoke("plugin:hwinfo|get_cpu_info");
-        hwinfo.ram = await invoke("plugin:hwinfo|get_ram_info");
-        hwinfo.gpu = await invoke("plugin:hwinfo|get_gpu_info");
-        hwinfo.os = await invoke("plugin:hwinfo|get_os_info");
-
-        if (hwinfo.ram && hwinfo.ram.sizeMb) systemInfo.total_ram = hwinfo.ram.sizeMb * 1024 * 1024;
-        // hwinfo 插件只报单张卡显存，可能低于后端逐卡枚举结果，仅在后端未枚举到显卡时兜底
-        if (hwinfo.gpu && hwinfo.gpu.vramMb && !(systemInfo.gpus && systemInfo.gpus.length > 0)) {
-          systemInfo.total_vram = hwinfo.gpu.vramMb * 1024 * 1024; systemInfo.has_gpu = true;
-        }
-        if (hwinfo.cpu && hwinfo.cpu.threads) systemInfo.cpu_logical_cores = hwinfo.cpu.threads;
-      } catch (hwe) {
-        console.warn("hwinfo 插件获取失败，使用原有数据:", hwe);
-      }
-      // 必须放在 catch 之外：4 个 hwinfo 调用中任一失败时，前面已取到的兜底值同样要刷进硬件栏
-      updateHardwareBar();
-    }
+    // 注意：硬件栏展示的是服务端主机实时状态（GET /v1/system/info）。
+    // 旧实现会用 hwinfo 插件拿本机 CPU/内存/显卡覆盖服务端数值，在远程部署下
+    // 等于把桌面端规格冒充成服务端能力，已删除；显卡探测也已从服务端移除。
 
     setTimeout(() => { checkForUpdate(true); }, 3000);
 
-    // 系统信息只探测一次：壳层与视图（模型列表）共用同一个 Promise。
-    // 必须在 init()/renderRoute() 之前同步赋值，否则视图 mount 时会各跑一份重复探测
-    // （后端 AppState.sys 是互斥锁，两份探测会串行排队）。
-    window.__adm_systemInfoPromise = invoke("get_system_info").then(function (info) {
-      window.__adm_state.systemInfo = info;
-      return info;
-    });
-    window.__adm_systemInfoPromise.catch(function () {});
-
     init();
     renderRoute();
+    // 服务端自检不阻塞首屏：与 Agent 视图初始化并行跑，只有失败才弹窗
+    checkServerOnStartup().catch(function (e) {
+      console.warn("[index] 服务端自检异常:", e);
+    });
   </script>
 </body>
 </html>

@@ -1,8 +1,8 @@
-# admAgent 固定前缀瘦身与预算守卫 — 开发计划（待审核）
+# Agent 固定前缀瘦身与预算守卫 — 开发计划（待审核）
 
 > 状态：**P0 + P1 已落地**（T1/T2/T3/T4/T5/T6，见文末「实施结果」）；P2 分档、P3 MCP 延迟未做，留待实测数据决定
-> 范围：`admAgent/` 服务端（系统提示词 + 工具目录 + eval），不涉及桌面端 `src/`、`src-tauri/`
-> 关联文档：[`admAgent-server.md`](admAgent-server.md)（系统提示词预算与提示词缓存）、[`admAgent-eval-harness-plan.md`](admAgent-eval-harness-plan.md)
+> 范围：`Agent/` 服务端（系统提示词 + 工具目录 + eval），不涉及桌面端 `src/`、`src-tauri/`
+> 关联文档：[`agent-server.md`](agent-server.md)（系统提示词预算与提示词缓存）、[`agent-eval-harness-plan.md`](agent-eval-harness-plan.md)
 > 背景：参考 Anthropic《Building agents: When to fold subagents into your main agent loop》的结论——先量化、一次只改一处、只保留站得住的改动；不要为了"架构正确"引入新机制。
 
 ## 1. 问题（已实测，不是推测）
@@ -31,7 +31,7 @@
 ### 非目标（明确不做，避免返工）
 
 - **不做 tool search / 工具定义延迟加载（内置工具）**：收益上限就是"23k → 8k"，本计划用删/搬就能达到，且不新增"模型不调用就永远找不到工具"的失败模式，也不破坏 `prefix_sha`（`toolsDigest` 参与前缀指纹，turn 内必须字节稳定）。
-- **不做 `subagent_model`**（`admAgent/docs/subagent-model.md` 设计稿）：它解决成本隔离，不解决上下文膨胀。
+- **不做 `subagent_model`**（`Agent/docs/subagent-model.md` 设计稿）：它解决成本隔离，不解决上下文膨胀。
 - **不改压缩参数**（`compactionHeadroomRatio`、`summaryMaxTokensCap*` 等）：本计划先把固定开销降下来，压缩阈值应在新基线稳定后另行评估。
 - **不重构为多代理/编排器**。
 
@@ -83,9 +83,9 @@
 
 **T7 小窗口只给核心工具集**
 - 改动点：`coordinator.buildTools(ctx, agent, isSubAgent)` 目前拿不到模型；由调用方 `buildAgent` 传入 `model.ModelInfo.ContextWindow`（`config.ModelInfo.ContextWindow`），在其中过滤：
-  - `cw < 64k` → 核心集：`bash, view, edit, multiedit, write, grep, glob, ls, todos`（+ `admAgent_info` 视情况）
+  - `cw < 64k` → 核心集：`bash, view, edit, multiedit, write, grep, glob, ls, todos`（+ `tigerAgent_info` 视情况）
   - `cw ≥ 128k` → 全量（保持现状）
-  - 中间档 → 全量减去 `job_*` / `admAgent_logs` / `mcp` 资源类
+  - 中间档 → 全量减去 `job_*` / `tigerAgent_logs` / `mcp` 资源类
 - 要求：纯静态映射，turn 间稳定（不破坏 `prefix_sha`）；保留 `options.tools_minimal`（`auto|off`）以一键退回全量。
 - 验收：小窗口模型跑 eval 6 条任务不翻转；`Loop step request` 的 `tools=N` 符合预期。
 
@@ -98,7 +98,7 @@
 
 ## 4. 度量与验证流程（照文章纪律）
 
-1. **先存基线**：P0 动手前跑一次 `admAgent/scripts/eval.ps1`（等价 `go run . eval`），保存 `internal/eval/baseline/<model>.json`，并记录 `Loop step request` 的 `est_input_tokens` 中位数。
+1. **先存基线**：P0 动手前跑一次 `Agent/scripts/eval.ps1`（等价 `go run . eval`），保存 `internal/eval/baseline/<model>.json`，并记录 `Loop step request` 的 `est_input_tokens` 中位数。
 2. **每个任务单独一轮**：一次只改一处 → 重跑 eval → 对比。每任务默认跑 3 次（`internal/eval/runner.go` 的 `DefaultRuns = 3`）。
 3. **看翻转，不看总分**：逐任务 pass/fail 对比；出现翻转先回退那一处文案，不整体回退。
 4. **指标清单**：`prefix_tokens`、`tool_count`、压缩触发次数与间隔（`compaction` 相关日志）、`steps`、`tokens`、6 条任务通过率。
@@ -108,8 +108,8 @@
 
 | 改动落点 | 文档 |
 | --- | --- |
-| 系统提示词预算、工具目录、按窗口分档、前缀预算常量（`admAgent/internal/agent/**`） | [`admAgent-server.md`](admAgent-server.md) |
-| eval 新指标 / 基线字段 | [`admAgent-eval-harness-plan.md`](admAgent-eval-harness-plan.md) |
+| 系统提示词预算、工具目录、按窗口分档、前缀预算常量（`Agent/internal/agent/**`） | [`agent-server.md`](agent-server.md) |
+| eval 新指标 / 基线字段 | [`agent-eval-harness-plan.md`](agent-eval-harness-plan.md) |
 | 新增配置键（若采用 `options.project_tree_depth` / `options.tools_minimal`） | `schema.json` 重新生成 + [`server-api.md`](server-api.md)（若涉及 API 字段） |
 | 新增本文档 | 根 `AGENTS.md` 的「文档索引」加一行 |
 
@@ -125,7 +125,7 @@
 1. **PR 流程**放哪里：并入 `git-commit` skill（推荐，避免 skill sprawl）还是新建 `git-pr` skill？
 2. **`<project_structure>`** 直接收到 depth 2，还是做成配置项 `options.project_tree_depth`（默认 2）？
 3. **P2 分档阈值与核心集**：小窗口阈值取 64k 还是 40k？核心 9 个工具是否够（是否必须保留 `lsp_diagnostics`）？
-4. **执行授权**：`admAgent/` 目录按当前约定只读；本计划确认后，是由我直接实施，还是你按文档自行改？
+4. **执行授权**：`Agent/` 目录按当前约定只读；本计划确认后，是由我直接实施，还是你按文档自行改？
 
 ## 8. 工作量与顺序
 
@@ -143,7 +143,7 @@
 
 ## 9. 实施结果（后续补记，不改上文方案）
 
-**实测（默认配置、27 工具、`TestPrefixBudget` 输出）**：系统提示 3202 tok + 工具 schema 5704 tok = **8906 tok**，最大单工具 bash 892 tok；改造前同一测量口径下 bash 描述渲染约 8.8k 字符、整包 ≈14.1k tok（见 `doc/admAgent-server.md` 的固定开销小节）。预算常量按此定为 `prefixBudgetTokens = 9200` / `maxToolPrefixTokens = 1500` / `maxToolCatalogueSize = 32`——留少量余量，但"再塞回一段剧本"（≈1.3k tok）一定爆。
+**实测（默认配置、27 工具、`TestPrefixBudget` 输出）**：系统提示 3202 tok + 工具 schema 5704 tok = **8906 tok**，最大单工具 bash 892 tok；改造前同一测量口径下 bash 描述渲染约 8.8k 字符、整包 ≈14.1k tok（见 `doc/agent-server.md` 的固定开销小节）。预算常量按此定为 `prefixBudgetTokens = 9200` / `maxToolPrefixTokens = 1500` / `maxToolCatalogueSize = 32`——留少量余量，但"再塞回一段剧本"（≈1.3k tok）一定爆。
 
 | 任务 | 结果 |
 | --- | --- |

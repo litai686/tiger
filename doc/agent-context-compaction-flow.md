@@ -1,8 +1,8 @@
-# admAgent 上下文压缩（Compaction）机制与详细流程（审核稿）
+# Agent 上下文压缩（Compaction）机制与详细流程（审核稿）
 
 > 用途：把当前**已实现**的压缩机制完整摊开，供逐条审核。
-> 范围：服务端 `admAgent/internal/agent` + `admAgent/internal/context`（桌面端只负责发 `/summarize` 请求，不含压缩逻辑）。
-> 代码基线：本文件中的行号对应当前工作区源码；改动后请同步更新本文与 `doc/admAgent-server.md` 第 7 节。
+> 范围：服务端 `Agent/internal/agent` + `Agent/internal/context`（桌面端只负责发 `/summarize` 请求，不含压缩逻辑）。
+> 代码基线：本文件中的行号对应当前工作区源码；改动后请同步更新本文与 `doc/agent-server.md` 第 7 节。
 
 ---
 
@@ -60,7 +60,7 @@
 | 连续无进展上限 | 4 次；跑满 3 步算"有进展"并重置 | `agent.go:90`、`agent.go:214` |
 | 被动召回配额 | `min(阈值 − 已提交, cw × 8%)`，单条 `cw × 1.5%` | `agent_loop_llm.go:1826-1835` |
 | token 估算 | 统一 `internal/tokencount`：ASCII 字节/4，非 ASCII rune 计 1 token | `internal/tokencount/tokencount.go` |
-| 归档条目上限 | 单条 4000 token（超出加截断标记，全文留在 `admAgent.db`）；工具调用参数 1200 | `internal/context/archive_text.go` |
+| 归档条目上限 | 单条 4000 token（超出加截断标记，全文留在 `Agent.db`）；工具调用参数 1200 | `internal/context/archive_text.go` |
 | 手动召回 | `range` 20 条/页、`expand` ≤5 条、单条上限 `recallRefEntryTokens`=1200、总预算 2000 | `recall_tool.go:20-41` |
 
 > 落点 0.85 与"尾部预算自己也要留工作窗口"是两处刻意错位的保险：压缩完必须落在 guard 之下**足够远**，否则每一步都重新撞线（本地模型实测每次压缩 15–70s）。
@@ -178,7 +178,7 @@
 - Anchor 在前（约束/决策优先于记录），facts 在后；`PrependContent` 到摘要消息并 `Update`。
 
 ### 步骤 10：退役旧历史（不删除）
-- 对 `oldMsgs` 全部 `MarkCompressed`（`agent.go:2289`）。**不是删除**：完整 transcript 留在 `admAgent.db` 供 UI 回看与统计，只是不再进入工作上下文与 token 统计。
+- 对 `oldMsgs` 全部 `MarkCompressed`（`agent.go:2289`）。**不是删除**：完整 transcript 留在 `Agent.db` 供 UI 回看与统计，只是不再进入工作上下文与 token 统计。
 
 ### 步骤 11：超大保留消息定点截断（`truncateOversizedKeptMessages`）
 
@@ -425,6 +425,6 @@ user    = 被动召回块（Rail 3，ephemeral，不落库）
 
 ## 12. 与现有文档的关系
 
-- 行为与调优结论的**权威摘要**仍在 `doc/admAgent-server.md` 第 7 节；
-- 事实块 / `#N` 编号的设计与实施记录在 `doc/admAgent-fact-block-and-recall-refs-plan.md`；
+- 行为与调优结论的**权威摘要**仍在 `doc/agent-server.md` 第 7 节；
+- 事实块 / `#N` 编号的设计与实施记录在 `doc/agent-fact-block-and-recall-refs-plan.md`；
 - 本文是**流程级**说明（谁在什么时机做什么、参数从哪来、失败怎么收），用于审核；三处若出现不一致，以代码为准并同步修正文档。

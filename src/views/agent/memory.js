@@ -1,17 +1,18 @@
 // 项目记忆（跨会话持久记忆）展示与编辑
-// 数据源：workspace/project_memory.json（admAgent 每次上下文压缩时把 durable 的
-// constraint/decision anchors 同步进来；本模块负责读取、渲染与手动增删改）。
-// 写入路径：Rust 侧 update_project_memory 命令（原子写盘）。注意 admAgent 仍在
-// 进程内持有同一份内存副本，下一次压缩会把其中条目合并回写本文件，因此手工删除
-// 的条目可能被后续压缩重新沉淀。
+// 数据源与写入方都在服务端：project_memory.json 与服务端内存里的 ProjectStore
+// 是同一份数据，桌面端只经 GET/POST /v1/workspaces/{id}/project-memory 读写
+// （服务端可能不在本机，按 data_dir 拼本地路径会写错地方）。
+// 注意 Agent 仍在进程内持有同一份内存副本，下一次压缩会把其中条目合并回写，
+// 因此手工删除的条目可能被后续压缩重新沉淀。
 import { t as _t } from "../../i18n.js";
 import { S, invoke } from "./store.js";
+import { api } from "./api.js";
 import { escapeHtml, $input } from "./utils.js";
 import { reportError, showChoice } from "./ui.js";
 
 // 压缩时自动提取记忆规则：服务端在每次上下文压缩时把会话里的 durable 约束/决策
 // 沉淀进 project_memory.json。开关写入 config.json 的 agent_project_memory_sync，
-// Rust 侧 save_settings 会把它同步进 admAgent.json 的 options.project_memory_sync
+// Rust 侧 save_settings 会把它同步进 tigerAgent.json 的 options.project_memory_sync
 // 并触发服务端热重载（与 options.bash_allow_all 同一套流程）。
 // 默认开启：字段缺失（旧配置 / load_settings 失败）视为开启，只有显式 false 才关闭。
 export function memoryAutoExtractEnabled() {
@@ -28,11 +29,11 @@ var currentAnchors = [];
 // 弹窗编辑态：null = 新增；number = 正在修改 currentAnchors[index]
 var editingIndex = null;
 
-// 读取项目记忆（Rust 侧 read_project_memory 返回 Anchor 数组或 []）
+// 读取项目记忆（服务端返回 Anchor 数组）
 export async function loadProjectMemory() {
   if (!S.serverInfo || !S.serverInfo.workspace_id) return [];
   try {
-    var data = await invoke("read_project_memory", { workspaceId: S.serverInfo.workspace_id });
+    var data = await api("GET", "/v1/workspaces/" + S.serverInfo.workspace_id + "/project-memory");
     return Array.isArray(data) ? data : [];
   } catch (e) {
     console.warn("[agent] 读取项目记忆失败:", e);
@@ -76,15 +77,14 @@ export function getProjectMemoryAnchors() {
   return currentAnchors.slice();
 }
 
-// 把改动后的完整列表写回磁盘，再以服务端返回/本地最新状态重渲染
+// 把改动后的完整列表提交服务端，再以服务端返回的规范化结果重渲染
 export async function saveProjectMemory(anchors) {
   if (!S.serverInfo || !S.serverInfo.workspace_id) return false;
   try {
-    await invoke("update_project_memory", {
-      workspaceId: S.serverInfo.workspace_id,
+    var stored = await api("POST", "/v1/workspaces/" + S.serverInfo.workspace_id + "/project-memory", {
       anchors: anchors,
     });
-    renderProjectMemory(anchors);
+    renderProjectMemory(Array.isArray(stored) ? stored : anchors);
     return true;
   } catch (e) {
     reportError(e, { prefix: _t("保存项目记忆失败: ") });
@@ -194,7 +194,7 @@ function syncAutoExtractToggle() {
   if (box) box.checked = memoryAutoExtractEnabled();
 }
 
-// 切换「压缩时自动提取记忆规则」：先落 S，再持久化到 config.json（后端同步 admAgent.json）。
+// 切换「压缩时自动提取记忆规则」：先落 S，再持久化到 config.json（后端同步 tigerAgent.json）。
 // 写盘失败时回滚 UI 与内存态，避免出现「勾选着但没生效」的假状态。
 async function applyAutoExtract(enabled) {
   var prev = S.settings.agent_project_memory_sync;

@@ -1,10 +1,9 @@
-// Agent 页面后端逻辑：admAgent server 模式管理 + HTTP API 代理
+// Agent 页面后端逻辑：服务端连接（TCP + TLS，服务端由用户自行启动）与会话管理 + HTTP API 代理
 
 use crate::app_state::{AppState, AgentServerSession};
-use crate::common::agent_http::{self, AgentTransport, build_client, health_check};
+use crate::common::agent_http::{self, TcpTarget, build_client, health_check};
 use crate::common::config;
 use crate::common::types::{Settings, WorkDirEntry};
-use crate::common::utils::platform;
 use crate::common::error::AppError;
 use crate::bail;
 
@@ -56,89 +55,15 @@ fn save_agent_workdir(app: &tauri::AppHandle, workdir: &str) -> Result<(), AppEr
     Ok(())
 }
 
-// ===== 平台相关路径 =====
+// ===== tigerAgent.json 配置 =====
 
-/// admAgent 存放目录（安装包内置 sidecar，不再运行时下载）：
-/// - Windows：软件所在根目录（NSIS 把 sidecar 装在 Tiger.exe 旁）
-/// - macOS：Tiger.app/Contents/MacOS（Tauri externalBin 打包位置，即主程序所在目录）
-/// - Linux：与主程序同目录（deb 为 /usr/bin；AppImage 为挂载点内的 usr/bin，externalBin 同样放在此）
-#[allow(unused_variables)]
-fn adm_agent_target_dir(app: &tauri::AppHandle) -> Result<PathBuf, AppError> {
-    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-    {
-        config::get_exe_dir()
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    {
-        bail!("不支持的操作系统，当前仅支持 Windows / macOS / Linux")
-    }
-}
-
-/// admAgent 文件名
-fn adm_agent_file_name() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "admAgent.exe"
-    } else {
-        "admAgent"
-    }
-}
-
-/// macOS：清理旧版「运行时下载」模式遗留在 app_data_dir 的 admAgent 二进制（约 50MB+）。
-/// 新版直接使用安装包内置的 sidecar，旧文件永久闲置，启动时静默删除（失败不报错不阻塞）。
-#[cfg(target_os = "macos")]
-pub fn cleanup_legacy_adm_agent(app: &tauri::AppHandle) {
-    if let Ok(data_dir) = config::get_data_dir(Some(app)) {
-        let legacy = data_dir.join("admAgent");
-        if legacy.is_file() {
-            match std::fs::remove_file(&legacy) {
-                Ok(_) => eprintln!("[admAgent] 已清理旧版下载的二进制: {}", legacy.display()),
-                Err(e) => eprintln!("[admAgent] 清理旧版二进制失败（忽略）: {}", e),
-            }
-        }
-    }
-}
-
-/// 桌面端**默认不打包服务端**，所以先看程序目录（历史安装/可选打包），
-/// 再从 PATH 里找用户自行安装的 admAgent / tigerAgent。
-pub(crate) fn resolve_local_agent(app: &tauri::AppHandle) -> PathBuf {
-    let bundled = adm_agent_path(app).unwrap_or_default();
-    if bundled.exists() {
-        return bundled;
-    }
-    find_agent_on_path().unwrap_or(bundled)
-}
-
-fn find_agent_on_path() -> Option<PathBuf> {
-    let names: &[&str] = if cfg!(windows) {
-        &["admAgent.exe", "tigerAgent.exe"]
-    } else {
-        &["admAgent", "tigerAgent"]
-    };
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        for name in names {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-pub(crate) fn adm_agent_path(app: &tauri::AppHandle) -> Result<PathBuf, AppError> {
-    Ok(adm_agent_target_dir(app)?.join(adm_agent_file_name()))
-}
-
-// ===== admAgent.json 配置 =====
-
-/// admAgent.json 的存放目录。
-/// Windows：`%LOCALAPPDATA%\admAgent`（与 admAgent server 的 GlobalConfigData 同目录，
-/// 合并优先级高于 `~/.config/admAgent/admAgent.json`，避免低优先级旧值覆盖 UI 写入）；
-/// 其它平台：保持 `$HOME/.config/admAgent`（无 LOCALAPPDATA 概念）。
-/// 首次切换到新目录时会自动把旧 `~/.config/admAgent/admAgent.json` 一次性迁移
+/// tigerAgent.json 的存放目录。
+/// Windows：`%LOCALAPPDATA%\Agent`（与 Agent server 的 GlobalConfigData 同目录，
+/// 合并优先级高于 `~/.config/tigerAgent/tigerAgent.json`，避免低优先级旧值覆盖 UI 写入）；
+/// 其它平台：保持 `$HOME/.config/tigerAgent`（无 LOCALAPPDATA 概念）。
+/// 首次切换到新目录时会自动把旧 `~/.config/tigerAgent/tigerAgent.json` 一次性迁移
 /// （内容合并进新位置、备份到 .migrated.bak、旧位置写占位标记）。
-fn adm_agent_config_dir() -> Result<PathBuf, AppError> {
+fn agent_config_dir() -> Result<PathBuf, AppError> {
     let dir = if cfg!(target_os = "windows") {
         let local_app_data = std::env::var("LOCALAPPDATA")
             .ok()
@@ -149,18 +74,18 @@ fn adm_agent_config_dir() -> Result<PathBuf, AppError> {
                     .map(|p| PathBuf::from(p).join("AppData").join("Local"))
             });
         match local_app_data {
-            Some(p) => p.join("admAgent"),
+            Some(p) => p.join("tigerAgent"),
             None => {
-                return Err(AppError::msg("无法确定本地应用数据目录（LOCALAPPDATA），无法创建 admAgent 配置目录"));
+                return Err(AppError::msg("无法确定本地应用数据目录（LOCALAPPDATA），无法创建 Agent 配置目录"));
             }
         }
     } else {
         let home = if let Ok(p) = std::env::var("HOME") {
             PathBuf::from(p)
         } else {
-            return Err(AppError::msg("无法确定用户主目录，无法创建 admAgent 配置目录"));
+            return Err(AppError::msg("无法确定用户主目录，无法创建 Agent 配置目录"));
         };
-        home.join(".config").join("admAgent")
+        home.join(".config").join("tigerAgent")
     };
     // 迁移只针对 Windows 的目录切换；其它平台新旧路径相同，迁移会把自己改名，必须跳过。
     #[cfg(target_os = "windows")]
@@ -169,7 +94,7 @@ fn adm_agent_config_dir() -> Result<PathBuf, AppError> {
 }
 
 /// 把 overlay 中 base 缺失的键合并进 base（对象递归合并；标量/数组以 base 为准）。
-/// 语义对齐 admAgent server 的 JSON 深合并：新位置（高优先级）内容优先。
+/// 语义对齐 Agent server 的 JSON 深合并：新位置（高优先级）内容优先。
 #[cfg(target_os = "windows")]
 fn merge_json(base: &mut serde_json::Value, overlay: &serde_json::Value) {
     if let (serde_json::Value::Object(b), serde_json::Value::Object(o)) = (base, overlay) {
@@ -184,13 +109,13 @@ fn merge_json(base: &mut serde_json::Value, overlay: &serde_json::Value) {
     }
 }
 
-/// 一次性迁移：把旧 `$HOME/.config/admAgent/admAgent.json` 的内容合并进新目录下的
-/// admAgent.json（新文件内容优先，旧文件缺失的键补入，如历史云端 provider），
-/// 原内容先备份到 `admAgent.json.migrated.bak`（仅当尚无备份时），随后在旧位置
+/// 一次性迁移：把旧 `$HOME/.config/Agent/tigerAgent.json` 的内容合并进新目录下的
+/// tigerAgent.json（新文件内容优先，旧文件缺失的键补入，如历史云端 provider），
+/// 原内容先备份到 `tigerAgent.json.migrated.bak`（仅当尚无备份时），随后在旧位置
 /// **覆盖写入占位标记** `{"migrated_to_localappdata":true}`（不再改名）。
 ///
-/// 占位而非改名是必须的：admAgent server 的 EnsureDefaultConfig 每次启动都检查
-/// `~/.config/admAgent/admAgent.json`，文件不存在就重建默认 local 配置——若迁移把
+/// 占位而非改名是必须的：Agent server 的 EnsureDefaultConfig 每次启动都检查
+/// `~/.config/tigerAgent/tigerAgent.json`，文件不存在就重建默认 local 配置——若迁移把
 /// 它改名，server 会重建默认、迁移又改名，形成循环（升级后首次启动即因此出现
 /// "Created default local-model config" 日志与配置短暂退化）。占位文件使该检查永远
 /// 通过，且占位是未知字段，JSON 合并时对生效配置零影响。
@@ -202,11 +127,11 @@ fn migrate_legacy_config(new_dir: &std::path::Path) {
         Ok(h) => PathBuf::from(h),
         Err(_) => return,
     };
-    let legacy_path = home.join(".config").join("admAgent").join("admAgent.json");
+    let legacy_path = home.join(".config").join("tigerAgent").join("tigerAgent.json");
     if !legacy_path.exists() {
         return;
     }
-    let new_path = new_dir.join("admAgent.json");
+    let new_path = new_dir.join("tigerAgent.json");
     if new_path == legacy_path {
         // 新旧同路径（非 Windows 或 HOME 恰好等于数据目录的异常场景）：无需迁移
         return;
@@ -214,14 +139,14 @@ fn migrate_legacy_config(new_dir: &std::path::Path) {
     let legacy = match std::fs::read_to_string(&legacy_path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[admAgent] 迁移旧配置：读取 {} 失败: {}", legacy_path.display(), e);
+            eprintln!("[Agent] 迁移旧配置：读取 {} 失败: {}", legacy_path.display(), e);
             return;
         }
     };
     let legacy_value: serde_json::Value = match serde_json::from_str(&legacy) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("[admAgent] 迁移旧配置：解析 {} 失败: {}", legacy_path.display(), e);
+            eprintln!("[Agent] 迁移旧配置：解析 {} 失败: {}", legacy_path.display(), e);
             return;
         }
     };
@@ -236,8 +161,8 @@ fn migrate_legacy_config(new_dir: &std::path::Path) {
             let mut new_value: serde_json::Value = serde_json::from_str(&s)
                 .map_err(|e| format!("解析 {} 失败: {}", new_path.display(), e))?;
             merge_json(&mut new_value, &legacy_value);
-            // 迁移在 adm_agent_config_dir() 内部触发，此时不能走
-            // update_adm_agent_config（它会再调 adm_agent_config_dir → 递归 + Mutex 重入）。
+            // 迁移在 agent_config_dir() 内部触发，此时不能走
+            // update_agent_config（它会再调 agent_config_dir → 递归 + Mutex 重入）。
             // 直接用原子写：临时文件 + rename，不截断目标文件（写前照常备份旧内容）。
             write_json_atomic(&new_path, &new_value, true)?;
         } else {
@@ -249,7 +174,7 @@ fn migrate_legacy_config(new_dir: &std::path::Path) {
                 .map_err(|e| format!("写入 {} 失败: {}", new_path.display(), e))?;
         }
         // 备份原配置（仅当尚无备份；避免覆盖更早的真实备份）
-        let backup = legacy_path.with_file_name("admAgent.json.migrated.bak");
+        let backup = legacy_path.with_file_name("tigerAgent.json.migrated.bak");
         if !backup.exists() {
             std::fs::write(&backup, &legacy)
                 .map_err(|e| format!("备份旧配置 {} 失败: {}", legacy_path.display(), e))?;
@@ -257,38 +182,38 @@ fn migrate_legacy_config(new_dir: &std::path::Path) {
         // 覆盖写占位，保证 EnsureDefaultConfig 不再重建默认配置
         std::fs::write(&legacy_path, format!("{{\"{}\": true}}\n", MIGRATED_MARKER))
             .map_err(|e| format!("写入占位 {} 失败: {}", legacy_path.display(), e))?;
-        eprintln!("[admAgent] 已迁移旧配置 {} → {}（旧位置写入占位）", legacy_path.display(), new_path.display());
+        eprintln!("[Agent] 已迁移旧配置 {} → {}（旧位置写入占位）", legacy_path.display(), new_path.display());
         Ok(())
     })();
     if let Err(e) = result {
-        eprintln!("[admAgent] 迁移旧配置失败: {}", e);
+        eprintln!("[Agent] 迁移旧配置失败: {}", e);
     }
 }
 
-/// 进程内串行化对 admAgent.json 的「读-改-写」操作。
+/// 进程内串行化对 tigerAgent.json 的「读-改-写」操作。
 ///
-/// 只覆盖本进程：跨进程（与 admAgent server 之间）的互斥由
-/// [`acquire_config_lock`] 负责，两者在 [`update_adm_agent_config`] 中组合使用。
+/// 只覆盖本进程：跨进程（与 Agent server 之间）的互斥由
+/// [`acquire_config_lock`] 负责，两者在 [`update_agent_config`] 中组合使用。
 /// 注意：std Mutex **不可重入** —— 调用方不得在持有本锁时再次进入。
-static ADM_AGENT_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static AGENT_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // ============================================================================
-// admAgent.json：跨进程互斥 + 原子落盘 + 统一写入入口
+// tigerAgent.json：跨进程互斥 + 原子落盘 + 统一写入入口
 //
-// 背景：本文件在 Windows 上与 admAgent server（Go）的数据配置是同一个文件
-// （%LOCALAPPDATA%/admAgent/admAgent.json）。旧实现有三个致命缺陷：
+// 背景：本文件在 Windows 上与 Agent server（Go）的数据配置是同一个文件
+// （%LOCALAPPDATA%/Agent/tigerAgent.json）。旧实现有三个致命缺陷：
 //   1. std::fs::write 非原子（先截断），留下文件为 0 字节的窗口；
 //   2. Go 侧读到空串时不报错，把空文档当新表，写回后只剩本次设置的字段；
-//   3. 解析失败静默回退 build_adm_agent_config()，整文件覆盖清空云端 provider。
-// 三者叠加导致切换模型时 admAgent.json 被反复清空。
+//   3. 解析失败静默回退 build_agent_config()，整文件覆盖清空云端 provider。
+// 三者叠加导致切换模型时 tigerAgent.json 被反复清空。
 // ============================================================================
 
-/// 与 admAgent server（Go）共用同一把锁。
+/// 与 Agent server（Go）共用同一把锁。
 /// Go 侧 `ConfigStore.lockConfig` 用的是 `lock.File(path + ".lock")`，
 /// 这里必须对**同一个文件**加锁才能做到跨进程互斥。
 /// 锁范围与 Go 保持一致（0 .. u32::MAX），否则 Windows 上不会真正互斥。
-fn adm_agent_lock_path() -> Result<PathBuf, AppError> {
-    Ok(adm_agent_config_dir()?.join("admAgent.json.lock"))
+fn agent_config_lock_path() -> Result<PathBuf, AppError> {
+    Ok(agent_config_dir()?.join("tigerAgent.json.lock"))
 }
 
 /// 等待锁的最长时间。需大于 Go 侧的 configLockDeadline（5s）。
@@ -348,7 +273,7 @@ fn unlock(file: &std::fs::File) -> Result<(), AppError> {
     // UnlockFileEx 只按范围定位，offset 0 + 相同长度即可
     let mut ov = unsafe { std::mem::zeroed::<OVERLAPPED>() };
     unsafe { UnlockFileEx(HANDLE(file.as_raw_handle()), 0, u32::MAX, u32::MAX, &mut ov) }
-        .map_err(|e| AppError::msg(format!("解锁 admAgent.json 失败: {}", e)))
+        .map_err(|e| AppError::msg(format!("解锁 tigerAgent.json 失败: {}", e)))
 }
 
 #[cfg(unix)]
@@ -359,7 +284,7 @@ fn unlock(file: &std::fs::File) -> Result<(), AppError> {
         Ok(())
     } else {
         Err(AppError::msg(format!(
-            "解锁 admAgent.json 失败: {}",
+            "解锁 tigerAgent.json 失败: {}",
             std::io::Error::last_os_error()
         )))
     }
@@ -373,7 +298,7 @@ impl Drop for ConfigFileLock {
 
 /// 获取跨进程排他锁，最多等待 [`CONFIG_LOCK_TIMEOUT`]。
 fn acquire_config_lock() -> Result<ConfigFileLock, AppError> {
-    let path = adm_agent_lock_path()?;
+    let path = agent_config_lock_path()?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {}", e))?;
     }
@@ -391,7 +316,7 @@ fn acquire_config_lock() -> Result<ConfigFileLock, AppError> {
             return Ok(ConfigFileLock { file });
         }
         if started.elapsed() > CONFIG_LOCK_TIMEOUT {
-            return Err(AppError::msg("获取 admAgent.json 锁超时（10s）"));
+            return Err(AppError::msg("获取 tigerAgent.json 锁超时（10s）"));
         }
         std::thread::sleep(CONFIG_LOCK_RETRY);
     }
@@ -407,7 +332,7 @@ fn write_json_atomic(
     keep_backup: bool,
 ) -> Result<(), AppError> {
     let json = serde_json::to_string_pretty(value)
-        .map_err(|e| format!("序列化 admAgent 配置失败: {}", e))?;
+        .map_err(|e| format!("序列化 Agent 配置失败: {}", e))?;
 
     let dir = path.parent().ok_or_else(|| AppError::msg("配置路径缺少父目录"))?;
     std::fs::create_dir_all(dir).map_err(|e| format!("创建配置目录失败: {}", e))?;
@@ -417,9 +342,9 @@ fn write_json_atomic(
     if keep_backup {
         if let Ok(meta) = std::fs::metadata(path) {
             if meta.len() > 0 {
-                // 原子复制：admAgent server（Go）也在写同一个 .bak（同一把 flock，
+                // 原子复制：Agent server（Go）也在写同一个 .bak（同一把 flock，
                 // 但读取方无锁），避免读者看到半截备份
-                if let Err(e) = copy_file_atomic(path, &dir.join("admAgent.json.bak")) {
+                if let Err(e) = copy_file_atomic(path, &dir.join("tigerAgent.json.bak")) {
                     api_debug_log(|| format!("Config ! 写前备份失败: {}", e));
                 }
             }
@@ -430,7 +355,7 @@ fn write_json_atomic(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let tmp = dir.join(format!("admAgent.json.{}.{}.tmp", std::process::id(), nanos));
+    let tmp = dir.join(format!("tigerAgent.json.{}.{}.tmp", std::process::id(), nanos));
 
     std::fs::write(&tmp, &json).map_err(|e| format!("写入临时配置失败: {}", e))?;
     match std::fs::rename(&tmp, path) {
@@ -442,39 +367,39 @@ fn write_json_atomic(
     }
 }
 
-/// 对 admAgent.json 做一次完整的「加锁 → 读 → 改 → 原子写」。
+/// 对 tigerAgent.json 做一次完整的「加锁 → 读 → 改 → 原子写」。
 ///
 /// 三层保护：
-/// - 进程内串行：`ADM_AGENT_CONFIG_LOCK`
-/// - 跨进程串行：flock `admAgent.json.lock`（与 Go server 同一把锁）
+/// - 进程内串行：`AGENT_CONFIG_LOCK`
+/// - 跨进程串行：flock `tigerAgent.json.lock`（与 Go server 同一把锁）
 /// - 落盘原子：临时文件 + rename
 ///
 /// 文件不存在时以 `{}` 起步；**文件存在但为空或 JSON 非法时一律返回错误**，
 /// 绝不回退默认结构 —— 旧实现正是靠这个回退把用户的云端 provider 全清掉了。
 ///
 /// `mutate` 必须是纯内存变换：内部不得再调用本函数（std Mutex 不可重入）。
-fn update_adm_agent_config<T>(
+fn update_agent_config<T>(
     mutate: impl FnOnce(&mut serde_json::Value) -> Result<T, AppError>,
 ) -> Result<T, AppError> {
-    let _inproc = ADM_AGENT_CONFIG_LOCK
+    let _inproc = AGENT_CONFIG_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let _filelock = acquire_config_lock()?;
 
-    let dir = adm_agent_config_dir()?;
+    let dir = agent_config_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败: {}", e))?;
-    let path = dir.join("admAgent.json");
+    let path = dir.join("tigerAgent.json");
 
     let mut v = if path.exists() {
         let s = std::fs::read_to_string(&path)
-            .map_err(|e| format!("读取 admAgent.json 失败: {}", e))?;
+            .map_err(|e| format!("读取 tigerAgent.json 失败: {}", e))?;
         if s.trim().is_empty() {
-            let msg = "admAgent.json 为空，拒绝写入（可能有并发写正在截断文件）";
+            let msg = "tigerAgent.json 为空，拒绝写入（可能有并发写正在截断文件）";
             notify_config_corrupt(msg);
             return Err(AppError::msg(msg));
         }
         serde_json::from_str::<serde_json::Value>(&s).map_err(|e| {
-            let msg = format!("解析 admAgent.json 失败: {}", e);
+            let msg = format!("解析 tigerAgent.json 失败: {}", e);
             notify_config_corrupt(&msg);
             AppError::msg(msg)
         })?
@@ -494,7 +419,7 @@ fn update_adm_agent_config<T>(
     Ok(out)
 }
 
-// ===== admAgent.json 备份与损坏恢复 =====
+// ===== tigerAgent.json 备份与损坏恢复 =====
 // 目标：首次启动即保留一份可用备份；每次改动前自动备份（见 write_json_atomic）；
 // 检测到损坏时弹原生提示，用户确认后自动从备份恢复并触发服务端重载。
 
@@ -505,10 +430,10 @@ static CONFIG_PROMPT_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// 用户本次会话选择「暂不恢复」（不再重复弹窗骚扰）
 static CONFIG_PROMPT_DECLINED: AtomicBool = AtomicBool::new(false);
 
-/// admAgent.json 主文件与备份文件的完整路径
-fn adm_agent_config_file_paths() -> Result<(PathBuf, PathBuf), AppError> {
-    let dir = adm_agent_config_dir()?;
-    Ok((dir.join("admAgent.json"), dir.join("admAgent.json.bak")))
+/// tigerAgent.json 主文件与备份文件的完整路径
+fn agent_config_file_paths() -> Result<(PathBuf, PathBuf), AppError> {
+    let dir = agent_config_dir()?;
+    Ok((dir.join("tigerAgent.json"), dir.join("tigerAgent.json.bak")))
 }
 
 /// 读取并校验一份配置：非空且必须是合法 JSON
@@ -524,7 +449,7 @@ fn read_config_json(path: &std::path::Path) -> Result<serde_json::Value, String>
 
 /// 读取可用备份；不存在 / 为空 / 非法 JSON 一律视为不可用
 fn read_valid_backup() -> Result<serde_json::Value, String> {
-    let (_, bak) = adm_agent_config_file_paths().map_err(|e| e.to_string())?;
+    let (_, bak) = agent_config_file_paths().map_err(|e| e.to_string())?;
     if !bak.exists() {
         return Err(format!("未找到备份文件 {}", bak.display()));
     }
@@ -538,7 +463,7 @@ fn copy_file_atomic(src: &std::path::Path, dst: &std::path::Path) -> Result<(), 
     let name = dst
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "admAgent.json.bak".to_string());
+        .unwrap_or_else(|| "tigerAgent.json.bak".to_string());
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -557,7 +482,7 @@ fn copy_file_atomic(src: &std::path::Path, dst: &std::path::Path) -> Result<(), 
 /// 首次启动备份：主文件有效、且备份缺失或已损坏时，用当前配置创建 .bak。
 /// 已有有效备份时不覆盖 —— 它是上一份可用快照，损坏恢复依赖它。
 fn ensure_agent_config_backup() {
-    let (main, bak) = match adm_agent_config_file_paths() {
+    let (main, bak) = match agent_config_file_paths() {
         Ok(p) => p,
         Err(_) => return,
     };
@@ -568,14 +493,14 @@ fn ensure_agent_config_backup() {
         return;
     }
     match copy_file_atomic(&main, &bak) {
-        Ok(()) => api_debug_log(|| "Config: 已创建 admAgent.json 首次启动备份".to_string()),
-        Err(e) => api_debug_log(|| format!("Config ! 创建 admAgent.json 备份失败: {}", e)),
+        Ok(()) => api_debug_log(|| "Config: 已创建 tigerAgent.json 首次启动备份".to_string()),
+        Err(e) => api_debug_log(|| format!("Config ! 创建 tigerAgent.json 备份失败: {}", e)),
     }
 }
 
 /// 检测主配置是否损坏；损坏时走统一的恢复提示（正常时静默）
 fn check_agent_config_corruption() {
-    let (main, _) = match adm_agent_config_file_paths() {
+    let (main, _) = match agent_config_file_paths() {
         Ok(p) => p,
         Err(_) => return,
     };
@@ -600,7 +525,7 @@ pub fn init_agent_config_recovery(app: &tauri::AppHandle) {
     });
 }
 
-/// 检测到 admAgent.json 损坏时弹出原生提示（每次会话最多一次）：
+/// 检测到 tigerAgent.json 损坏时弹出原生提示（每次会话最多一次）：
 /// - 备份可用：询问是否恢复；确认后自动恢复并触发服务端重载，再 emit
 ///   `agent-config-restored` 通知前端（服务未起来时前端会重跑 init）；
 /// - 备份不可用：仅提示文件路径，引导手动处理，不自动改动文件。
@@ -616,8 +541,8 @@ fn notify_config_corrupt(detail: &str) {
         return; // 已有提示在展示
     }
 
-    api_debug_log(|| format!("Config ! admAgent.json 异常: {}", detail));
-    let main_path = adm_agent_config_file_paths()
+    api_debug_log(|| format!("Config ! tigerAgent.json 异常: {}", detail));
+    let main_path = agent_config_file_paths()
         .map(|(m, _)| m.display().to_string())
         .unwrap_or_default();
 
@@ -627,10 +552,10 @@ fn notify_config_corrupt(detail: &str) {
         Ok(_) => {
             app.dialog()
                 .message(format!(
-                    "检测到 admAgent 配置文件异常，无法读取：\n{}\n\n文件：{}\n\n是否从备份恢复？恢复后会自动重新加载服务配置。",
+                    "检测到 Agent 配置文件异常，无法读取：\n{}\n\n文件：{}\n\n是否从备份恢复？恢复后会自动重新加载服务配置。",
                     detail, main_path
                 ))
-                .title("admAgent 配置文件异常")
+                .title("Agent 配置文件异常")
                 .kind(MessageDialogKind::Error)
                 .buttons(MessageDialogButtons::OkCancelCustom(
                     "恢复备份".to_string(),
@@ -647,7 +572,7 @@ fn notify_config_corrupt(detail: &str) {
                     tauri::async_runtime::spawn(async move {
                         match restore_agent_config_from_backup(&app) {
                             Ok(()) => {
-                                api_debug_log(|| "Config: 已从备份恢复 admAgent.json，触发服务端重载".to_string());
+                                api_debug_log(|| "Config: 已从备份恢复 tigerAgent.json，触发服务端重载".to_string());
                                 let _ = app.emit("agent-config-restored", serde_json::json!({ "ok": true }));
                             }
                             Err(e) => {
@@ -664,10 +589,10 @@ fn notify_config_corrupt(detail: &str) {
         Err(reason) => {
             app.dialog()
                 .message(format!(
-                    "检测到 admAgent 配置文件异常，无法读取：\n{}\n\n备份不可用：{}\n\n请手动检查或删除该文件后重启 Tiger（删除会丢失其中保存的云端模型配置）：\n{}",
+                    "检测到 Agent 配置文件异常，无法读取：\n{}\n\n备份不可用：{}\n\n请手动检查或删除该文件后重启 Tiger（删除会丢失其中保存的云端模型配置）：\n{}",
                     detail, reason, main_path
                 ))
-                .title("admAgent 配置文件异常")
+                .title("Agent 配置文件异常")
                 .kind(MessageDialogKind::Error)
                 .buttons(MessageDialogButtons::Ok)
                 .show(move |_| {
@@ -678,13 +603,13 @@ fn notify_config_corrupt(detail: &str) {
     }
 }
 
-/// 从备份恢复 admAgent.json（原子写），并触发服务端从磁盘全量重载。
-/// 不走 update_adm_agent_config：当前主文件已损坏，其写前备份会把唯一的好备份覆盖掉。
+/// 从备份恢复 tigerAgent.json（原子写），并触发服务端从磁盘全量重载。
+/// 不走 update_agent_config：当前主文件已损坏，其写前备份会把唯一的好备份覆盖掉。
 fn restore_agent_config_from_backup(app: &tauri::AppHandle) -> Result<(), AppError> {
-    let (main, _) = adm_agent_config_file_paths()?;
+    let (main, _) = agent_config_file_paths()?;
     // 与常规写入共用同一把进程内/跨进程锁，避免与并发写互相踩踏；
     // 先加锁再读备份：Go/Rust 都会在写前重写 .bak，无锁读可能读到半截文件
-    let _inproc = ADM_AGENT_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _inproc = AGENT_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _filelock = acquire_config_lock()?;
     let value = read_valid_backup().map_err(AppError::msg)?;
     write_json_atomic(&main, &value, false)?;
@@ -693,15 +618,16 @@ fn restore_agent_config_from_backup(app: &tauri::AppHandle) -> Result<(), AppErr
 }
 
 /// 取当前激活 workspace id；无激活 tab（或为空）时返回 None。
-fn active_workspace_id(app: &tauri::AppHandle) -> Option<String> {
+pub(crate) fn active_workspace_id(app: &tauri::AppHandle) -> Option<String> {
     let state = app.state::<AppState>();
     let active = state.active_workspace_id.lock().map(|g| g.clone()).unwrap_or(None);
     active.filter(|id| !id.is_empty())
 }
 
-/// 构建指向 admAgent server 默认传输（Unix socket / named pipe）的短连接超时 client。
+/// 构建指向当前服务端目标的短连接超时 client（未配置服务端时返回 None）。
 fn agent_local_client() -> Option<agent_http::AgentHttpClient> {
-    build_client(&agent_http::active_transport(), Duration::from_secs(3)).ok()
+    let target = agent_http::active_target()?;
+    build_client(&target, Duration::from_secs(3)).ok()
 }
 
 /// POST /config/set 写一个无害标量，触发服务端写盘并从磁盘全量重载配置
@@ -772,7 +698,7 @@ async fn post_agent_update(
     }
 }
 
-/// 请求 admAgent server 从磁盘全量重载配置（POST /config/set 写一个无害标量触发）。
+/// 请求 Agent server 从磁盘全量重载配置（POST /config/set 写一个无害标量触发）。
 /// 服务未运行 / 无活跃工作区时静默跳过 —— 下次启动会自然读到新配置。
 /// 失败仅记日志：重载不生效只是沿用旧配置，不影响主流程。
 fn request_server_config_reload(app: &tauri::AppHandle) {
@@ -793,60 +719,142 @@ fn request_server_config_reload(app: &tauri::AppHandle) {
     });
 }
 
-/// 把「多模态模型（图片识别）」选择同步到 admAgent.json 顶层 agent_vision_model 并触发服务端重载。
+// ===== 服务端设置（桌面端不再写本机 tigerAgent.json）=====
+//
+// 远程部署下桌面端与 Agent server 不在同一台机器：写本机 tigerAgent.json 再让
+// 服务端"从磁盘重载"，服务端只会读到它自己那份旧配置，代理 / vision / 工具开关
+// 全部静默失效。所有影响 Agent 行为的配置一律 POST /v1/settings。
+
+/// 内置多模态模型：Agent 的图片后端池向外部只暴露一个显示模型（服务端 DisplayModelName）。
+const BUILTIN_VISION_PROVIDER: &str = "tigerAgent";
+const BUILTIN_VISION_MODEL: &str = "agent-models";
+
+/// 读取服务端脱敏设置视图（GET /v1/settings）。
+async fn fetch_server_settings() -> Result<serde_json::Value, AppError> {
+    let client = agent_local_client().ok_or_else(|| AppError::msg("未连接服务端"))?;
+    let (status, body) = tokio::time::timeout(
+        Duration::from_secs(10),
+        agent_http::send(&client, "GET", "/v1/settings", None),
+    )
+    .await
+    .map_err(|_| AppError::msg("读取设置超时：服务端无响应"))?
+    .map_err(|e| AppError::msg(format!("读取设置失败: {}", e)))?;
+    if !(200..300).contains(&status) {
+        bail!("读取设置失败: HTTP {}（服务端版本可能过低，请升级服务端）", status);
+    }
+    serde_json::from_slice(&body).map_err(|e| AppError::msg(format!("解析设置响应失败: {}", e)))
+}
+
+/// 把设置补丁 POST 到服务端（POST /v1/settings），返回落盘后的视图。
+async fn send_server_settings(patch: serde_json::Value) -> Result<serde_json::Value, AppError> {
+    let client = agent_local_client()
+        .ok_or_else(|| AppError::msg("未连接服务端：请先在「服务端连接」中完成配置"))?;
+    let (status, body) = tokio::time::timeout(
+        Duration::from_secs(15),
+        agent_http::send(&client, "POST", "/v1/settings", Some(patch)),
+    )
+    .await
+    .map_err(|_| AppError::msg("保存设置超时：服务端无响应"))?
+    .map_err(|e| AppError::msg(format!("保存设置失败: {}", e)))?;
+    if !(200..300).contains(&status) {
+        let message = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(|s| s.to_string()))
+            .unwrap_or_else(|| format!("HTTP {}", status));
+        bail!("保存设置失败: {}", message);
+    }
+    serde_json::from_slice(&body).map_err(|e| AppError::msg(format!("解析设置响应失败: {}", e)))
+}
+
+/// 前端显式保存服务端设置（设置 → 网络代理等）：错误直接回传 UI，不再静默。
+#[tauri::command]
+pub async fn apply_server_settings(
+    app: tauri::AppHandle,
+    patch: serde_json::Value,
+) -> Result<serde_json::Value, AppError> {
+    let view = send_server_settings(patch).await?;
+    rebuild_agent_after_settings(&app).await;
+    Ok(view)
+}
+
+/// 读取服务端设置视图（前端展示服务端当前值用）。
+#[tauri::command]
+pub async fn get_server_settings() -> Result<serde_json::Value, AppError> {
+    fetch_server_settings().await
+}
+
+/// bash_allow_all / project_memory_sync / vision 都在 agent 构造期读取，
+/// 配置落盘后重建一次，避免「保存成功但仍按旧开关运行」。
+async fn rebuild_agent_after_settings(app: &tauri::AppHandle) {
+    let (Some(ws), Some(client)) = (active_workspace_id(app), agent_local_client()) else {
+        return;
+    };
+    post_agent_update(&client, &ws, "Settings").await;
+}
+
+/// 把本地 config.json 里的 Agent 设置（代理 / 多模态模型 / 两个开关）推送到服务端。
+/// 保存本地偏好时顺带调用；失败只记日志（对应面板本身用 apply_server_settings
+/// 保存时会拿到明确错误）。
 ///
-/// 值格式为 "provider/model" 复合键（如 "admAgent/adm-models"）；空值或缺省回退内置
-/// admAgent/adm-models。写入 Windows 的 %LOCALAPPDATA%\admAgent\admAgent.json
-/// （与云端 provider 同一文件；其它平台仍为 ~/.config/admAgent/admAgent.json），
-/// vision 子命令启动时 config.Load 读取该字段。server 运行时通过写无害标量触发 SetConfigFields
-/// 的全量重载（从磁盘重读所有配置路径并合并，任意顶层字段随之生效——已验证 reloadFromDiskLocked
-/// 会重读 GlobalConfig，不限于 providers 分支）。
-///
-/// 失败静默：vision 缺省回退内置 adm-models，不影响主流程。
-pub fn sync_agent_vision_model(app: &tauri::AppHandle, value: &str) {
-    let value = value.to_string();
+/// 分三次推送：服务端对 agent_vision_model 做 supports_images 校验并整批拒绝，
+/// 合成一个 patch 时 vision 校验失败会把代理 / 工具开关一起丢掉，用户看到
+/// “保存成功但没生效”。
+pub fn push_agent_settings(app: &tauri::AppHandle, settings: &crate::common::types::Settings) {
+    let (provider, model) = match settings.agent_vision_model.split_once('/') {
+        Some((p, m)) if !p.is_empty() && !m.is_empty() => (p.to_string(), m.to_string()),
+        _ => (BUILTIN_VISION_PROVIDER.to_string(), BUILTIN_VISION_MODEL.to_string()),
+    };
+    let patches: [(&str, serde_json::Value); 3] = [
+        (
+            "agent_proxy",
+            serde_json::json!({
+                "agent_proxy": { "enabled": settings.agent_proxy.enabled, "url": settings.agent_proxy.url },
+            }),
+        ),
+        (
+            "agent_vision_model",
+            serde_json::json!({
+                "agent_vision_model": { "provider": provider, "model": model },
+            }),
+        ),
+        (
+            "options",
+            serde_json::json!({
+                "options": {
+                    "bash_allow_all": settings.agent_allow_all_tools,
+                    "project_memory_sync": settings.agent_project_memory_sync.unwrap_or(true),
+                },
+            }),
+        ),
+    ];
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let changed = {
-            // 锁由 update_adm_agent_config 统一获取（进程内 Mutex + 跨进程 flock）
-            write_agent_vision_model(&value)
-        };
-        let changed = match changed {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[admAgent] 同步多模态模型：写 admAgent.json 失败: {}", e);
-                return;
+        let mut applied = false;
+        for (name, patch) in patches {
+            match send_server_settings(patch).await {
+                Ok(_) => applied = true,
+                Err(e) => api_debug_log(|| format!("Settings ! 推送 {} 失败: {}", name, e)),
             }
-        };
-        if !changed {
-            return; // 值未变化：跳过服务端重载，避免不必要的配置抖动
         }
-        request_server_config_reload(&app);
+        if applied {
+            api_debug_log(|| "Settings: 已推送到服务端".to_string());
+            rebuild_agent_after_settings(&app).await;
+        }
     });
 }
 
-/// 内置多模态模型：admAgent 的图片后端池向外部只暴露一个显示模型（服务端 DisplayModelName）。
-const BUILTIN_VISION_PROVIDER: &str = "admAgent";
-const BUILTIN_VISION_MODEL: &str = "adm-models";
-/// 旧版内置模型名：admAgent provider 由后端池统一服务，两个名字等价，写入时归一化。
-const LEGACY_BUILTIN_VISION_MODEL: &str = "admImage-model";
-
-/// 把 agent_vision_model 写入 admAgent.json 顶层（缺省回退内置 adm-models）。
+/// 把 agent_vision_model 写入 tigerAgent.json 顶层（缺省回退内置 agent-models）。
 /// 校验目标模型在 providers 中声明 supports_images=true，否则回退内置。
 /// 返回是否真的发生了变更（供调用方决定是否触发服务端重载）。
+///
+/// 生产路径已改走服务端 POST /v1/settings，这里只被下方的配置迁移回归用例使用。
+#[allow(dead_code)]
 fn write_agent_vision_model(value: &str) -> Result<bool, AppError> {
     let (provider, model) = match value.split_once('/') {
         Some((p, m)) if !p.is_empty() && !m.is_empty() => (p.to_string(), m.to_string()),
         _ => (BUILTIN_VISION_PROVIDER.to_string(), BUILTIN_VISION_MODEL.to_string()),
     };
-    // 旧版内置名归一化，避免旧配置继续以 admImage-model 落盘
-    let model = if provider == BUILTIN_VISION_PROVIDER && model == LEGACY_BUILTIN_VISION_MODEL {
-        BUILTIN_VISION_MODEL.to_string()
-    } else {
-        model
-    };
-
-    update_adm_agent_config(move |config| {
+    update_agent_config(move |config| {
         // 校验：模型必须在某个 provider 的 models 中声明 supports_images=true，否则回退内置
         let (final_provider, final_model) = if model_supports_images_in_config(&*config, &provider, &model) {
             (provider.clone(), model.clone())
@@ -863,12 +871,15 @@ fn write_agent_vision_model(value: &str) -> Result<bool, AppError> {
     })
 }
 
-/// 检查指定 provider/model 是否在 admAgent.json 的 providers 中声明 supports_images=true。
-/// admAgent 是内置 provider（模型 adm-models，旧名 admImage-model），不在 providers 键中，需特殊处理。
+/// 检查指定 provider/model 是否在 tigerAgent.json 的 providers 中声明 supports_images=true。
+/// Agent 是内置 provider（模型 agent-models），不在 providers 键中，需特殊处理。
+///
+/// 生产路径已改走服务端 POST /v1/settings，这里只被下方的配置迁移回归用例使用。
+#[allow(dead_code)]
 fn model_supports_images_in_config(config: &serde_json::Value, provider: &str, model: &str) -> bool {
-    // admAgent 是内置 provider，其模型（adm-models，旧名 admImage-model）支持图片
+    // Agent 是内置 provider，其模型（agent-models）支持图片
     if provider == BUILTIN_VISION_PROVIDER {
-        return model == BUILTIN_VISION_MODEL || model == LEGACY_BUILTIN_VISION_MODEL;
+        return model == BUILTIN_VISION_MODEL;
     }
     if let Some(providers) = config.get("providers").and_then(|p| p.as_object()) {
         for (key, pc) in providers {
@@ -891,170 +902,142 @@ fn model_supports_images_in_config(config: &serde_json::Value, provider: &str, m
     false
 }
 
-/// 把 HTTP 代理配置写入 admAgent.json 顶层 agent_proxy 并触发服务端热重载。
-///
-/// admAgent 读取该字段后应用到 LLM 客户端和 Agent HTTP 工具的 Transport。
-/// 写入逻辑与 sync_agent_vision_model 相同：写文件 → POST /config/set 触发从磁盘全量重载。
-/// 失败静默：代理不生效只是回到直连，不影响主流程。
-pub fn sync_agent_proxy(app: &tauri::AppHandle, proxy: &crate::common::types::AgentProxyConfig) {
-    let proxy = proxy.clone();
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let changed = {
-            // 锁由 update_adm_agent_config 统一获取（进程内 Mutex + 跨进程 flock）
-            api_debug_log(|| format!("Proxy: 同步代理配置 enabled={} url={}", proxy.enabled, proxy.url));
-            write_agent_proxy(&proxy)
-        };
-        let changed = match changed {
-            Ok(c) => c,
-            Err(e) => {
-                api_debug_log(|| format!("Proxy ! 写 admAgent.json 失败: {}", e));
-                return;
-            }
-        };
-        if !changed {
-            api_debug_log(|| "Proxy: 配置未变化，跳过重载".to_string());
-            return;
+// ===== 一次性迁移：本机旧 tigerAgent.json → 服务端 =====
+//
+// 桌面端历史上把 provider / MCP / 代理等写在本机 tigerAgent.json。改成服务端
+// 存储后，首次连接时给用户一次显式导入机会；导入完成后本机文件打标记、只读。
+
+/// 读取本机 tigerAgent.json（只读）。缺失/空/解析失败都返回 None，不阻断启动。
+fn read_local_agent_config() -> Result<Option<serde_json::Value>, AppError> {
+    let dir = agent_config_dir()?;
+    let path = dir.join("tigerAgent.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| AppError::msg(format!("读取本机 tigerAgent.json 失败: {}", e)))?;
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(value) => Ok(Some(value)),
+        Err(e) => {
+            api_debug_log(|| format!("Migrate: 本机 tigerAgent.json 解析失败: {}", e));
+            Ok(None)
         }
-        api_debug_log(|| "Proxy: admAgent.json 已更新，触发服务端热重载".to_string());
-        request_server_config_reload(&app);
+    }
+}
+
+/// 配置迁移摘要：前端据此决定是否展示「导入本机旧配置」。
+#[tauri::command]
+pub async fn local_agent_config_diff() -> Result<serde_json::Value, AppError> {
+    let Some(config) = read_local_agent_config()? else {
+        return Ok(serde_json::json!({ "available": false }));
+    };
+    if config
+        .get("__migrated_to_server")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Ok(serde_json::json!({ "available": false }));
+    }
+    let providers = config
+        .get("providers")
+        .and_then(|p| p.as_object())
+        .map(|map| map.keys().filter(|k| k.as_str() != "local").count())
+        .unwrap_or(0);
+    let mcp = config
+        .get("mcp")
+        .and_then(|m| m.as_object())
+        .map(|map| map.len())
+        .unwrap_or(0);
+    let has_proxy = config.get("agent_proxy").is_some();
+    let has_vision = config.get("agent_vision_model").is_some();
+    let has_flags = config
+        .get("options")
+        .and_then(|o| o.as_object())
+        .map(|opts| opts.contains_key("bash_allow_all") || opts.contains_key("project_memory_sync"))
+        .unwrap_or(false);
+    let available = providers > 0 || mcp > 0 || has_proxy || has_vision || has_flags;
+    Ok(serde_json::json!({
+        "available": available,
+        "providers": providers,
+        "mcp": mcp,
+        "agent_proxy": has_proxy,
+        "agent_vision_model": has_vision,
+        "options": has_flags,
+    }))
+}
+
+/// 把本机旧配置中的服务端相关字段一次性推送到服务端（POST /v1/settings），
+/// 成功后在本机文件写入 `__migrated_to_server`，此后本机文件不再作为配置来源。
+/// 工作目录不迁移：本机路径与服务端路径通常不是一套，导入必然校验失败。
+#[tauri::command]
+pub async fn import_local_agent_config() -> Result<serde_json::Value, AppError> {
+    let Some(config) = read_local_agent_config()? else {
+        bail!("本机没有可迁移的 tigerAgent.json");
+    };
+    let mut patch = serde_json::Map::new();
+
+    if let Some(proxy) = config.get("agent_proxy") {
+        patch.insert("agent_proxy".to_string(), proxy.clone());
+    }
+    if let Some(vision) = config.get("agent_vision_model") {
+        let has_provider = vision.get("provider").and_then(|v| v.as_str()).is_some();
+        let has_model = vision.get("model").and_then(|v| v.as_str()).is_some();
+        if has_provider && has_model {
+            patch.insert("agent_vision_model".to_string(), vision.clone());
+        }
+    }
+    if let Some(options) = config.get("options").and_then(|o| o.as_object()) {
+        let mut flags = serde_json::Map::new();
+        for key in ["bash_allow_all", "project_memory_sync"] {
+            if let Some(value) = options.get(key) {
+                flags.insert(key.to_string(), value.clone());
+            }
+        }
+        if !flags.is_empty() {
+            patch.insert("options".to_string(), serde_json::Value::Object(flags));
+        }
+    }
+    if let Some(providers) = config.get("providers").and_then(|p| p.as_object()) {
+        let filtered: serde_json::Map<String, serde_json::Value> = providers
+            .iter()
+            .filter(|(key, _)| key.as_str() != "local")
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        if !filtered.is_empty() {
+            patch.insert("providers".to_string(), serde_json::Value::Object(filtered));
+        }
+    }
+    if let Some(mcp) = config.get("mcp").and_then(|m| m.as_object()) {
+        if !mcp.is_empty() {
+            patch.insert("mcp".to_string(), serde_json::Value::Object(mcp.clone()));
+        }
+    }
+    if patch.is_empty() {
+        bail!("本机配置中没有需要迁移的内容");
+    }
+
+    let view = send_server_settings(serde_json::Value::Object(patch)).await?;
+
+    // 打标记：迁移完成后本机文件只读（保留供人工回滚）。
+    let marked = update_agent_config(|config| {
+        if let Some(root) = config.as_object_mut() {
+            root.insert("__migrated_to_server".to_string(), serde_json::json!(true));
+        }
+        Ok(())
     });
-}
-
-/// 把 agent_proxy 写入 admAgent.json 顶层。
-/// 返回是否真的发生了变更（供调用方决定是否触发服务端重载）。
-fn write_agent_proxy(proxy: &crate::common::types::AgentProxyConfig) -> Result<bool, AppError> {
-    // 旧实现在读取/解析失败时静默回退 build_adm_agent_config()，随后整文件覆盖，
-    // 把 agent_vision_model / options / 全部云端 provider 一并清掉。
-    // 现在解析失败一律返回错误（见 update_adm_agent_config），宁可这次不写，
-    // 也不能用默认结构覆盖用户的完整配置。
-    let target = serde_json::json!({ "enabled": proxy.enabled, "url": proxy.url });
-
-    update_adm_agent_config(move |config| {
-        if config.get("agent_proxy") == Some(&target) {
-            return Ok(false);
-        }
-        config["agent_proxy"] = target;
-        Ok(true)
-    })
-}
-
-/// 把「开启所有工具调用」写入 admAgent.json 的 options.bash_allow_all 并触发服务端热重载。
-///
-/// 开启后 admAgent 内置的 bash 命令黑名单失效（sudo / apt / systemctl / curl 等提权、包管理、
-/// 网络与系统管理命令可被 Agent 直接调用）。写入流程：写文件 → POST /config/set 触发服务端
-/// 从磁盘全量重载 → POST /agent/update 重建工具集（配置重载本身不重建工具，只重载配置对象）。
-/// 失败静默：写不进去等同于维持现有的受限行为，不影响主流程。
-pub fn sync_agent_allow_all_tools(app: &tauri::AppHandle, enabled: bool) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let changed = {
-            api_debug_log(|| format!("Tools: 同步开启所有工具调用 enabled={}", enabled));
-            write_agent_allow_all_tools(enabled)
-        };
-        let changed = match changed {
-            Ok(c) => c,
-            Err(e) => {
-                api_debug_log(|| format!("Tools ! 写 admAgent.json 失败: {}", e));
-                return;
-            }
-        };
-        if !changed {
-            api_debug_log(|| "Tools: 配置未变化，跳过重载".to_string());
-            return;
-        }
-        let ws = match active_workspace_id(&app) {
-            Some(ws) => ws,
-            None => {
-                api_debug_log(|| "Tools: 无活跃工作区，跳过服务端重载".to_string());
-                return;
-            }
-        };
-        let client = match agent_local_client() {
-            Some(c) => c,
-            None => return,
-        };
-        api_debug_log(|| "Tools: admAgent.json 已更新，触发服务端热重载".to_string());
-        if post_config_reload(&client, &ws, "Tools").await {
-            post_agent_update(&client, &ws, "Tools").await;
-        }
-    });
-}
-
-/// 把 options.bash_allow_all 写入 admAgent.json（只补丁该字段，不动其它选项）。
-/// 返回是否真的发生了变更（供调用方决定是否触发服务端重载）。
-fn write_agent_allow_all_tools(enabled: bool) -> Result<bool, AppError> {
-    write_agent_option_bool("bash_allow_all", enabled)
-}
-
-/// 把「压缩上下文时自动提取记忆规则」写入 admAgent.json 的 options.project_memory_sync。
-///
-/// 关闭后 admAgent 每次上下文压缩不再从会话里提取约束/决策沉淀进 project_memory.json
-/// （已有条目保留并继续注入）。写入流程与 bash_allow_all 一致：写文件 → POST /config/set
-/// 触发服务端全量重载 → POST /agent/update 重建 agent（该开关在 agent 构造时读取）。
-/// 失败静默：写不进去等同于维持当前的提取行为，不影响主流程。
-pub fn sync_agent_project_memory(app: &tauri::AppHandle, enabled: bool) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let changed = {
-            api_debug_log(|| format!("Memory: 同步压缩时自动提取记忆规则 enabled={}", enabled));
-            write_agent_option_bool("project_memory_sync", enabled)
-        };
-        let changed = match changed {
-            Ok(c) => c,
-            Err(e) => {
-                api_debug_log(|| format!("Memory ! 写 admAgent.json 失败: {}", e));
-                return;
-            }
-        };
-        if !changed {
-            api_debug_log(|| "Memory: 配置未变化，跳过重载".to_string());
-            return;
-        }
-        let ws = match active_workspace_id(&app) {
-            Some(ws) => ws,
-            None => {
-                api_debug_log(|| "Memory: 无活跃工作区，跳过服务端重载".to_string());
-                return;
-            }
-        };
-        let client = match agent_local_client() {
-            Some(c) => c,
-            None => return,
-        };
-        api_debug_log(|| "Memory: admAgent.json 已更新，触发服务端热重载".to_string());
-        if post_config_reload(&client, &ws, "Memory").await {
-            post_agent_update(&client, &ws, "Memory").await;
-        }
-    });
-}
-
-/// 把 admAgent.json 的 options.<key> 补丁为布尔值（保留 options 下的其它键）。
-/// 返回是否真的发生了变更（供调用方决定是否触发服务端重载）。
-fn write_agent_option_bool(key: &'static str, enabled: bool) -> Result<bool, AppError> {
-    update_adm_agent_config(move |config| {
-        let root = config
-            .as_object_mut()
-            .ok_or_else(|| AppError::msg("admAgent.json 结构异常：根节点不是对象"))?;
-        let options = root
-            .entry("options")
-            .or_insert_with(|| serde_json::json!({}));
-        if !options.is_object() {
-            return Err(AppError::msg("admAgent.json 结构异常：options 不是对象"));
-        }
-        let options = options.as_object_mut().unwrap();
-        let target = serde_json::json!(enabled);
-        if options.get(key) == Some(&target) {
-            return Ok(false);
-        }
-        options.insert(key.to_string(), target);
-        Ok(true)
-    })
+    if let Err(e) = marked {
+        api_debug_log(|| format!("Migrate ! 标记本机配置失败: {}", e));
+    }
+    api_debug_log(|| "Migrate: 本机配置已导入服务端".to_string());
+    Ok(view)
 }
 
 // ===== 添加云端模型 Provider =====
 
-/// 把一个云端模型名称转成 admAgent.json providers 下的 JSON key（仅保留 ASCII 字母数字，转小写）。
+/// 把一个云端模型名称转成 tigerAgent.json providers 下的 JSON key（仅保留 ASCII 字母数字，转小写）。
 /// 例如 "Xiaomi MiMo" -> "xiaomimimo"。空名称回退为 "cloud"。
 fn slugify_provider_key(name: &str) -> String {
     let mut s: String = name
@@ -1132,7 +1115,7 @@ fn require_model_id(model_id: &Option<String>) -> Result<String, AppError> {
     }
 }
 
-/// 新增一个云端模型 Provider 到 admAgent.json 的 `providers` 分支下。
+/// 新增一个云端模型 Provider 到 tigerAgent.json 的 `providers` 分支下。
 ///
 /// - 文件已存在则解析并尽量保留其它字段；不存在则用完整默认结构。
 /// - 以模型名称派生 provider key；模型ID与名称严格按用户填写写入（区分大小写），
@@ -1180,15 +1163,10 @@ pub async fn add_cloud_provider(
         ]
     });
 
-    // 3) 加锁 → 读 → 改 → 原子写（与 Go server 跨进程互斥）
-    let key_for_write = key.clone();
-    update_adm_agent_config(move |config| {
-        if !config.get("providers").is_some_and(|v| v.is_object()) {
-            config["providers"] = serde_json::json!({});
-        }
-        config["providers"][&key_for_write] = provider;
-        Ok(())
-    })?;
+    // 3) 落到服务端（桌面端不再写本机 tigerAgent.json）
+    let mut providers = serde_json::Map::new();
+    providers.insert(key.clone(), provider);
+    send_server_settings(serde_json::json!({ "providers": providers })).await?;
 
     Ok(serde_json::json!({ "key": key, "success": true }))
 }
@@ -1200,6 +1178,8 @@ pub struct CloudProviderView {
     pub name: String,
     pub base_url: String,
     pub api_key: String,
+    /// 服务端是否已保存 API key（api_key 恒为空串，留空编辑 = 保留原值）
+    pub has_key: bool,
     pub context_window: u32,
     /// models[0].id，供前端调用服务端 `/config/model` 切换模型时使用
     pub model_id: String,
@@ -1209,95 +1189,71 @@ pub struct CloudProviderView {
     pub can_reason: bool,
 }
 
-/// 读取可能写成 JSON 数字或带引号数字的配置数值：admAgent 侧两者都接受
-/// （`parseJSONInt64`），桌面端也必须接受——否则字符串形式会读成 0，
-/// 桌面显示“无窗口”而 agent 实际按该值工作。
-fn config_u64(v: &serde_json::Value) -> Option<u64> {
-    v.as_u64()
-        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
-}
-
-/// 列出 admAgent.json 中已添加的全部云端模型 Provider（排除自动管理的 `local`）。
+/// 列出 tigerAgent.json 中已添加的全部云端模型 Provider（排除自动管理的 `local`）。
 /// 返回每项的关键信息，供前端列表展示与编辑回填。
 #[tauri::command]
 pub async fn list_cloud_providers(
     _app: tauri::AppHandle,
 ) -> Result<Vec<CloudProviderView>, AppError> {
-    let dir = adm_agent_config_dir()?;
-    let path = dir.join("admAgent.json");
-    if !path.exists() {
-        return Ok(vec![]);
-    }
-    let s = std::fs::read_to_string(&path)
-        .map_err(|e| format!("读取 admAgent.json 失败: {}", e))?;
-    let v: serde_json::Value = serde_json::from_str(&s)
-        .map_err(|e| format!("解析 admAgent.json 失败: {}", e))?;
+    let view = fetch_server_settings().await?;
+    Ok(cloud_providers_from_settings(&view))
+}
 
+/// 把 GET /v1/settings 的 providers 数组映射成前端视图。
+/// api_key 始终为空：服务端只回传掩码，编辑时留空即保留原 key。
+fn cloud_providers_from_settings(view: &serde_json::Value) -> Vec<CloudProviderView> {
     let mut out: Vec<CloudProviderView> = vec![];
-    if let Some(providers) = v.get("providers").and_then(|p| p.as_object()) {
-        for (key, prov) in providers {
-            // 跳过自动生成的本地 provider（非用户添加）
-            if key == "local" {
-                continue;
-            }
-            let name = prov
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or(key.as_str())
-                .to_string();
-            let base_url = prov
+    let Some(list) = view.get("providers").and_then(|p| p.as_array()) else {
+        return out;
+    };
+    for provider in list {
+        let Some(key) = provider.get("key").and_then(|k| k.as_str()) else {
+            continue;
+        };
+        // 跳过自动生成的本地 provider（非用户添加）
+        if key == "local" {
+            continue;
+        }
+        let name = provider
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or(key)
+            .to_string();
+        let first_model = provider
+            .get("models")
+            .and_then(|m| m.as_array())
+            .and_then(|m| m.first());
+        out.push(CloudProviderView {
+            key: key.to_string(),
+            name: name.clone(),
+            base_url: provider
                 .get("base_url")
                 .and_then(|b| b.as_str())
                 .unwrap_or("")
-                .to_string();
-            let api_key = prov
-                .get("api_key")
-                .and_then(|a| a.as_str())
-                .unwrap_or("")
-                .to_string();
-            let context_window = prov
-                .get("models")
-                .and_then(|m| m.get(0))
-                .and_then(|m0| {
-                    // First key that PARSES wins: a quoted "128000" must not
-                    // shadow a valid legacy number.
-                    ["ctx_size", "context_window"]
-                        .iter()
-                        .find_map(|k| m0.get(k).and_then(config_u64))
-                })
-                .unwrap_or(0) as u32;
-            let model_id = prov
-                .get("models")
-                .and_then(|m| m.get(0))
-                .and_then(|m0| m0.get("id"))
+                .to_string(),
+            api_key: String::new(),
+            has_key: provider.get("has_key").and_then(|v| v.as_bool()).unwrap_or(false),
+            context_window: first_model
+                .and_then(|m| m.get("context_window"))
+                .and_then(|c| c.as_u64())
+                .unwrap_or(0) as u32,
+            model_id: first_model
+                .and_then(|m| m.get("id"))
                 .and_then(|i| i.as_str())
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| slugify_model_id(&name));
-            let supports_images = prov
-                .get("models")
-                .and_then(|m| m.get(0))
-                .and_then(|m0| m0.get("supports_images"))
-                .and_then(|s| s.as_bool())
-                .unwrap_or(false);
-            let can_reason = prov
-                .get("models")
-                .and_then(|m| m.get(0))
-                .and_then(|m0| m0.get("can_reason"))
-                .and_then(|s| s.as_bool())
-                .unwrap_or(false);
-            out.push(CloudProviderView {
-                key: key.clone(),
-                name,
-                base_url,
-                api_key,
-                context_window,
-                model_id,
-                supports_images,
-                can_reason,
-            });
-        }
+                .unwrap_or_else(|| slugify_model_id(&name)),
+            supports_images: first_model
+                .and_then(|m| m.get("supports_images"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            can_reason: first_model
+                .and_then(|m| m.get("can_reason"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        });
     }
-    Ok(out)
+    out.sort_by(|a, b| a.key.cmp(&b.key));
+    out
 }
 
 /// 从全局 `recent_models` 中剔除指向指定 provider 的历史条目，返回剔除条数。
@@ -1305,6 +1261,7 @@ pub async fn list_cloud_providers(
 /// 该字段是 TUI/桌面端「最近使用」的数据源，只在切换模型时由服务端追加，删除
 /// provider 不会级联清理，留着会在配置里长期残留已失效的模型。列表被清空时直接
 /// 删掉字段，与服务端 `omitempty` 的写回语义一致（避免留下 `recent_models: []`）。
+#[allow(dead_code)]
 fn prune_recent_models_for_provider(config: &mut serde_json::Value, provider_key: &str) -> usize {
     let mut removed = 0;
     let mut emptied = false;
@@ -1327,6 +1284,10 @@ fn prune_recent_models_for_provider(config: &mut serde_json::Value, provider_key
 
 /// 从 `providers` 分支移除指定 key，并顺带清掉 `recent_models` 中指向它的历史
 /// 条目，返回被剔除的最近使用条数。
+///
+/// 生产路径已改走服务端 `POST /v1/settings`（`remove_providers`），这里只被下方的
+/// 配置迁移回归用例使用。
+#[allow(dead_code)]
 fn remove_provider_with_recent_models(
     config: &mut serde_json::Value,
     key: &str,
@@ -1334,7 +1295,7 @@ fn remove_provider_with_recent_models(
     let providers = config
         .get_mut("providers")
         .and_then(|p| p.as_object_mut())
-        .ok_or_else(|| AppError::msg("admAgent.json 结构异常：缺少 providers"))?;
+        .ok_or_else(|| AppError::msg("tigerAgent.json 结构异常：缺少 providers"))?;
 
     if providers.remove(key).is_none() {
         return Err(AppError::msg(format!("未找到 provider: {}", key)));
@@ -1344,18 +1305,15 @@ fn remove_provider_with_recent_models(
 }
 
 /// 删除指定 key 的云端模型 Provider。
-/// 按 key 定位并从 admAgent.json 的 providers 分支中移除，原子写入；同一次写入里
+/// 按 key 定位并从 tigerAgent.json 的 providers 分支中移除，原子写入；同一次写入里
 /// 顺带清掉 `recent_models` 中指向该 provider 的历史条目。
 #[tauri::command]
 pub async fn delete_cloud_provider(
     _app: tauri::AppHandle,
     key: String,
 ) -> Result<serde_json::Value, AppError> {
-    // 锁由 update_adm_agent_config 统一获取（进程内 Mutex + 跨进程 flock）
-    let removed_recent =
-        update_adm_agent_config(|config| remove_provider_with_recent_models(config, &key))?;
-
-    Ok(serde_json::json!({ "key": key, "success": true, "removed_recent": removed_recent }))
+    send_server_settings(serde_json::json!({ "remove_providers": [key] })).await?;
+    Ok(serde_json::json!({ "key": key, "success": true, "removed_recent": 0 }))
 }
 
 /// 更新指定 key 的云端模型 Provider（按 key 定位，替换其全部参数）。
@@ -1366,8 +1324,6 @@ pub async fn update_cloud_provider(
     key: String,
     input: CloudProviderInput,
 ) -> Result<serde_json::Value, AppError> {
-    let key_for_check = key.clone();
-
     let model_id = require_model_id(&input.model_id)?;
     // 开启思考模式时补充推理档位元数据，服务端 effectiveReasoningEffort
     // 才能解析出具体档位（与内置远程池模型保持一致）
@@ -1399,24 +1355,15 @@ pub async fn update_cloud_provider(
         ]
     });
 
-    // 加锁 → 读 → 改 → 原子写（与 Go server 跨进程互斥）
-    update_adm_agent_config(move |config| {
-        let providers = config
-            .get_mut("providers")
-            .and_then(|p| p.as_object_mut())
-            .ok_or_else(|| AppError::msg("admAgent.json 结构异常：缺少 providers"))?;
-
-        if providers.get(&key_for_check).is_none() {
-            return Err(AppError::msg(format!("未找到 provider: {}", key_for_check)));
-        }
-        providers.insert(key_for_check, new_provider);
-        Ok(())
-    })?;
+    // 落到服务端（api_key 为空时服务端保留原值，便于「不重填 key」的编辑）
+    let mut providers = serde_json::Map::new();
+    providers.insert(key.clone(), new_provider);
+    send_server_settings(serde_json::json!({ "providers": providers })).await?;
 
     Ok(serde_json::json!({ "key": key, "success": true }))
 }
 
-// ===== MCP 服务配置（admAgent.json 顶层 `mcp` 映射）=====
+// ===== MCP 服务配置（tigerAgent.json 顶层 `mcp` 映射）=====
 // 配置格式与 Go 端 config.MCPConfig 对齐：
 // {
 //   "mcp": {
@@ -1424,10 +1371,10 @@ pub async fn update_cloud_provider(
 //     "remote":     { "type": "http",  "url": "https://...", "headers": { "K": "V" } }
 //   }
 // }
-// 注意：admAgent server 只在启动时初始化 MCP 客户端，新增/修改后需重启 server
+// 注意：Agent server 只在启动时初始化 MCP 客户端，新增/修改后需重启 server
 // 才会建立连接（/config/set 只触发配置内存重载，不重建 MCP 会话）。
 
-/// MCP 服务配置视图（同时作为前端提交结构，字段名与 admAgent.json 对齐）
+/// MCP 服务配置视图（同时作为前端提交结构，字段名与 tigerAgent.json 对齐）
 #[derive(Serialize, Deserialize, Default)]
 pub struct McpServerView {
     /// 服务名称（mcp 映射的 key）
@@ -1456,6 +1403,7 @@ pub struct McpServerView {
 
 /// MCP 配置的已知字段：更新时先剔除再由新值回填，其余未知字段
 /// （enabled_tools / disabled_tools 等）原样保留，避免编辑弹窗丢数据。
+#[allow(dead_code)]
 const MCP_KNOWN_KEYS: [&str; 8] = ["type", "command", "args", "env", "url", "headers", "timeout", "disabled"];
 
 /// 校验并归一化前端提交的 MCP 配置，返回 (名称, 类型)
@@ -1500,7 +1448,7 @@ fn validate_mcp_input(input: &McpServerView) -> Result<(String, String), AppErro
     Ok((name, kind))
 }
 
-/// 把前端提交的配置转成写入 admAgent.json 的 JSON 对象（空字段省略，保持文件简洁）
+/// 把前端提交的配置转成写入 tigerAgent.json 的 JSON 对象（空字段省略，保持文件简洁）
 fn mcp_config_value(input: &McpServerView, kind: &str) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
     obj.insert("type".to_string(), serde_json::json!(kind));
@@ -1534,6 +1482,7 @@ fn mcp_config_value(input: &McpServerView, kind: &str) -> serde_json::Value {
 }
 
 /// 更新时合并到旧配置：已知字段用新值覆盖，未知字段保留
+#[allow(dead_code)]
 fn merge_mcp_config(existing: &serde_json::Value, new_value: serde_json::Value) -> serde_json::Value {
     let mut merged = existing.as_object().cloned().unwrap_or_default();
     for key in MCP_KNOWN_KEYS {
@@ -1547,7 +1496,11 @@ fn merge_mcp_config(existing: &serde_json::Value, new_value: serde_json::Value) 
     serde_json::Value::Object(merged)
 }
 
-/// 从 admAgent.json 根值解析 mcp 映射为视图列表（按名称排序）
+/// 从 tigerAgent.json 根值解析 mcp 映射为视图列表（按名称排序）。
+///
+/// 生产路径已改走服务端 `GET /v1/settings`（`mcp` 为数组），这里只被配置迁移
+/// 回归用例使用。
+#[allow(dead_code)]
 fn mcp_servers_from_value(root: &serde_json::Value) -> Vec<McpServerView> {
     let mut out: Vec<McpServerView> = vec![];
     if let Some(mcp) = root.get("mcp").and_then(|m| m.as_object()) {
@@ -1577,33 +1530,63 @@ fn mcp_servers_from_value(root: &serde_json::Value) -> Vec<McpServerView> {
     out
 }
 
-/// 列出 admAgent.json 中已配置的 MCP 服务
+/// 列出服务端已配置的 MCP 服务（GET /v1/settings）。
+/// 服务端只回传 env/headers 的键（值已脱敏为空串）；提交时留空即保留原值。
 #[tauri::command]
 pub async fn list_mcp_servers(_app: tauri::AppHandle) -> Result<Vec<McpServerView>, AppError> {
-    let dir = adm_agent_config_dir()?;
-    let path = dir.join("admAgent.json");
-    if !path.exists() {
-        return Ok(vec![]);
-    }
-    let s = std::fs::read_to_string(&path)
-        .map_err(|e| format!("读取 admAgent.json 失败: {}", e))?;
-    let v: serde_json::Value = serde_json::from_str(&s)
-        .map_err(|e| format!("解析 admAgent.json 失败: {}", e))?;
-    Ok(mcp_servers_from_value(&v))
+    let view = fetch_server_settings().await?;
+    Ok(mcp_servers_from_settings(&view))
 }
 
-/// 新增 MCP 服务的核心逻辑（便于单测），返回归一化后的名称
+fn mcp_servers_from_settings(view: &serde_json::Value) -> Vec<McpServerView> {
+    let mut out: Vec<McpServerView> = vec![];
+    let Some(list) = view.get("mcp").and_then(|m| m.as_array()) else {
+        return out;
+    };
+    for cfg in list {
+        let name = cfg.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let mut item = McpServerView {
+            name: name.to_string(),
+            kind: cfg.get("type").and_then(|t| t.as_str()).unwrap_or("stdio").to_string(),
+            command: cfg.get("command").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+            url: cfg.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
+            timeout: cfg.get("timeout").and_then(|t| t.as_u64()).unwrap_or(0) as u32,
+            disabled: cfg.get("disabled").and_then(|d| d.as_bool()).unwrap_or(false),
+            ..Default::default()
+        };
+        if let Some(args) = cfg.get("args").and_then(|a| a.as_array()) {
+            item.args = args.iter().filter_map(|a| a.as_str().map(|s| s.to_string())).collect();
+        }
+        if let Some(env) = cfg.get("env").and_then(|e| e.as_object()) {
+            item.env = env.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect();
+        }
+        if let Some(headers) = cfg.get("headers").and_then(|h| h.as_object()) {
+            item.headers = headers.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect();
+        }
+        out.push(item);
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// 新增 MCP 服务的核心逻辑（便于单测），返回归一化后的名称。
+///
+/// 生产路径已改走服务端 `POST /v1/settings`，这里只被配置迁移回归用例使用。
+#[allow(dead_code)]
 fn add_mcp_server_core(input: &McpServerView) -> Result<String, AppError> {
     let (name, kind) = validate_mcp_input(input)?;
     let value = mcp_config_value(input, &kind);
     let name_for_write = name.clone();
-    update_adm_agent_config(move |config| {
+    update_agent_config(move |config| {
         if !config.get("mcp").is_some_and(|v| v.is_object()) {
             config["mcp"] = serde_json::json!({});
         }
         let mcp = config["mcp"]
             .as_object_mut()
-            .ok_or_else(|| AppError::msg("admAgent.json 结构异常：mcp 不是对象"))?;
+            .ok_or_else(|| AppError::msg("tigerAgent.json 结构异常：mcp 不是对象"))?;
         if mcp.contains_key(&name_for_write) {
             return Err(AppError::msg(format!("MCP「{}」已存在", name_for_write)));
         }
@@ -1613,14 +1596,33 @@ fn add_mcp_server_core(input: &McpServerView) -> Result<String, AppError> {
     Ok(name)
 }
 
-/// 新增 MCP 服务（写入 admAgent.json 顶层 mcp.<name>）
+/// 新增 MCP 服务（写入服务端 mcp.<name>）
 #[tauri::command]
 pub async fn add_mcp_server(_app: tauri::AppHandle, input: McpServerView) -> Result<serde_json::Value, AppError> {
-    let name = add_mcp_server_core(&input)?;
+    let (name, kind) = validate_mcp_input(&input)?;
+    let view = fetch_server_settings().await?;
+    let exists = view
+        .get("mcp")
+        .and_then(|m| m.as_array())
+        .map(|list| {
+            list.iter().any(|item| {
+                item.get("name").and_then(|n| n.as_str()) == Some(name.as_str())
+            })
+        })
+        .unwrap_or(false);
+    if exists {
+        bail!("MCP「{}」已存在", name);
+    }
+    let mut mcp = serde_json::Map::new();
+    mcp.insert(name.clone(), mcp_config_value(&input, &kind));
+    send_server_settings(serde_json::json!({ "mcp": mcp })).await?;
     Ok(serde_json::json!({ "name": name, "success": true }))
 }
 
-/// 修改 MCP 服务的核心逻辑（便于单测）：original_name 定位旧条目，名称可改
+/// 修改 MCP 服务的核心逻辑（便于单测）：original_name 定位旧条目，名称可改。
+///
+/// 生产路径已改走服务端 `POST /v1/settings`，这里只被配置迁移回归用例使用。
+#[allow(dead_code)]
 fn update_mcp_server_core(original_name: &str, input: &McpServerView) -> Result<String, AppError> {
     let original = original_name.trim().to_string();
     if original.is_empty() {
@@ -1629,11 +1631,11 @@ fn update_mcp_server_core(original_name: &str, input: &McpServerView) -> Result<
     let (name, kind) = validate_mcp_input(input)?;
     let new_value = mcp_config_value(input, &kind);
     let name_for_write = name.clone();
-    update_adm_agent_config(move |config| {
+    update_agent_config(move |config| {
         let mcp = config
             .get_mut("mcp")
             .and_then(|m| m.as_object_mut())
-            .ok_or_else(|| AppError::msg("admAgent.json 结构异常：缺少 mcp"))?;
+            .ok_or_else(|| AppError::msg("tigerAgent.json 结构异常：缺少 mcp"))?;
         let existing = mcp
             .get(&original)
             .cloned()
@@ -1650,29 +1652,42 @@ fn update_mcp_server_core(original_name: &str, input: &McpServerView) -> Result<
     Ok(name)
 }
 
-/// 修改 MCP 服务（名称变更时迁移 key，未知字段保留）
+/// 修改 MCP 服务（名称变更时迁移 key，未知字段由服务端保留）
 #[tauri::command]
 pub async fn update_mcp_server(
     _app: tauri::AppHandle,
     original_name: String,
     input: McpServerView,
 ) -> Result<serde_json::Value, AppError> {
-    let name = update_mcp_server_core(&original_name, &input)?;
+    let original = original_name.trim().to_string();
+    if original.is_empty() {
+        bail!("缺少原始 MCP 名称");
+    }
+    let (name, kind) = validate_mcp_input(&input)?;
+    let mut patch = serde_json::json!({ "mcp": { name.clone(): mcp_config_value(&input, &kind) } });
+    if name != original {
+        patch["remove_mcp"] = serde_json::json!([original]);
+    }
+    send_server_settings(patch).await?;
     Ok(serde_json::json!({ "name": name, "success": true }))
 }
 
-/// 删除 MCP 服务的核心逻辑（便于单测）
+/// 删除 MCP 服务的核心逻辑（便于单测）。
+///
+/// 生产路径已改走服务端 `POST /v1/settings`（`remove_mcp`），这里只被配置迁移
+/// 回归用例使用。
+#[allow(dead_code)]
 fn delete_mcp_server_core(name: &str) -> Result<(), AppError> {
     let name = name.trim().to_string();
     if name.is_empty() {
         bail!("缺少 MCP 名称");
     }
     let name_for_write = name.clone();
-    update_adm_agent_config(move |config| {
+    update_agent_config(move |config| {
         let mcp = config
             .get_mut("mcp")
             .and_then(|m| m.as_object_mut())
-            .ok_or_else(|| AppError::msg("admAgent.json 结构异常：缺少 mcp"))?;
+            .ok_or_else(|| AppError::msg("tigerAgent.json 结构异常：缺少 mcp"))?;
         if mcp.remove(&name_for_write).is_none() {
             return Err(AppError::msg(format!("未找到 MCP「{}」", name_for_write)));
         }
@@ -1684,16 +1699,12 @@ fn delete_mcp_server_core(name: &str) -> Result<(), AppError> {
 /// 删除 MCP 服务
 #[tauri::command]
 pub async fn delete_mcp_server(_app: tauri::AppHandle, name: String) -> Result<serde_json::Value, AppError> {
-    delete_mcp_server_core(&name)?;
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        bail!("缺少 MCP 名称");
+    }
+    send_server_settings(serde_json::json!({ "remove_mcp": [name] })).await?;
     Ok(serde_json::json!({ "name": name, "success": true }))
-}
-
-// ===== 数据结构 =====
-
-#[derive(Serialize)]
-pub struct AdmAgentInfo {
-    pub exists: bool,
-    pub path: String,
 }
 
 // ===== Tauri Command =====
@@ -1705,64 +1716,30 @@ pub fn get_platform_os() -> String {
     std::env::consts::OS.to_string()
 }
 
-/// 检查本地是否已下载 admAgent 工具
+// ===== 服务端版本读取 =====
+
+/// 获取远端服务端版本（`GET /v1/version`）。
+/// 桌面端不再管理服务端进程，版本只能从用户自行启动的服务端查询；
+/// 未配置或连不上时返回 Ok(None)（设置页只做展示，不阻塞其它操作）。
 #[tauri::command]
-pub async fn check_adm_agent(app: tauri::AppHandle) -> Result<AdmAgentInfo, AppError> {
-    let path = resolve_local_agent(&app);
-    let exists = path.exists();
-    Ok(AdmAgentInfo {
-        exists,
-        path: path.to_string_lossy().to_string(),
-    })
-}
-
-// ===== admAgent 版本读取 =====
-
-/// 解析 `admAgent -v` 输出，提取版本号。
-/// 输出示例：`admAgent version v0.0.1-250db9`
-fn parse_adm_agent_version_output(output: &str) -> Option<String> {
-    let marker = "admAgent version ";
-    let text = output.trim();
-    if let Some(idx) = text.find(marker) {
-        let ver = text[idx + marker.len()..].trim();
-        if !ver.is_empty() {
-            return Some(ver.to_string());
-        }
-    }
-    // 兜底：整行看起来像版本号（以 v 开头且含 '.'）
-    if text.starts_with('v') && text.contains('.') {
-        return Some(text.to_string());
-    }
-    None
-}
-
-/// 获取本地已安装 admAgent 的版本号（运行 `admAgent -v`）。
-/// 未安装或无法解析时返回 Ok(None)。
-pub fn get_adm_agent_local_version(app: &tauri::AppHandle) -> Result<Option<String>, AppError> {
-    let path = resolve_local_agent(app);
-    if !path.exists() {
+pub async fn get_server_version(app: tauri::AppHandle) -> Result<Option<String>, AppError> {
+    let Ok(target) = crate::common::server_mode::resolve(&app) else {
         return Ok(None);
+    };
+    let client = build_client(&target, Duration::from_secs(5))
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+    let (status, bytes) = tokio::time::timeout(
+        Duration::from_secs(10),
+        agent_http::send(&client, "GET", "/v1/version", None),
+    )
+    .await
+    .map_err(|_| "获取服务端版本超时".to_string())?
+    .map_err(|e| format!("获取服务端版本失败: {}", e))?;
+    if !(200..300).contains(&status) {
+        bail!("获取服务端版本失败: HTTP {}", status);
     }
-    let path_str = path
-        .to_str()
-        .ok_or_else(|| format!("admAgent 路径包含非法字符: {}", path.display()))?;
-
-    let output = platform::create_hidden_command(path_str)
-        .arg("-v")
-        .output()
-        .map_err(|e| format!("运行 admAgent 失败: {}", e))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{}{}", stdout, stderr);
-
-    Ok(parse_adm_agent_version_output(&combined))
-}
-
-/// 获取 admAgent 版本号（供前端调用）
-#[tauri::command]
-pub async fn get_adm_agent_version(app: tauri::AppHandle) -> Result<Option<String>, AppError> {
-    get_adm_agent_local_version(&app)
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    Ok(body.get("version").and_then(|v| v.as_str()).map(|s| s.to_string()))
 }
 
 /// 获取当前系统架构（主要用于 macOS Intel/ARM 区分）
@@ -1958,23 +1935,69 @@ fn save_workdirs_internal(app: &tauri::AppHandle, dirs: &[WorkDirEntry]) -> Resu
     Ok(())
 }
 
-/// 获取工作目录列表（含迁移逻辑；列表为空时自动初始化平台默认工作目录）
+/// 把工作目录列表推到服务端（服务端校验路径存在且是目录）。
+async fn push_workdirs(dirs: &[WorkDirEntry]) -> Result<(), AppError> {
+    let payload: Vec<serde_json::Value> = dirs
+        .iter()
+        .map(|d| serde_json::json!({ "path": d.path, "is_default": d.is_default }))
+        .collect();
+    send_server_settings(serde_json::json!({ "work_directories": payload })).await?;
+    Ok(())
+}
+
+/// 从 GET /v1/settings 视图读取服务端工作目录列表。
+fn workdirs_from_settings(view: &serde_json::Value) -> Vec<WorkDirEntry> {
+    let mut out = Vec::new();
+    if let Some(list) = view.get("work_directories").and_then(|v| v.as_array()) {
+        for item in list {
+            let Some(path) = item.get("path").and_then(|p| p.as_str()) else {
+                continue;
+            };
+            out.push(WorkDirEntry {
+                path: path.to_string(),
+                is_default: item.get("is_default").and_then(|d| d.as_bool()).unwrap_or(false),
+            });
+        }
+    }
+    out
+}
+
+/// 获取工作目录列表：已连服务端时以**服务端**存储为准（路径按服务端视角解释，
+/// 本地只存一份展示缓存；服务端列表为空就是空，不能拿本机旧缓存顶替）。
+/// 未连接服务端时才回退本机 config.json 缓存（仅供 UI 展示，不参与建工作区）。
 #[tauri::command]
 pub async fn get_workdirs(app: tauri::AppHandle) -> Result<Vec<WorkDirEntry>, AppError> {
-    ensure_default_workdir(&app);
+    if agent_local_client().is_some() {
+        match fetch_server_settings().await {
+            Ok(view) => {
+                let dirs = workdirs_from_settings(&view);
+                let _ = save_workdirs_internal(&app, &dirs);
+                return Ok(dirs);
+            }
+            Err(e) => {
+                api_debug_log(|| format!("Workdirs: 读取服务端工作目录失败，回退本地缓存: {}", e));
+            }
+        }
+    } else {
+        ensure_default_workdir(&app);
+    }
     Ok(load_workdirs(&app))
 }
 
-/// 添加工作目录（去重），若列表为空则设为默认
+/// 添加工作目录（去重），若列表为空则设为默认；先由服务端校验路径再落盘。
 #[tauri::command]
 pub async fn add_workdir(app: tauri::AppHandle, path: String) -> Result<Vec<WorkDirEntry>, AppError> {
     let mut dirs = load_workdirs(&app);
     let path = path.trim().to_string();
+    if path.is_empty() {
+        bail!("工作目录不能为空");
+    }
     if dirs.iter().any(|d| d.path == path) {
         return Ok(dirs); // Already exists
     }
     let is_first = dirs.is_empty();
     dirs.push(WorkDirEntry { path, is_default: is_first });
+    push_workdirs(&dirs).await?;
     save_workdirs_internal(&app, &dirs)?;
     Ok(dirs)
 }
@@ -1989,6 +2012,7 @@ pub async fn remove_workdir(app: tauri::AppHandle, path: String) -> Result<Vec<W
     if removed_default && !dirs.is_empty() {
         dirs[0].is_default = true;
     }
+    push_workdirs(&dirs).await?;
     save_workdirs_internal(&app, &dirs)?;
     Ok(dirs)
 }
@@ -2001,54 +2025,101 @@ pub async fn set_default_workdir(app: tauri::AppHandle, path: String) -> Result<
     for d in &mut dirs {
         d.is_default = d.path == path;
     }
-    // Also sync legacy agent_workdir
+    push_workdirs(&dirs).await?;
     save_workdirs_internal(&app, &dirs)?;
     Ok(dirs)
 }
 
-/// 验证工作目录列表：检查每个路径是否存在，删除不存在的并返回被删除的路径
+/// 验证工作目录列表：在**服务端**检查每个路径是否存在，删除不存在的并返回被删除的路径。
+/// 服务端不可达时退回本机检查（仅用于本地缓存清理，不改变"路径按服务端解释"的语义）。
 #[tauri::command]
+/// 校验工作目录：**只以服务端为准**（工作目录路径属于服务端主机，本机
+/// `is_dir` 判断在远程部署下必然误报）。返回已从列表移除的路径；服务端不可达时
+/// 不做任何删除，返回空列表。
 pub async fn validate_workdirs(app: tauri::AppHandle) -> Result<Vec<String>, AppError> {
-    let mut dirs = load_workdirs(&app);
-    let mut removed = Vec::new();
-    let mut removed_default = false;
+    let dirs = load_workdirs(&app);
+    let paths: Vec<String> = dirs.iter().map(|d| d.path.clone()).collect();
 
-    dirs.retain(|d| {
-        let exists = std::path::Path::new(&d.path).is_dir();
-        if !exists {
-            removed.push(d.path.clone());
+    let Some(mut missing) = validate_paths_on_server(&paths).await else {
+        return Ok(Vec::new());
+    };
+    missing.sort();
+
+    if missing.is_empty() {
+        return Ok(missing);
+    }
+    let mut kept = dirs;
+    let mut removed_default = false;
+    kept.retain(|d| {
+        if missing.contains(&d.path) {
             if d.is_default {
                 removed_default = true;
             }
+            false
+        } else {
+            true
         }
-        exists
     });
-
-    if removed_default && !dirs.is_empty() {
-        dirs[0].is_default = true;
+    if removed_default && !kept.is_empty() {
+        kept[0].is_default = true;
     }
-
-    if !removed.is_empty() {
-        save_workdirs_internal(&app, &dirs)?;
-    }
-
-    Ok(removed)
+    let _ = push_workdirs(&kept).await;
+    save_workdirs_internal(&app, &kept)?;
+    Ok(missing)
 }
 
-// ===== admAgent Server 模式 =====
+/// 调用 POST /v1/fs/validate，返回**不存在**的路径。服务端不可达时返回 None。
+async fn validate_paths_on_server(paths: &[String]) -> Option<Vec<String>> {
+    if paths.is_empty() {
+        return Some(Vec::new());
+    }
+    let client = agent_local_client()?;
+    let (status, body) = tokio::time::timeout(
+        Duration::from_secs(10),
+        agent_http::send(
+            &client,
+            "POST",
+            "/v1/fs/validate",
+            Some(serde_json::json!({ "paths": paths })),
+        ),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !(200..300).contains(&status) {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(&body).ok()?;
+    let mut missing = Vec::new();
+    if let Some(results) = value.get("results").and_then(|r| r.as_array()) {
+        for item in results {
+            let exists = item.get("exists").and_then(|v| v.as_bool()).unwrap_or(false);
+            let is_dir = item.get("is_dir").and_then(|v| v.as_bool()).unwrap_or(false);
+            if !exists || !is_dir {
+                if let Some(path) = item.get("path").and_then(|p| p.as_str()) {
+                    missing.push(path.to_string());
+                }
+            }
+        }
+    }
+    Some(missing)
+}
 
-/// admAgent server 启动信息
+// ===== 服务端连接（TCP + TLS）=====
+
+/// 服务端连接信息（连接成功并对某个 workspace 建好会话后返回）
 #[derive(Serialize)]
 pub struct AgentServerInfo {
-    /// 本地传输地址展示串（unix://… / npipe://…），多客户端共用同一默认地址
+    /// 服务端地址展示串（tcp://host:port）
     pub host: String,
     pub workspace_id: String,
     pub client_id: String,
 }
 
-/// admAgent server 状态
+/// 服务端连接状态
 #[derive(Serialize)]
 pub struct AgentServerStatus {
+    /// 是否已有可用的 workspace 会话（连接 + 会话都已建立）
     pub running: bool,
     pub host: Option<String>,
     pub workspace_id: Option<String>,
@@ -2057,26 +2128,19 @@ pub struct AgentServerStatus {
     pub client_id: Option<String>,
 }
 
-/// 会话可用判定：会话存在，且（共享 server 无子进程 或 自有子进程存活）
-/// 检查全局 admAgent server 子进程是否存活（已 pull 起子进程时）。
-/// 复用共享 server（无子进程）时返回 true（外部管理，假定存活）。
-fn server_process_alive(state: &AppState) -> bool {
-    let mut c = match state.agent_child.lock() { Ok(g) => g, Err(_) => return false };
-    match c.as_mut() {
-        Some(child) => matches!(child.try_wait(), Ok(None)),
-        None => true, // 共享 server，无子进程，假定存活
-    }
+/// 当前服务端目标；未配置时给出配置引导。
+/// 服务端由用户自行启动并手动配置，桌面端只做客户端，不再托管任何服务端进程。
+fn require_target() -> Result<TcpTarget, AppError> {
+    agent_http::active_target().ok_or_else(|| {
+        AppError::msg(
+            "尚未连接服务端：请在设置 → 服务端连接中粘贴服务端连接串，并自行启动 tigerAgent --host tcp://0.0.0.0:<端口>",
+        )
+    })
 }
 
-/// 供 ilink 桥读取当前激活的 workspace ID。
-pub fn current_agent_workspace(app: &tauri::AppHandle) -> Option<String> {
-    let state = app.state::<AppState>();
-    state.active_workspace_id.lock().ok().and_then(|g| g.clone())
-}
-
-/// 内部函数：停止 admAgent server，清理所有 workspace 会话和子进程
-fn stop_agent_server_internal(state: &tauri::State<'_, AppState>) -> Result<(), AppError> {
-    // 停止所有 workspace 的 SSE 转发任务
+/// 内部函数：断开所有 workspace 会话（停止 SSE 转发任务）。
+/// 服务端进程由用户自行管理，这里既不杀进程也不碰服务端状态。
+fn teardown_agent_sessions(state: &tauri::State<'_, AppState>) -> Result<(), AppError> {
     {
         let mut sessions = state.agent_sessions.lock().map_err(|e| e.to_string())?;
         for (_, sess) in sessions.iter() {
@@ -2086,20 +2150,6 @@ fn stop_agent_server_internal(state: &tauri::State<'_, AppState>) -> Result<(), 
         sessions.clear();
     }
     *state.active_workspace_id.lock().map_err(|e| e.to_string())? = None;
-    // 终止子进程（只杀本进程拉起的，共享 server 不杀）
-    let old_child = state.agent_child.lock().map_err(|e| e.to_string())?.take();
-    if let Some(mut child) = old_child {
-        #[cfg(target_os = "windows")]
-        {
-            if let Some(pid) = child.id() {
-                let pid_str = pid.to_string();
-                let _ = platform::create_hidden_command("taskkill")
-                    .args(["/PID", &pid_str, "/T", "/F"])
-                    .spawn();
-            }
-        }
-        let _ = child.start_kill();
-    }
     Ok(())
 }
 
@@ -2119,244 +2169,68 @@ fn generate_client_id(client_id: String) -> String {
     }
 }
 
-/// 启动 admAgent server 模式（默认本地传输：Unix socket / Windows named pipe）。
+/// 连接用户自行启动的服务端（TCP + TLS 1.3 + 服务端 SPKI pin + Bearer token），
+/// 建立 / 复用 workspace 会话并开始 SSE 转发。
 ///
-/// 多客户端共享：先探测默认传输地址上是否已有 server 在跑（本进程或其它客户端/
-/// 实例），有则直接复用（不 spawn、不占端口）；没有才拉起子进程。共享 server
-/// 的生命周期由服务端管理——最后一个工作区被 teardown 时自行退出。
+/// 与旧实现的关键差异：**不再拉起、探测或终止本地 Agent 进程**。连接串（地址、
+/// 服务端指纹、token）来自设置页（缺一项就解析失败），连不上就直接报错并
+/// 引导用户检查配置 / 启动服务，避免"桌面端偷偷起服务"这种不可见状态。
 #[tauri::command]
 pub async fn start_agent_server(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     client_id: String,
 ) -> Result<AgentServerInfo, AppError> {
-    // 覆盖完整异步启动流程的单飞锁。第二个并发调用必须等待第一个完成，
-    // 随后直接复用已启动的会话，不能再次 stop + spawn 产生孤儿进程。
+    // 连接流程单飞锁：并发调用只允许一个在建连，
+    // 后到者等待完成后直接复用已建好的会话。
     let _start_guard = state.agent_start_lock.lock().await;
 
-    // 启动模式解析（docs/tcp-tls-ed25519.md §11.2）：同机 local（sidecar + 本地传输）
-    // 或异机 remote（TCP + TLS 1.3 + Ed25519 双向认证）。解析结果写入全局 transport，
-    // 之后所有 default_host() 调用点改读 active_transport()。
-    let mode = crate::common::server_mode::apply(&app)?;
-    let remote = mode.is_remote();
-    let transport = match &mode {
-        crate::common::server_mode::ServerMode::Local => agent_http::active_transport(),
-        crate::common::server_mode::ServerMode::Remote(t) => AgentTransport::Tcp(Box::new(t.clone())),
-    };
-    crate::common::agent_http::set_active_transport(transport.clone());
+    // 只有连接串可解析（地址 + 指纹 + token 齐全）才能解析出目标；
+    // 解析结果同时写入全局 active target，供后续所有请求复用。
+    let target = crate::common::server_mode::apply(&app)?;
 
-    // 检查是否已有运行中的 workspace 会话（server 进程存活）。有则直接复用，
-    // 不再重复 spawn 或 stop。
+    // 已有活会话直接复用（同一进程内重复进入 Agent 页触发）
     {
         let active = state.active_workspace_id.lock().map(|g| g.clone()).unwrap_or(None);
         if let Some(ws_id) = active {
-            let has_session = state.agent_sessions.lock()
-                .map(|m| m.contains_key(&ws_id))
-                .unwrap_or(false);
-            // 远程模式没有本进程的子进程，存活判断以「已有会话」为准。
-            if has_session && (remote || server_process_alive(&state)) {
-                let client_id = state.agent_sessions.lock().unwrap_or_else(|e| e.into_inner())
-                    .get(&ws_id).map(|s| s.client_id.clone()).unwrap_or_default();
-                return Ok(AgentServerInfo {
-                    host: transport.display(),
-                    workspace_id: ws_id,
-                    client_id,
-                });
+            if let Ok(sessions) = state.agent_sessions.lock() {
+                if let Some(sess) = sessions.get(&ws_id) {
+                    return Ok(AgentServerInfo {
+                        host: target.display(),
+                        workspace_id: ws_id,
+                        client_id: sess.client_id.clone(),
+                    });
+                }
             }
         }
     }
-    stop_agent_server_internal(&state)?;
+    teardown_agent_sessions(&state)?;
 
-    // 桌面端默认不打包服务端：本地模式先看程序目录（历史安装/可选打包），
-    // 再从 PATH 找用户自行安装的 admAgent / tigerAgent。
-    let bundled_agent = adm_agent_path(&app).unwrap_or_default();
-    let agent_path = resolve_local_agent(&app);
-    let is_bundled_agent = !bundled_agent.as_os_str().is_empty() && bundled_agent == agent_path;
-    if !remote && !agent_path.exists() {
-        // 没有可执行文件也可能已经有一个独立安装的 server 在跑：先探一次再报错。
-        let probe = build_client(&transport, Duration::from_secs(2))
-            .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
-        if !health_check(&probe).await {
-            bail!(
-                "未找到 admAgent 服务端：桌面端默认不打包服务端。请先安装 admAgent 并加入 PATH（或放入程序目录），或在设置 → 服务端连接中改用远程模式"
-            );
-        }
-    }
-
-    let workdir = load_agent_workdir(&app);
-
-    // 子进程工作目录：Windows 用二进制所在目录（exe 根目录，可写）；
-    // macOS/Linux 二进制落在只读位置（Tiger.app/Contents/MacOS、deb 的 /usr/bin、
-    // AppImage 的只读挂载点），改用 app_data_dir，避免任何潜在的「在 bundle 内写文件」
-    // 行为（配置在 ~/.config/admAgent、工作区靠 --cwd，均不依赖 cwd）。
-    // 该目录同时作为「未配置工作目录」时创建 workspace 的默认路径：必须与子进程实际
-    // 工作目录一致，否则模型读写文件的目录（workspace path）与用户认知分叉。
-    let process_cwd = {
-        #[cfg(not(target_os = "windows"))]
-        {
-            config::get_data_dir(Some(&app))
-                .map(|d| d.to_string_lossy().to_string())
-                .unwrap_or_else(|_| ".".to_string())
-        }
-        #[cfg(target_os = "windows")]
-        {
-            if remote || !is_bundled_agent {
-                // 远程模式没有子进程；非内置服务端可能装在只读目录（Program Files），
-                // 工作目录改用 app_data_dir，与服务端靠 --cwd 对齐。
-                config::get_data_dir(Some(&app))
-                    .map(|d| d.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| ".".to_string())
-            } else {
-                agent_path
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|| ".".to_string())
-            }
-        }
-    };
-
-    eprintln!("[admAgent] {} 模式，传输 {}", if remote { "远程" } else { "本地" }, transport.display());
-
-    // 探测默认传输：已有 server 在跑则直接复用（多客户端共享同一 server）
-    let probe_client = build_client(&transport, Duration::from_secs(2))
+    // 探活：连不上就明确说明「服务端没启动 / 地址不可达 / 指纹或 token 不一致」，
+    // 不再像本地模式那样尝试拉起进程。
+    let probe = build_client(&target, Duration::from_secs(5))
         .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
-    let mut child: Option<tokio::process::Child> = if remote {
-        // 远程模式只连不拉：不 spawn sidecar，也不根据探活结果判断“服务端未启动”。
-        None
-    } else if health_check(&probe_client).await {
-        eprintln!("[admAgent] 检测到已运行的 admAgent server，直接复用");
-        None
-    } else {
-        // 没有运行中的 server：拉起子进程（不传 --host，服务端绑定平台默认传输）
-        let mut cmd = tokio::process::Command::new(&agent_path);
-        cmd.arg("server");
-        if !workdir.is_empty() {
-            cmd.arg("--cwd").arg(&workdir);
-        }
-        // macOS/Linux 上 Rust 默认配置目录（~/.config/admAgent）与 Go server 的
-        // GlobalConfigData（~/.local/share/admAgent）不一致，注入 ADMAGENT_GLOBAL_DATA
-        // 让 server 读写与桌面端同步（agent_proxy / agent_vision_model 等顶层字段）
-        // 相同的文件。Windows 两侧路径本就一致，无需注入。
-        #[cfg(not(target_os = "windows"))]
-        if let Ok(dir) = adm_agent_config_dir() {
-            cmd.env("ADMAGENT_GLOBAL_DATA", dir);
-        }
-        // 启动流程在健康检查/工作区创建阶段失败时自动终止子进程，避免错误路径留下孤儿。
-        cmd.kill_on_drop(true);
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-        cmd.current_dir(&process_cwd);
-
-        #[cfg(target_os = "windows")]
-        {
-            #[allow(unused_imports)]
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000);
-        }
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("启动 admAgent server 失败: {}", e))?;
-
-        // 后台读取 stdout/stderr 用于日志记录，同时 emit "model-log" 事件到全局启动日志
-        let app_for_stdout = app.clone();
-        if let Some(stdout) = child.stdout.take() {
-            tokio::spawn(async move {
-                use tokio::io::AsyncReadExt;
-                let mut stdout = stdout;
-                let mut buf = [0u8; 4096];
-                loop {
-                    match stdout.read(&mut buf).await {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            let text = String::from_utf8_lossy(&buf[..n]);
-                            for line in text.lines() {
-                                if line.is_empty() { continue; }
-                                eprintln!("[admAgent server] {}", line);
-                                app_for_stdout.emit("model-log",
-                                    serde_json::json!({ "line": format!("[Agent] {}", line), "source": "stdout" })).ok();
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-        }
-        let app_for_stderr = app.clone();
-        if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(async move {
-                use tokio::io::AsyncReadExt;
-                let mut stderr = stderr;
-                let mut buf = [0u8; 4096];
-                loop {
-                    match stderr.read(&mut buf).await {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            let text = String::from_utf8_lossy(&buf[..n]);
-                            for line in text.lines() {
-                                if line.is_empty() { continue; }
-                                eprintln!("[admAgent server ERROR] {}", line);
-                                app_for_stderr.emit("model-log",
-                                    serde_json::json!({ "line": format!("[Agent] {}", line), "source": "stderr" })).ok();
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-        }
-        Some(child)
-    };
-
-    // 轮询健康检查端点，等待 server 就绪（5 秒）。若 spawn 后检测到 server 已可连
-    // （并发启动的其它实例抢先 bind 成功、本进程子进程随即退出），视为复用成功。
-    // 5s 阈值已远大于实测冷启动 (~1-2s)；从 15s 缩短是为让「真启动失败」更快暴露，
-    // 避免前端空白页面等过久。
-    {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if health_check(&probe_client).await {
-                break;
-            }
-            if let Some(c) = child.as_mut() {
-                if let Ok(Some(_)) = c.try_wait() {
-                    // 子进程已退出：再探一次，可连 = 并发复用；不可连 = 启动失败
-                    if health_check(&probe_client).await {
-                        child = None;
-                        break;
-                    }
-                    bail!("admAgent server 进程已意外退出，退出码: 见上方日志");
-                }
-            }
-            if tokio::time::Instant::now() > deadline {
-                if remote {
-                    bail!(
-                        "无法连接远程服务端（{}）：请确认地址可达、服务端指纹正确，且本设备已执行 tigerAgent pair --approve",
-                        transport.display()
-                    );
-                }
-                bail!("等待 admAgent server 启动超时（5秒），请检查 admAgent 是否正常");
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
+    if !health_check(&probe).await {
+        bail!(
+            "无法连接服务端（{}）：请确认服务端已启动（tigerAgent --host tcp://0.0.0.0:<端口>）、地址可达、连接串里的指纹与 token 与当前服务端一致",
+            target.display()
+        );
     }
+    eprintln!("[Agent] 已连接服务端 {}", target.display());
 
     // 使用前端传入的 client_id，确保 SSE 流、POST /v1/workspaces、
     // current-session 全用同一个 client_id（Go 服务端要求 current-session
     // 的 client_id 已挂活跃 SSE 流，否则返回 404 client not attached）。
     let client_id = generate_client_id(client_id);
 
-    let workspace_id = {
-        let client = build_client(&transport, Duration::from_secs(5))
-            .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+    // 工作目录在服务端解析（远程模式桌面端只是操作界面）：配置过的路径按服务端
+    // 视角解释；未配置时发 "."，由服务端按其自身 cwd 建工作区。
+    let workdir = load_agent_workdir(&app);
+    let workspace_path = if workdir.is_empty() { ".".to_string() } else { workdir };
 
-        let workdir_for_api = if workdir.is_empty() {
-            // 未配置工作目录：用子进程实际工作目录（= 模型读写文件的目录），
-            // 保证 workspace path 与模型操作目录一致，不用 Tiger 主进程 cwd。
-            process_cwd.clone()
-        } else {
-            workdir.clone()
-        };
+    let workspace_id = {
+        let client = build_client(&target, Duration::from_secs(5))
+            .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
 
         let (status, bytes) = tokio::time::timeout(
             Duration::from_secs(10),
@@ -2364,14 +2238,14 @@ pub async fn start_agent_server(
                 &client,
                 "POST",
                 "/v1/workspaces",
-                Some(serde_json::json!({ "path": workdir_for_api, "client_id": &client_id })),
+                Some(serde_json::json!({ "path": &workspace_path, "client_id": &client_id })),
             ),
         )
         .await
         .map_err(|_| "创建工作区超时".to_string())?
         .map_err(|e| format!("创建工作区失败: {}", e))?;
         if !(200..300).contains(&status) {
-            bail!("创建工作区失败: HTTP {}", status);
+            bail!("创建工作区失败: HTTP {}（请确认该路径在服务端存在：{}）", status, workspace_path);
         }
         let body: serde_json::Value =
             serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}));
@@ -2387,18 +2261,11 @@ pub async fn start_agent_server(
     let ws_id = workspace_id.clone();
     let cid = client_id.clone();
     let sse_stop2 = sse_stop.clone();
-    let t2 = transport.clone();
+    let t2 = target.clone();
     let sse_task = tokio::spawn(async move {
         let _ = forward_sse_events(&app2, &t2, &ws_id, &cid, sse_stop2).await;
     });
 
-    // 全局子进程只存一次（共享 server）
-    {
-        let mut c = state.agent_child.lock().map_err(|e| e.to_string())?;
-        if c.is_none() {
-            *c = child;
-        }
-    }
     // 注册 workspace 会话
     {
         let mut sessions = state.agent_sessions.lock().map_err(|e| e.to_string())?;
@@ -2412,47 +2279,60 @@ pub async fn start_agent_server(
     // 设为激活 workspace
     *state.active_workspace_id.lock().map_err(|e| e.to_string())? = Some(workspace_id.clone());
 
-    let host = transport.display();
+    let host = target.display();
     app.emit("agent-server-ready",
         serde_json::json!({ "host": host, "workspace_id": &workspace_id })).ok();
 
     Ok(AgentServerInfo { host, workspace_id, client_id })
 }
 
+/// 连续建连失败达到该次数才通知前端（3s 一次 ≈ 15s），避免瞬时抖动就弹错。
+const SSE_FAILURE_NOTIFY_THRESHOLD: u32 = 5;
+
 async fn forward_sse_events(
-    app: &tauri::AppHandle, transport: &AgentTransport, workspace_id: &str, client_id: &str, stop: Arc<AtomicBool>,
+    app: &tauri::AppHandle, target: &TcpTarget, workspace_id: &str, client_id: &str, stop: Arc<AtomicBool>,
 ) -> Result<(), AppError> {
     let path = format!("/v1/workspaces/{}/events?client_id={}", workspace_id, client_id);
     println!("[agent] forward_sse_events URL: {}", path);
     // SSE 是无限期长连接：只能限制建连耗时，绝不能给流本身设总超时（同原注释：
     // workspace 靠 SSE 流引用计数存活，最后一条流断开会立即 teardown workspace，
     // 触发 server 自身退出 —— "连接一断，服务即死"）。
-    let client = build_client(transport, Duration::from_secs(5))
+    let client = build_client(target, Duration::from_secs(5))
         .map_err(|e| format!("创建 SSE 客户端失败: {}", e))?;
 
+    // 服务端由用户自行启动：桌面端无法探测它的进程状态，只能按重试结果判断
+    // “连接已断开”，所以连续失败达阈值时通知前端提示用户去检查服务端。
+    let mut failures = 0u32;
     loop {
         if stop.load(Ordering::Relaxed) { return Ok(()); }
         let (status, body) = match agent_http::stream_get(&client, &path).await {
             Ok(r) => r,
             Err(e) => {
                 if stop.load(Ordering::Relaxed) { return Ok(()); }
-                // 连不上时检查 admAgent 进程是否已退出：已退出则通知前端自愈重启，
-                // 避免在死进程上无限空转、前端只能看到 "admAgent server 未运行"
-                if agent_process_exited(app) {
-                    println!("[agent] forward_sse_events: admAgent 进程已退出，通知前端自动重启");
-                    api_debug_log(|| "SSE ! admAgent 进程已退出，通知前端自动重启".to_string());
-                    let _ = app.emit("agent-server-died", serde_json::json!({}));
-                    return Ok(());
+                failures += 1;
+                println!("[agent] forward_sse_events 连接失败({}): {}", failures, e);
+                api_debug_log(|| format!("SSE ! 连接失败({}): {}", failures, e));
+                if failures == SSE_FAILURE_NOTIFY_THRESHOLD {
+                    let _ = app.emit(
+                        "agent-connection-lost",
+                        serde_json::json!({ "target": target.display() }),
+                    );
                 }
-                println!("[agent] forward_sse_events 连接失败: {}", e);
-                api_debug_log(|| format!("SSE ! 连接失败: {}", e));
                 tokio::time::sleep(Duration::from_secs(3)).await; continue;
             }
         };
         if !(200..300).contains(&status) {
-            println!("[agent] forward_sse_events HTTP {}", status);
+            failures += 1;
+            println!("[agent] forward_sse_events HTTP {} (失败 {})", status, failures);
+            if failures == SSE_FAILURE_NOTIFY_THRESHOLD {
+                let _ = app.emit(
+                    "agent-connection-lost",
+                    serde_json::json!({ "target": target.display(), "status": status }),
+                );
+            }
             tokio::time::sleep(Duration::from_secs(3)).await; continue;
         }
+        failures = 0;
         println!("[agent] forward_sse_events SSE 已连接 workspace: {}", workspace_id);
         api_debug_log(|| format!("SSE = 已连接 workspace={} client={}", workspace_id, client_id));
 
@@ -2513,7 +2393,7 @@ async fn forward_sse_events(
                 }
             }
         }
-        // 流断开后立即重连：admAgent 在最后一条 SSE 流断开的瞬间就会 teardown workspace，
+        // 流断开后立即重连：Agent 在最后一条 SSE 流断开的瞬间就会 teardown workspace，
         // 任何等待都在扩大 server 自杀的竞争窗口
         if !stop.load(Ordering::Relaxed) {
             println!("[agent] forward_sse_events 流断开，立即重连");
@@ -2522,20 +2402,7 @@ async fn forward_sse_events(
     }
 }
 
-/// 检查 admAgent server 子进程是否已退出（供 SSE 转发循环的自愈判断）。
-/// 会话已被清理（正常 stop 流程）时返回 false，由 sse_stop 标志让循环自行退出。
-/// 复用的共享 server（无子进程）无法探测进程状态，返回 true 让前端尝试重启：
-/// start_agent_server 会先探活，真死才重新拉起，活着的共享 server 不受影响。
-fn agent_process_exited(app: &tauri::AppHandle) -> bool {
-    let state = app.state::<AppState>();
-    let mut c = match state.agent_child.lock() { Ok(g) => g, Err(_) => return false };
-    match c.as_mut() {
-        Some(child) => matches!(child.try_wait(), Ok(Some(_))),
-        None => true, // 共享 server 无子进程，无法探测；返回 true 让前端尝试重启（start_agent_server 会先探活）
-    }
-}
-
-// ===== 调试模式：admAgent API 交互日志（运行时开关，正式发布版也可用）=====
+// ===== 调试模式：Agent API 交互日志（运行时开关，正式发布版也可用）=====
 //
 // 由设置里的“调试模式”开关控制（Settings.debug_logging，持久化到
 // config.json）：启动时恢复、前端实时切换。关闭时 log_enabled 为 false，
@@ -2543,10 +2410,6 @@ fn agent_process_exited(app: &tauri::AppHandle) -> bool {
 
 static LOG_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// 调试日志是否已开启（供 ilink.rs 的 flow_log 复用同一开关）
-pub fn is_debug_logging_enabled() -> bool {
-    LOG_ENABLED.load(Ordering::Relaxed)
-}
 // 日志文件句柄：None = 尚未打开 / 打开失败。开关打开时截断重建，
 // 为“每次重启软件自动清空上次日志”：重启后首次 enable 时 File::create 截断。
 static LOG_FILE: std::sync::OnceLock<std::sync::Mutex<Option<std::fs::File>>> = std::sync::OnceLock::new();
@@ -2555,12 +2418,12 @@ fn log_file_cell() -> &'static std::sync::Mutex<Option<std::fs::File>> {
     LOG_FILE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
-/// 调试日志文件路径：app 数据目录（与 config.json 同处）下的 adm_api_debug.log。
+/// 调试日志文件路径：app 数据目录（与 config.json 同处）下的 tigerAgent_debug.log。
 /// 不用 exe 同目录：正式安装下 Windows 的 Program Files 不可写、macOS 会污染
 /// .app 签名；app 数据目录始终可写且不影响安装包完整性。
 fn api_debug_log_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     let dir = config::get_data_dir(Some(app)).ok()?;
-    Some(dir.join("adm_api_debug.log"))
+    Some(dir.join("tigerAgent_debug.log"))
 }
 
 /// 开启调试日志：首次开启（含重启后）截断重建日志文件（清空上次），
@@ -2600,7 +2463,7 @@ fn api_log_snippet(s: &str, max: usize) -> String {
 }
 
 /// 将 JSON Value 中包含敏感关键词的 key（api_key/secret/password/token）的值替换为 "***"，
-/// 用于 HTTP 请求体日志脱敏，避免 API Key 等凭据明文写入 adm_api_debug.log。
+/// 用于 HTTP 请求体日志脱敏，避免 API Key 等凭据明文写入 tigerAgent_debug.log。
 fn mask_sensitive_json(value: &serde_json::Value) -> String {
     let mut v = value.clone();
     mask_sensitive_in_place(&mut v);
@@ -2654,7 +2517,7 @@ fn mask_sensitive_in_place(value: &mut serde_json::Value) {
     }
 }
 
-/// 写一条 admAgent API 交互日志。开关关闭时一次 atomic load 即返回（闭包
+/// 写一条 Agent API 交互日志。开关关闭时一次 atomic load 即返回（闭包
 /// 不执行，无格式化开销）。与 devtools 控制台的 [agent] API / SSE 日志对应：
 /// 所有前端请求都经 agent_http_request 代理、所有 SSE 事件都经
 /// forward_sse_events 转发，在这两处落盘即可完整复盘对话中断问题。
@@ -2760,26 +2623,26 @@ fn summarize_sse_event(payload: &serde_json::Value) -> Option<String> {
 
 #[tauri::command]
 pub async fn stop_agent_server(state: tauri::State<'_, AppState>) -> Result<(), AppError> {
-    // 与启动共用同一把锁，避免启动尚未登记 session 时 stop 无效、随后进程又冒出来。
+    // 与建连共用同一把锁，避免建连尚未登记 session 时 stop 无效。
+    // 只断开连接（停 SSE / 清会话），不会去结束用户自行启动的服务端进程。
     let _start_guard = state.agent_start_lock.lock().await;
-    stop_agent_server_internal(&state)
+    teardown_agent_sessions(&state)
 }
 
 #[tauri::command]
 pub async fn get_agent_server_status(state: tauri::State<'_, AppState>) -> Result<AgentServerStatus, AppError> {
     let active = state.active_workspace_id.lock().map(|g| g.clone()).unwrap_or(None);
-    let running = server_process_alive(&state) && active.is_some();
-    let client_id = if running {
+    let client_id = if let Some(ws_id) = active.as_ref() {
         let sessions = state.agent_sessions.lock().map_err(|e| e.to_string())?;
-        active.as_ref()
-            .and_then(|ws_id| sessions.get(ws_id))
-            .map(|s| s.client_id.clone())
+        sessions.get(ws_id).map(|s| s.client_id.clone())
     } else {
         None
     };
+    // running 只代表「本进程已建好 workspace 会话」，不再代表本地服务进程存活
+    let running = client_id.is_some();
     Ok(AgentServerStatus {
         running,
-        host: Some(agent_http::active_transport().display()),
+        host: agent_http::active_target().map(|t| t.display()),
         workspace_id: active,
         client_id,
     })
@@ -2787,11 +2650,9 @@ pub async fn get_agent_server_status(state: tauri::State<'_, AppState>) -> Resul
 
 #[tauri::command]
 pub async fn agent_http_request(
-    state: tauri::State<'_, AppState>, method: String, path: String, body: Option<serde_json::Value>,
+    _state: tauri::State<'_, AppState>, method: String, path: String, body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, AppError> {
-    if !server_process_alive(&state) {
-        bail!("admAgent server 未运行");
-    }
+    let target = require_target()?;
     let started = std::time::Instant::now();
     // 只读 GET 多为高频轮询（每轮 run 后刷 /agent /sessions /messages），是主噪音：
     // 成功时不记，只在出错时留痕；改状态的操作（发消息/切模式/权限）才记请求行。
@@ -2803,9 +2664,9 @@ pub async fn agent_http_request(
             body.as_ref().map(|b| format!(" body={}", mask_sensitive_json(b))).unwrap_or_default()
         ));
     }
-    let client = build_client(&agent_http::active_transport(), Duration::from_secs(5))
+    let client = build_client(&target, Duration::from_secs(5))
         .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
-    // 180s：与 admAgent 服务端图片直调识别的整体超时（describeOverallTimeout）
+    // 180s：与 Agent 服务端图片直调识别的整体超时（describeOverallTimeout）
     // 保持一致——识别在 HTTP 超时前返回或降级，避免“前端报错、后台继续跑”。
     let (status, bytes) = tokio::time::timeout(
         Duration::from_secs(180),
@@ -2851,132 +2712,6 @@ pub async fn agent_http_request(
     bail!("HTTP {} {} {}: {}", status, method.to_uppercase(), path, snippet);
 }
 
-/// 读取 workspace 的跨会话项目记忆（project_memory.json）。
-/// admAgent 每次上下文压缩时会把 durable 的 constraint/decision anchors 同步进
-/// `{workspace data_dir}/project_memory.json`（与 rail3.db 同级）。本命令先从
-/// admAgent 取 workspace 的 data_dir，再读取该文件，仅用于前端只读展示。
-/// 文件不存在或为空返回空数组。
-#[tauri::command]
-pub async fn read_project_memory(
-    state: tauri::State<'_, AppState>,
-    workspace_id: String,
-) -> Result<serde_json::Value, AppError> {
-    let data_dir = fetch_workspace_data_dir(&state, &workspace_id).await?;
-    if data_dir.is_empty() {
-        return Ok(serde_json::json!([]));
-    }
-
-    let path = std::path::Path::new(&data_dir).join("project_memory.json");
-    match std::fs::read_to_string(&path) {
-        Ok(content) => {
-            // 文件存在但内容非法/为空时按空处理，绝不让展示层报错
-            Ok(serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!([])))
-        }
-        Err(_) => Ok(serde_json::json!([])),
-    }
-}
-
-// 取 workspace 的 data_dir（admAgent 侧维护，project_memory.json 与其同级）。
-// server 未运行、超时或响应异常时返回错误。
-async fn fetch_workspace_data_dir(
-    state: &tauri::State<'_, AppState>,
-    workspace_id: &str,
-) -> Result<String, AppError> {
-    if !server_process_alive(state) {
-        bail!("admAgent server 未运行");
-    }
-    let client = build_client(&agent_http::active_transport(), Duration::from_secs(5))
-        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
-    let (status, bytes) = tokio::time::timeout(
-        Duration::from_secs(30),
-        agent_http::send(&client, "GET", &format!("/v1/workspaces/{}", workspace_id), None),
-    )
-    .await
-    .map_err(|_| "获取 workspace 信息超时".to_string())?
-    .map_err(|e| format!("HTTP 请求失败: {}", e))?;
-    if !(200..300).contains(&status) {
-        bail!("HTTP {} 获取 workspace 信息失败", status);
-    }
-    let ws: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("解析 workspace 响应失败: {}", e))?;
-    Ok(ws.get("data_dir").and_then(|v| v.as_str()).unwrap_or("").to_string())
-}
-
-/// 新增/修改/删除 workspace 的项目记忆（写 project_memory.json）。
-/// 前端以「完整 anchor 数组」整表提交（新增/修改/删除在数组上完成后落盘），
-/// Rust 侧负责：过滤非法条目（非 constraint/decision、value 为空）、按 key
-/// （kind:value）去重、补齐 key/updated_at，并原子写盘（.tmp + rename，与
-/// admAgent Sync 的写法一致，避免写入半截文件）。
-/// 注意：admAgent 每次上下文压缩仍会把内存中持有的持久 anchors 合并回写本文件，
-/// 因此手工删除的条目可能被之后的压缩重新沉淀（同名条目以下次沉淀为准）。
-#[tauri::command]
-pub async fn update_project_memory(
-    state: tauri::State<'_, AppState>,
-    workspace_id: String,
-    anchors: serde_json::Value,
-) -> Result<(), AppError> {
-    let data_dir = fetch_workspace_data_dir(&state, &workspace_id).await?;
-    if data_dir.is_empty() {
-        bail!("workspace data_dir 为空");
-    }
-
-    let arr = anchors.as_array().ok_or("anchors 必须是数组")?;
-    let mut out: Vec<serde_json::Value> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // admAgent 侧锚点的时间戳是 unix 秒（time.Now().Unix()），保持一致
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    for item in arr {
-        let Some(obj) = item.as_object() else {
-            continue;
-        };
-        let kind = obj.get("kind").and_then(|v| v.as_str()).unwrap_or("constraint");
-        if kind != "constraint" && kind != "decision" {
-            continue;
-        }
-        let value = obj.get("value").and_then(|v| v.as_str()).unwrap_or("").trim();
-        if value.is_empty() {
-            continue;
-        }
-        let key = obj.get("key").and_then(|v| v.as_str()).filter(|k| !k.trim().is_empty())
-            .map(|k| k.trim().to_string())
-            .unwrap_or_else(|| format!("{}:{}", kind, value));
-        if !seen.insert(key.clone()) {
-            continue;
-        }
-        let mut o = serde_json::Map::new();
-        o.insert("kind".into(), serde_json::json!(kind));
-        o.insert("key".into(), serde_json::json!(key));
-        o.insert("value".into(), serde_json::json!(value));
-        if let Some(why) = obj.get("why").and_then(|v| v.as_str()) {
-            let why = why.trim();
-            if !why.is_empty() {
-                o.insert("why".into(), serde_json::json!(why));
-            }
-        }
-        if let Some(src) = obj.get("source").and_then(|v| v.as_str()) {
-            if !src.is_empty() {
-                o.insert("source".into(), serde_json::json!(src));
-            }
-        }
-        if let Some(sal) = obj.get("salience").and_then(|v| v.as_f64()) {
-            o.insert("salience".into(), serde_json::json!(sal));
-        }
-        o.insert("updated_at".into(), serde_json::json!(now));
-        out.push(serde_json::Value::Object(o));
-    }
-
-    let path = std::path::Path::new(&data_dir).join("project_memory.json");
-    let dir = path.parent().ok_or("project_memory.json 所在目录无效")?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("创建目录失败: {}", e))?;
-    let tmp = dir.join(format!("project_memory.json.{}.tmp", std::process::id()));
-    let data = serde_json::to_vec_pretty(&out).map_err(|e| format!("序列化失败: {}", e))?;
-    std::fs::write(&tmp, &data).map_err(|e| format!("写入临时文件失败: {}", e))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("写入失败: {}", e))?;
-    Ok(())
-}
 
 #[tauri::command]
 pub async fn agent_subscribe_events(
@@ -2991,7 +2726,7 @@ pub async fn agent_subscribe_events(
     // 同 workspace 重复订阅（页面挂载/断线重连）：若已有活 SSE 转发任务，直接复用。
     // 绝不能 abort 活任务——abort 产生零流间隙，服务端 streams 计数归零立即
     // teardown 该 workspace；若它是最后一个 workspace，整个 server 自杀退出
-    // （表现为 "admAgent 服务异常退出" + 反复重启循环）。
+    // （表现为 "Agent 服务异常退出" + 反复重启循环）。
     // forward_sse_events 自带断线自愈循环，无需重建。
     if let Some(task) = &sess.sse_task {
         if !task.is_finished() {
@@ -3005,12 +2740,20 @@ pub async fn agent_subscribe_events(
     let new_sse_stop = Arc::new(AtomicBool::new(false));
     sess.sse_stop = new_sse_stop.clone();
 
-    let transport = agent_http::active_transport();
+    // 服务端目标由设置页配置，未配置时无法重建 SSE
+    let target = match agent_http::active_target() {
+        Some(t) => t,
+        None => {
+            return Err(AppError::msg(
+                "尚未连接服务端：请先在设置 → 服务端连接中完成配置",
+            ))
+        }
+    };
 
     // 启动新的 SSE 转发任务
     let app2 = app.clone();
     sess.sse_task = Some(tokio::spawn(async move {
-        let _ = forward_sse_events(&app2, &transport, &workspace_id, &client_id, new_sse_stop).await;
+        let _ = forward_sse_events(&app2, &target, &workspace_id, &client_id, new_sse_stop).await;
     }));
 
     Ok(())
@@ -3018,7 +2761,7 @@ pub async fn agent_subscribe_events(
 
 
 pub fn kill_agent_session(state: &AppState) {
-    // 停止所有 workspace 的 SSE 任务
+    // 只断开本进程的会话/流；用户自行启动的服务端进程不受影响
     if let Ok(mut sessions) = state.agent_sessions.lock() {
         for (_, sess) in sessions.iter() {
             sess.sse_stop.store(true, Ordering::Relaxed);
@@ -3026,23 +2769,11 @@ pub fn kill_agent_session(state: &AppState) {
         }
         sessions.clear();
     }
-    // 终止子进程
-    let old_child = state.agent_child.lock().ok().and_then(|mut g| g.take());
-    if let Some(mut child) = old_child {
-        #[cfg(target_os = "windows")]
-        {
-            if let Some(pid) = child.id() {
-                let pid_str = pid.to_string();
-                let _ = platform::create_hidden_command("taskkill").args(["/PID", &pid_str, "/T", "/F"]).spawn();
-            }
-        }
-        let _ = child.start_kill();
-    }
 }
 
 // ===== 新增：多 workspace 管理命令 =====
 
-/// 在已运行的 admAgent server 上创建新 workspace 并启动独立 SSE 转发。
+/// 在已运行的 Agent server 上创建新 workspace 并启动独立 SSE 转发。
 /// 不影响已有 workspace 的运行。
 #[tauri::command]
 pub async fn create_workspace(
@@ -3051,17 +2782,14 @@ pub async fn create_workspace(
     path: String,
     client_id: String,
 ) -> Result<AgentServerInfo, AppError> {
-    // 持有启动锁：避免与 start_agent_server 并发时 server 尚未就绪导致连接失败
+    // 持有建连锁：避免与 start_agent_server 并发时目标尚未解析导致连接失败
     let _guard = state.agent_start_lock.lock().await;
-    if !server_process_alive(&state) {
-        bail!("admAgent server 未运行");
-    }
+    let target = require_target()?;
 
-    let transport = agent_http::active_transport();
     // 使用前端传入的 client_id（同 start_agent_server）
     let client_id = generate_client_id(client_id);
 
-    let client = build_client(&transport, Duration::from_secs(5))
+    let client = build_client(&target, Duration::from_secs(5))
         .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
 
     let (status, bytes) = tokio::time::timeout(
@@ -3097,7 +2825,7 @@ pub async fn create_workspace(
                 if !task.is_finished() {
                     // 已有活任务，直接复用（保持原有 client_id，SSE 流不变）
                     return Ok(AgentServerInfo {
-                        host: agent_http::active_transport().display(),
+                        host: target.display(),
                         workspace_id: workspace_id.clone(),
                         client_id: existing.client_id.clone(),
                     });
@@ -3113,7 +2841,7 @@ pub async fn create_workspace(
     let ws_id = workspace_id.clone();
     let cid = client_id.clone();
     let sse_stop2 = sse_stop.clone();
-    let t2 = transport.clone();
+    let t2 = target.clone();
     let sse_task = tokio::spawn(async move {
         let _ = forward_sse_events(&app2, &t2, &ws_id, &cid, sse_stop2).await;
     });
@@ -3129,7 +2857,7 @@ pub async fn create_workspace(
         });
     }
 
-    let host = transport.display();
+    let host = target.display();
     Ok(AgentServerInfo { host, workspace_id, client_id })
 }
 
@@ -3150,33 +2878,9 @@ pub async fn switch_workspace(
 
 // ===== 日志管理 =====
 
-/// 弹出系统目录选择对话框，返回用户选择的目录路径
-#[tauri::command]
-pub async fn pick_workdir_folder(app: tauri::AppHandle) -> Result<String, AppError> {
-    use tauri_plugin_dialog::DialogExt;
-
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .file()
-        .pick_folder(move |path| {
-            let _ = tx.send(path);
-        });
-
-    let path = rx
-        .await
-        .map_err(|_| "选择目录对话框失败".to_string())?;
-    let path = path.ok_or_else(|| "用户取消了选择".to_string())?;
-
-    let path = path
-        .into_path()
-        .map_err(|e| format!("无法获取目录路径: {}", e))?;
-
-    Ok(path.to_string_lossy().to_string())
-}
-
 /// 启动时根据持久化设置恢复调试日志开关（config.json 的 debug_logging）。
 /// 开启时截断重建日志文件 —— 实现“每次重启软件自动清空上次日志”。
-/// 在 setup 阶段调用，早于任何 admAgent 交互。
+/// 在 setup 阶段调用，早于任何 Agent 交互。
 pub fn init_debug_logging(app: &tauri::AppHandle) {
     let data_dir = match config::get_data_dir(Some(app)) {
         Ok(d) => d,
@@ -3209,7 +2913,7 @@ pub async fn set_debug_logging(app: tauri::AppHandle, enabled: bool) -> Result<S
     }
 }
 
-/// 前端调试日志写入：让 JS 端把关键事件写到 adm_api_debug.log，
+/// 前端调试日志写入：让 JS 端把关键事件写到 tigerAgent_debug.log，
 /// 与 Rust 端的 api_debug_log 统一格式、统一文件。
 /// 仅在 debug_logging 开启时写入（与 api_debug_log 同一个开关）。
 #[tauri::command]
@@ -3271,104 +2975,7 @@ pub fn is_directory(path: String) -> bool {
     std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false)
 }
 
-/// 撤销能力探测所需的 git 状态。
-///
-/// `git_installed=false` 与 `is_repo=false` 是两回事，前端提示语要分开写：
-/// 前者是机器上没装 git，后者是装了但该目录（及其父目录）不是仓库。
-#[derive(Serialize)]
-pub struct GitRepoInfo {
-    pub git_installed: bool,
-    pub is_repo: bool,
-}
 
-/// 判断工作目录是否处于 git 仓库内。
-///
-/// admAgent 的「撤销」靠每轮开始前的 git 工作树快照回退文件改动（internal/undo），
-/// 非仓库目录根本不会采集快照，撤销只能删消息、文件改动会留在地上。桌面端据此在
-/// 确认弹窗里如实提示，避免用户以为文件也回退了。
-///
-/// 用 `git rev-parse --is-inside-work-tree` 而不是只看 `.git` 目录：工作目录可能是
-/// 仓库的子目录，`.git` 也可能是个文件（worktree / submodule）。
-#[tauri::command]
-pub fn check_git_repo(path: String) -> GitRepoInfo {
-    let dir = PathBuf::from(&path);
-    let not_repo = GitRepoInfo {
-        git_installed: true,
-        is_repo: false,
-    };
-    if !dir.is_dir() {
-        return not_repo;
-    }
-    match platform::create_hidden_command("git")
-        .arg("rev-parse")
-        .arg("--is-inside-work-tree")
-        .current_dir(&dir)
-        .output()
-    {
-        Ok(out) => GitRepoInfo {
-            git_installed: true,
-            is_repo: out.status.success()
-                && String::from_utf8_lossy(&out.stdout).trim() == "true",
-        },
-        // spawn 失败且 NotFound = 机器上没装 git（或不在 PATH 里）
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => GitRepoInfo {
-            git_installed: false,
-            is_repo: false,
-        },
-        // 其它错误（权限、路径异常等）按「有 git、但探测不到仓库」处理
-        Err(_) => not_repo,
-    }
-}
-
-/// 把前端传入的 base64 附件内容写入持久附件目录，返回磁盘绝对路径。
-/// 所有附件（文本/图片，不再区分大小）统一落盘传路径，由 coordinator 收集路径
-/// 注入 <system_info> 读取引导（文本→view、图片→vision），避免内联 base64 触发
-/// 70% 上下文守卫死循环。落盘目录为 Tiger 数据目录下的 attachments/（持久，不随
-/// 系统清理临时目录而失效；与 coordinator 的 session 级附件目录共用清理策略）。
-/// 浏览器选择/拖拽的 File 对象没有磁盘路径，需在此落盘；粘贴路径场景前端直接
-/// 持有真实路径，无需调用本命令。
-/// 注意：rename_all = "snake_case" 使前端沿用 file_name / base64_content 参数名
-/// （Tauri 默认按 camelCase 收参，会要求 fileName / base64Content）。
-#[tauri::command(rename_all = "snake_case")]
-pub async fn save_attachment_file(
-    app: tauri::AppHandle,
-    file_name: String,
-    base64_content: String,
-) -> Result<String, AppError> {
-    use base64::Engine;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let data = base64::engine::general_purpose::STANDARD
-        .decode(&base64_content)
-        .map_err(|e| format!("附件 base64 解码失败: {}", e))?;
-    // 安全化文件名：仅保留字母数字、点、下划线、连字符，防路径穿越
-    let safe_name: String = file_name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '.' || c == '_' || c == '-' || c == ' ' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>()
-        .trim()
-        .to_string();
-    let safe_name = if safe_name.is_empty() {
-        "attachment".to_string()
-    } else {
-        safe_name
-    };
-    let data_dir = config::get_data_dir(Some(&app))?;
-    let dir = data_dir.join("attachments");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建附件目录失败: {}", e))?;
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let path = dir.join(format!("{}_{}", ts, safe_name));
-    std::fs::write(&path, &data).map_err(|e| format!("写入附件文件失败: {}", e))?;
-    Ok(path.to_string_lossy().to_string())
-}
 
 /// 读取系统剪贴板中的文件路径列表（Windows 资源管理器复制文件时为 CF_HDROP 格式；
 /// macOS Finder 复制文件时为 NSPasteboard 的 NSFilenamesPboardType / public.file-url）。
@@ -3533,364 +3140,12 @@ pub async fn clipboard_write_text(text: String) -> Result<(), String> {
         .map_err(|e| format!("写入剪贴板失败: {}", e))?
 }
 
-// ===== LSP 启动失败修复 =====
-
-struct LspFixCmd {
-    program: &'static str,
-    args: &'static [&'static str],
-    requires: &'static str,
-}
-
-/// LSP 名称 → 安装命令候选（按顺序探测包管理器，用第一个可用的）。
-/// 包名与"命令→二进制"均已核实；前端只能传 LSP 名称，命令固定在本表内，
-/// 避免任意命令执行。
-const LSP_FIX_TABLE: &[(&str, &[LspFixCmd])] = &[
-    (
-        "rust_analyzer",
-        &[LspFixCmd { program: "rustup", args: &["component", "add", "rust-analyzer"], requires: "Rust 工具链 (rustup)" }],
-    ),
-    (
-        "gopls",
-        &[LspFixCmd { program: "go", args: &["install", "golang.org/x/tools/gopls@latest"], requires: "Go (go)" }],
-    ),
-    (
-        "vtsls",
-        &[LspFixCmd { program: "npm", args: &["install", "-g", "@vtsls/language-server", "typescript"], requires: "Node.js (npm)" }],
-    ),
-    (
-        "pyright",
-        &[
-            LspFixCmd { program: "npm", args: &["install", "-g", "pyright"], requires: "Node.js (npm)" },
-            LspFixCmd { program: "pip", args: &["install", "pyright"], requires: "Python (pip)" },
-            LspFixCmd { program: "pip3", args: &["install", "pyright"], requires: "Python (pip3)" },
-        ],
-    ),
-    (
-        "basedpyright",
-        &[
-            LspFixCmd { program: "pip", args: &["install", "basedpyright"], requires: "Python (pip)" },
-            LspFixCmd { program: "pip3", args: &["install", "basedpyright"], requires: "Python (pip3)" },
-        ],
-    ),
-    (
-        "pylsp",
-        &[
-            LspFixCmd { program: "pip", args: &["install", "python-lsp-server"], requires: "Python (pip)" },
-            LspFixCmd { program: "pip3", args: &["install", "python-lsp-server"], requires: "Python (pip3)" },
-        ],
-    ),
-    (
-        "bashls",
-        &[LspFixCmd { program: "npm", args: &["install", "-g", "bash-language-server"], requires: "Node.js (npm)" }],
-    ),
-    (
-        "svelte",
-        &[LspFixCmd { program: "npm", args: &["install", "-g", "svelte-language-server"], requires: "Node.js (npm)" }],
-    ),
-    (
-        "vue_ls",
-        &[LspFixCmd { program: "npm", args: &["install", "-g", "@vue/language-server"], requires: "Node.js (npm)" }],
-    ),
-    (
-        "intelephense",
-        &[LspFixCmd { program: "npm", args: &["install", "-g", "intelephense"], requires: "Node.js (npm)" }],
-    ),
-    (
-        "dockerls",
-        &[LspFixCmd { program: "npm", args: &["install", "-g", "dockerfile-language-server-nodejs"], requires: "Node.js (npm)" }],
-    ),
-    (
-        "sqlls",
-        &[LspFixCmd { program: "npm", args: &["install", "-g", "sql-language-server"], requires: "Node.js (npm)" }],
-    ),
-    (
-        "emmet_ls",
-        &[LspFixCmd { program: "npm", args: &["install", "-g", "emmet-ls"], requires: "Node.js (npm)" }],
-    ),
-    (
-        "taplo",
-        &[
-            LspFixCmd { program: "npm", args: &["install", "-g", "@taplo/cli"], requires: "Node.js (npm)" },
-            LspFixCmd { program: "cargo", args: &["install", "taplo-cli"], requires: "Rust (cargo)" },
-        ],
-    ),
-    (
-        "texlab",
-        &[LspFixCmd { program: "cargo", args: &["install", "texlab"], requires: "Rust (cargo)，编译需数分钟" }],
-    ),
-    (
-        "sqls",
-        &[LspFixCmd { program: "go", args: &["install", "github.com/sqls-server/sqls@latest"], requires: "Go (go)" }],
-    ),
-    (
-        "cmake",
-        &[
-            LspFixCmd { program: "pip", args: &["install", "cmake-language-server"], requires: "Python (pip)" },
-            LspFixCmd { program: "pip3", args: &["install", "cmake-language-server"], requires: "Python (pip3)" },
-        ],
-    ),
-    (
-        "solargraph",
-        &[LspFixCmd { program: "gem", args: &["install", "solargraph"], requires: "Ruby (gem)" }],
-    ),
-];
-
-fn lsp_fix_cmds(lsp_name: &str) -> Option<&'static [LspFixCmd]> {
-    LSP_FIX_TABLE
-        .iter()
-        .find(|(n, _)| *n == lsp_name)
-        .map(|(_, c)| *c)
-}
-
-/// LSP 名称 → 安装后应可解析的二进制名（与 admAgent 内置配置的 command 一致）。
-/// 装完用它复查 PATH：安装命令成功但对 admAgent 不可见（例如 pip 落到用户级
-/// Scripts、npm 全局前缀不在 PATH）时，给出可操作的错误，而不是假装成功。
-const LSP_FIX_BINS: &[(&str, &str)] = &[
-    ("rust_analyzer", "rust-analyzer"),
-    ("gopls", "gopls"),
-    ("vtsls", "vtsls"),
-    ("pyright", "pyright-langserver"),
-    ("basedpyright", "basedpyright-langserver"),
-    ("pylsp", "pylsp"),
-    ("bashls", "bash-language-server"),
-    ("svelte", "svelteserver"),
-    ("vue_ls", "vue-language-server"),
-    ("intelephense", "intelephense"),
-    ("dockerls", "docker-langserver"),
-    ("sqlls", "sql-language-server"),
-    ("emmet_ls", "emmet-ls"),
-    ("taplo", "taplo"),
-    ("texlab", "texlab"),
-    ("sqls", "sqls"),
-    ("cmake", "cmake-language-server"),
-    ("solargraph", "solargraph"),
-];
-
-fn lsp_fix_bin(lsp_name: &str) -> Option<&'static str> {
-    LSP_FIX_BINS
-        .iter()
-        .find(|(n, _)| *n == lsp_name)
-        .map(|(_, b)| *b)
-}
-
-/// 串行化 LSP 安装：自动修复可能同时触发多个（.py 对应 pyright/pylsp…），
-/// 并发跑包管理器会争用同一把全局锁与缓存（pip site-packages、npm 全局前缀），
-/// 有装一半互相破坏的风险。
-static LSP_FIX_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-
-/// 在 PATH 中查找可执行文件：Windows 按 PATHEXT 展开（npm/gem 是 .cmd 脚本）；
-/// macOS/Linux 补充 GUI 应用常见缺失的目录（Homebrew / cargo / 用户本地 bin）。
-fn which_program(program: &str) -> Option<PathBuf> {
-    which_in_dirs(program, &search_dirs())
-}
-
-/// 只用进程 PATH 查找（不补充目录）：桌面端与 admAgent 子进程共享同一份
-/// PATH，装完用它复查结果，结论就等于 admAgent 能否看到。
-fn which_program_on_path(program: &str) -> Option<PathBuf> {
-    let dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    which_in_dirs(program, &dirs)
-}
-
-/// 供安装命令探测使用的目录列表：进程 PATH + 平台补充目录。
-fn search_dirs() -> Vec<PathBuf> {
-    #[allow(unused_mut)]
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    #[cfg(not(target_os = "windows"))]
-    {
-        if let Ok(home) = std::env::var("HOME") {
-            let home = PathBuf::from(&home);
-            dirs.push(home.join(".cargo/bin"));
-            dirs.push(home.join(".local/bin"));
-            dirs.push(home.join("go/bin"));
-            dirs.push(home.join(".volta/bin"));
-            dirs.push(home.join(".bun/bin"));
-            dirs.push(home.join(".deno/bin"));
-            dirs.push(home.join(".local/share/pnpm"));
-            dirs.push(home.join("Library/pnpm"));
-            // nvm 按 Node 版本分目录，逐个补进候选（GUI 启动时 shell 的 nvm
-            // 初始化不会执行，node/npm 及其全局包都在这下面）。
-            if let Ok(entries) = std::fs::read_dir(home.join(".nvm/versions/node")) {
-                let mut versions: Vec<PathBuf> = entries
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.path().join("bin"))
-                    .collect();
-                versions.sort();
-                dirs.extend(versions);
-            }
-        }
-        for extra in [
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/opt/local/bin",
-            "/snap/bin",
-        ] {
-            dirs.push(PathBuf::from(extra));
-        }
-    }
-    dirs
-}
-
-fn which_in_dirs(program: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
-    let exts: Vec<String> = std::env::var("PATHEXT")
-        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
-        .split(';')
-        .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| !s.is_empty())
-        .collect();
-    #[cfg(not(target_os = "windows"))]
-    let exts: Vec<String> = Vec::new();
-
-    for dir in dirs {
-        if exts.is_empty() {
-            let cand = dir.join(program);
-            if cand.is_file() {
-                return Some(cand);
-            }
-        } else {
-            for ext in &exts {
-                let cand = dir.join(format!("{}{}", program, ext));
-                if cand.is_file() {
-                    return Some(cand);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// 前端展示用：哪些 LSP 支持自动安装、命令与依赖说明。
-#[derive(serde::Serialize)]
-pub struct LspFixTarget {
-    pub name: String,
-    pub command: String,
-    pub requires: String,
-}
-
-#[tauri::command]
-pub fn agent_lsp_fix_targets() -> Vec<LspFixTarget> {
-    LSP_FIX_TABLE
-        .iter()
-        .map(|(name, cmds)| {
-            let first = &cmds[0];
-            LspFixTarget {
-                name: name.to_string(),
-                command: format!("{} {}", first.program, first.args.join(" ")),
-                requires: first.requires.to_string(),
-            }
-        })
-        .collect()
-}
-
-/// 执行 LSP 修复安装命令并返回输出（失败时 Err 携带输出文本）。
-/// 网络代理沿用「设置 → 网络代理」（各包管理器均遵循标准代理环境变量）。
-#[tauri::command]
-pub async fn agent_lsp_fix(app: tauri::AppHandle, lsp_name: String) -> Result<String, AppError> {
-    let cmds = lsp_fix_cmds(&lsp_name)
-        .ok_or_else(|| AppError::msg(format!("该 LSP 暂不支持自动修复: {}", lsp_name)))?;
-    let (program_path, cmd_def) = cmds
-        .iter()
-        .find_map(|c| which_program(c.program).map(|p| (p, c)))
-        .ok_or_else(|| {
-            let needs: Vec<&str> = cmds.iter().map(|c| c.requires).collect();
-            AppError::msg(format!(
-                "未检测到可用的安装方式（需要 {}），请先安装对应包管理器后重试",
-                needs.join(" 或 ")
-            ))
-        })?;
-
-    // 同一时刻只跑一个安装（自动修复可能同时命中多个 LSP）
-    let _install_guard = LSP_FIX_LOCK
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await;
-
-    let mut cmd = tokio::process::Command::new(&program_path);
-    cmd.args(cmd_def.args);
-    if let Ok(settings) = crate::pages::settings::load_settings(app.clone()).await {
-        if settings.agent_proxy.enabled && !settings.agent_proxy.url.is_empty() {
-            let url = settings.agent_proxy.url.as_str();
-            cmd.env("HTTP_PROXY", url)
-                .env("HTTPS_PROXY", url)
-                .env("http_proxy", url)
-                .env("https_proxy", url);
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        #[allow(unused_imports)]
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
-    }
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    cmd.kill_on_drop(true);
-
-    api_debug_log(|| {
-        format!(
-            "LSP fix: 执行 {} {}",
-            program_path.display(),
-            cmd_def.args.join(" ")
-        )
-    });
-
-    let output = tokio::time::timeout(Duration::from_secs(600), cmd.output())
-        .await
-        .map_err(|_| AppError::msg("安装超时（10 分钟），请检查网络后重试"))?
-        .map_err(|e| AppError::msg(format!("执行安装命令失败: {}", e)))?;
-
-    let mut text = String::new();
-    text.push_str(&String::from_utf8_lossy(&output.stdout));
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
-    let text = text.trim().to_string();
-    let text = if text.chars().count() > 3000 {
-        let skip = text.chars().count() - 3000;
-        text.chars().skip(skip).collect::<String>()
-    } else {
-        text
-    };
-
-    if output.status.success() {
-        // 复查安装结果：命令成功但二进制对 admAgent 不可见（PATH 不含用户级
-        // npm/pip 目录等）时明确报错，避免“安装成功却始终起不来”的假成功。
-        if let Some(bin) = lsp_fix_bin(&lsp_name) {
-            if which_program_on_path(bin).is_none() {
-                api_debug_log(|| format!("LSP fix: {} 安装完成但 PATH 中找不到 {}", lsp_name, bin));
-                return Err(AppError::msg(format!(
-                    "安装命令已执行成功，但 PATH 中找不到 {}：多半装进了不在 PATH 的目录（用户级 pip 的 Scripts、npm 全局前缀等）。请把该目录加入 PATH 后重试，或在「工具 → LSP」页对该服务器用「AI 安装」让它自己处理。{}",
-                    bin,
-                    if text.is_empty() {
-                        String::new()
-                    } else {
-                        format!("安装输出：{}", text)
-                    }
-                )));
-            }
-        }
-        api_debug_log(|| format!("LSP fix: {} 安装成功", lsp_name));
-        Ok(text)
-    } else {
-        api_debug_log(|| format!("LSP fix: {} 安装失败: {}", lsp_name, text));
-        Err(AppError::msg(if text.is_empty() {
-            format!("安装命令退出码非 0: {}", output.status)
-        } else {
-            text
-        }))
-    }
-}
-
-
 // ---------------------------------------------------------------------------
-// 回归测试：admAgent.json 被并发写清空的修复
+// 回归测试：tigerAgent.json 被并发写清空的修复
 //
-// 背景：本文件在 Windows 上与 admAgent server（Go）的数据配置是同一个文件。
+// 背景：本文件在 Windows 上与 Agent server（Go）的数据配置是同一个文件。
 // 旧实现用非原子的 std::fs::write 先截断文件，并在读取/解析失败时静默回退
-// build_adm_agent_config() 整文件覆盖，导致切换模型时 agent_proxy /
+// build_agent_config() 整文件覆盖，导致切换模型时 agent_proxy /
 // agent_vision_model / options / 全部云端 provider 被清空。
 //
 // 修复后必须成立的两条不变量：
@@ -3901,7 +3156,7 @@ pub async fn agent_lsp_fix(app: tauri::AppHandle, lsp_name: String) -> Result<St
 // 是进程全局的，因此用 TEST_SERIAL_LOCK 强制用例串行（cargo test 默认多线程并行）。
 // ---------------------------------------------------------------------------
 #[cfg(test)]
-mod adm_agent_config_tests {
+mod agent_config_tests {
     use super::*;
 
     /// 强制用例串行：环境变量是进程全局的，并行会互相踩配置目录。
@@ -3909,8 +3164,8 @@ mod adm_agent_config_tests {
 
     /// 持有串行锁的临时配置目录；drop 时释放锁（目录本身不自动删除，便于失败排查）。
     ///
-    /// `dir` 是 **配置目录本身**（即 `.../admAgent`），与 `adm_agent_config_dir()`
-    /// 的返回值一致，测试里可直接 `t.dir.join("admAgent.json")`。
+    /// `dir` 是 **配置目录本身**（即 `.../Agent`），与 `agent_config_dir()`
+    /// 的返回值一致，测试里可直接 `t.dir.join("tigerAgent.json")`。
     struct TestDir {
         dir: PathBuf,
         _guard: std::sync::MutexGuard<'static, ()>,
@@ -3919,7 +3174,7 @@ mod adm_agent_config_tests {
     fn temp_config_dir(tag: &str) -> TestDir {
         let guard = TEST_SERIAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let base = std::env::temp_dir().join(format!(
-            "adm_cfg_test_{}_{}_{}",
+            "agent_cfg_test_{}_{}_{}",
             tag,
             std::process::id(),
             std::time::SystemTime::now()
@@ -3928,14 +3183,14 @@ mod adm_agent_config_tests {
                 .unwrap_or(0)
         ));
         let _ = std::fs::remove_dir_all(&base);
-        // adm_agent_config_dir()：Windows 为 LOCALAPPDATA/admAgent，其它平台为 HOME/.config/admAgent，
+        // agent_config_dir()：Windows 为 LOCALAPPDATA/tigerAgent，其它平台为 HOME/.config/tigerAgent，
         // 两个环境变量都重定向到临时目录，保证测试在任意平台都不触碰真实用户配置。
         #[cfg(target_os = "windows")]
-        let dir = base.join("admAgent");
+        let dir = base.join("tigerAgent");
         #[cfg(not(target_os = "windows"))]
         let dir = {
             std::env::set_var("HOME", &base);
-            base.join(".config").join("admAgent")
+            base.join(".config").join("tigerAgent")
         };
         std::fs::create_dir_all(&dir).expect("创建临时配置目录失败");
         std::env::set_var("LOCALAPPDATA", &base);
@@ -3955,10 +3210,10 @@ mod adm_agent_config_tests {
     #[test]
     fn update_preserves_every_unrelated_field() {
         let t = temp_config_dir("preserve");
-        let path = t.dir.join("admAgent.json");
+        let path = t.dir.join("tigerAgent.json");
         std::fs::write(&path, SAMPLE).expect("写入样本配置");
 
-        update_adm_agent_config(|v| {
+        update_agent_config(|v| {
             v["agent_vision_model"] = serde_json::json!({ "provider": "p", "model": "m" });
             Ok::<(), AppError>(())
         })
@@ -3997,7 +3252,7 @@ mod adm_agent_config_tests {
   "model": { "provider": "local", "model": "localModel" },
   "recent_models": [
     { "model": "deepseek-v4.1-flash", "provider": "deepseekv41flash" },
-    { "model": "adm-models", "provider": "admAgent" },
+    { "model": "agent-models", "provider": "tigerAgent" },
     { "model": "qwen3.8-flash", "provider": "qwen38flash" },
     { "model": "sensenova-6.8-flash-lite", "provider": "sensenova68flashlite" }
   ],
@@ -4016,11 +3271,11 @@ mod adm_agent_config_tests {
     #[test]
     fn delete_provider_prunes_matching_recent_models() {
         let t = temp_config_dir("delete_prune");
-        let path = t.dir.join("admAgent.json");
+        let path = t.dir.join("tigerAgent.json");
         std::fs::write(&path, DELETE_SAMPLE).expect("写入样本配置");
 
         let removed =
-            update_adm_agent_config(|v| remove_provider_with_recent_models(v, "qwen38flash"))
+            update_agent_config(|v| remove_provider_with_recent_models(v, "qwen38flash"))
                 .expect("删除应成功");
         assert_eq!(removed, 1, "应剔除 1 条指向该 provider 的历史记录");
 
@@ -4045,7 +3300,7 @@ mod adm_agent_config_tests {
     #[test]
     fn delete_provider_drops_empty_recent_models_field() {
         let t = temp_config_dir("delete_prune_empty");
-        let path = t.dir.join("admAgent.json");
+        let path = t.dir.join("tigerAgent.json");
         std::fs::write(
             &path,
             r#"{
@@ -4056,7 +3311,7 @@ mod adm_agent_config_tests {
         .expect("写入样本配置");
 
         let removed =
-            update_adm_agent_config(|v| remove_provider_with_recent_models(v, "qwen38flash"))
+            update_agent_config(|v| remove_provider_with_recent_models(v, "qwen38flash"))
                 .expect("删除应成功");
         assert_eq!(removed, 1);
 
@@ -4068,10 +3323,10 @@ mod adm_agent_config_tests {
     #[test]
     fn delete_unknown_provider_leaves_file_untouched() {
         let t = temp_config_dir("delete_missing");
-        let path = t.dir.join("admAgent.json");
+        let path = t.dir.join("tigerAgent.json");
         std::fs::write(&path, DELETE_SAMPLE).expect("写入样本配置");
 
-        let err = update_adm_agent_config(|v| remove_provider_with_recent_models(v, "nope"))
+        let err = update_agent_config(|v| remove_provider_with_recent_models(v, "nope"))
             .expect_err("删除不存在的 provider 必须失败");
         assert!(err.to_string().contains("未找到 provider"), "错误信息应指明原因");
         assert_eq!(std::fs::read_to_string(&path).expect("读回配置"), DELETE_SAMPLE);
@@ -4111,8 +3366,8 @@ mod adm_agent_config_tests {
     fn assert_builtin_vision(v: &serde_json::Value) {
         assert_eq!(
             v,
-            &serde_json::json!({ "provider": "admAgent", "model": "adm-models" }),
-            "应回退为内置 admAgent/adm-models"
+            &serde_json::json!({ "provider": "tigerAgent", "model": "agent-models" }),
+            "应回退为内置 tigerAgent/agent-models"
         );
     }
 
@@ -4120,7 +3375,7 @@ mod adm_agent_config_tests {
     #[test]
     fn vision_model_kept_when_supports_images_true() {
         let t = temp_config_dir("vision_kept");
-        let path = t.dir.join("admAgent.json");
+        let path = t.dir.join("tigerAgent.json");
         std::fs::write(&path, VISION_SAMPLE).expect("写入样本配置");
 
         let changed = write_agent_vision_model("visioncloud/gpt-4o").expect("写入应成功");
@@ -4131,31 +3386,17 @@ mod adm_agent_config_tests {
         );
     }
 
-    /// 内置 admAgent 特判：adm-models 永远有效。
+    /// 内置 Agent 特判：agent-models 永远有效。
     #[test]
     fn vision_model_builtin_kept() {
         let t = temp_config_dir("vision_builtin");
-        let path = t.dir.join("admAgent.json");
+        let path = t.dir.join("tigerAgent.json");
         std::fs::write(&path, VISION_SAMPLE).expect("写入样本配置");
 
-        assert!(write_agent_vision_model("admAgent/adm-models").expect("写入应成功"));
+        assert!(write_agent_vision_model("tigerAgent/agent-models").expect("写入应成功"));
         assert_eq!(
             read_vision_model(&path),
-            serde_json::json!({ "provider": "admAgent", "model": "adm-models" })
-        );
-    }
-
-    /// 旧版内置名 admImage-model：归一化为 adm-models 后写入。
-    #[test]
-    fn vision_model_legacy_builtin_normalized() {
-        let t = temp_config_dir("vision_builtin_legacy");
-        let path = t.dir.join("admAgent.json");
-        std::fs::write(&path, VISION_SAMPLE).expect("写入样本配置");
-
-        assert!(write_agent_vision_model("admAgent/admImage-model").expect("写入应成功"));
-        assert_eq!(
-            read_vision_model(&path),
-            serde_json::json!({ "provider": "admAgent", "model": "adm-models" })
+            serde_json::json!({ "provider": "tigerAgent", "model": "agent-models" })
         );
     }
 
@@ -4163,7 +3404,7 @@ mod adm_agent_config_tests {
     #[test]
     fn vision_model_local_kept_when_supports_images() {
         let t = temp_config_dir("vision_local");
-        let path = t.dir.join("admAgent.json");
+        let path = t.dir.join("tigerAgent.json");
         std::fs::write(&path, VISION_SAMPLE).expect("写入样本配置");
 
         assert!(write_agent_vision_model("local/localModel").expect("写入应成功"));
@@ -4177,7 +3418,7 @@ mod adm_agent_config_tests {
     #[test]
     fn vision_model_falls_back_when_provider_missing() {
         let t = temp_config_dir("vision_noprov");
-        let path = t.dir.join("admAgent.json");
+        let path = t.dir.join("tigerAgent.json");
         std::fs::write(&path, VISION_SAMPLE).expect("写入样本配置");
 
         let changed = write_agent_vision_model("nope/gpt-4o").expect("写入应成功");
@@ -4189,7 +3430,7 @@ mod adm_agent_config_tests {
     #[test]
     fn vision_model_falls_back_when_supports_images_not_true() {
         let t = temp_config_dir("vision_noimg");
-        let path = t.dir.join("admAgent.json");
+        let path = t.dir.join("tigerAgent.json");
         std::fs::write(&path, VISION_SAMPLE).expect("写入样本配置");
 
         assert!(
@@ -4200,7 +3441,7 @@ mod adm_agent_config_tests {
 
         // 缺 supports_images 字段的模型：独立目录验证同样回退并报告变更
         let t2 = temp_config_dir("vision_noimg2");
-        let path2 = t2.dir.join("admAgent.json");
+        let path2 = t2.dir.join("tigerAgent.json");
         std::fs::write(&path2, VISION_SAMPLE).expect("写入样本配置");
         assert!(
             write_agent_vision_model("textcloud/deepseek").expect("写入应成功"),
@@ -4213,7 +3454,7 @@ mod adm_agent_config_tests {
     #[test]
     fn vision_model_no_change_returns_false() {
         let t = temp_config_dir("vision_unchanged");
-        let path = t.dir.join("admAgent.json");
+        let path = t.dir.join("tigerAgent.json");
         std::fs::write(&path, VISION_SAMPLE).expect("写入样本配置");
 
         assert!(write_agent_vision_model("visioncloud/gpt-4o").expect("首次写入应成功"));
@@ -4226,7 +3467,7 @@ mod adm_agent_config_tests {
     fn vision_model_bad_value_falls_back_to_builtin() {
         for bad in ["", "no-slash", "/model", "provider/"] {
             let t = temp_config_dir("vision_badval");
-            let path = t.dir.join("admAgent.json");
+            let path = t.dir.join("tigerAgent.json");
             std::fs::write(&path, VISION_SAMPLE).expect("写入样本配置");
             let changed = write_agent_vision_model(bad).expect("写入应成功");
             assert!(changed, "非法值 {:?} 应回退内置并报告变更", bad);
@@ -4238,10 +3479,10 @@ mod adm_agent_config_tests {
     #[test]
     fn update_rejects_empty_config_file() {
         let t = temp_config_dir("empty");
-        let path = t.dir.join("admAgent.json");
+        let path = t.dir.join("tigerAgent.json");
         std::fs::write(&path, "").expect("写入空文件");
 
-        let err = update_adm_agent_config(|v| {
+        let err = update_agent_config(|v| {
             v["agent_proxy"] = serde_json::json!(true);
             Ok::<(), AppError>(())
         });
@@ -4261,11 +3502,11 @@ mod adm_agent_config_tests {
     #[test]
     fn update_rejects_truncated_config_file() {
         let t = temp_config_dir("truncated");
-        let path = t.dir.join("admAgent.json");
+        let path = t.dir.join("tigerAgent.json");
         std::fs::write(&path, r#"{"providers": {"local": {"nam"#).expect("写入半截文件");
 
         assert!(
-            update_adm_agent_config(|v| {
+            update_agent_config(|v| {
                 v["agent_proxy"] = serde_json::json!(true);
                 Ok::<(), AppError>(())
             })
@@ -4279,11 +3520,11 @@ mod adm_agent_config_tests {
     #[test]
     fn repeated_writes_always_leave_valid_complete_json() {
         let t = temp_config_dir("repeat");
-        let path = t.dir.join("admAgent.json");
+        let path = t.dir.join("tigerAgent.json");
         std::fs::write(&path, SAMPLE).expect("写入样本配置");
 
         for i in 0..50 {
-            update_adm_agent_config(move |v| {
+            update_agent_config(move |v| {
                 v["options"]["tui"]["compact_mode"] = serde_json::json!(i % 2 == 0);
                 Ok::<(), AppError>(())
             })
@@ -4306,10 +3547,10 @@ mod adm_agent_config_tests {
     #[test]
     fn atomic_write_leaves_no_temp_files() {
         let t = temp_config_dir("notmp");
-        let path = t.dir.join("admAgent.json");
+        let path = t.dir.join("tigerAgent.json");
         std::fs::write(&path, SAMPLE).expect("写入样本配置");
 
-        update_adm_agent_config(|v| {
+        update_agent_config(|v| {
             v["agent_proxy"]["url"] = serde_json::json!("http://127.0.0.1:1/v1");
             Ok::<(), AppError>(())
         })
@@ -4340,7 +3581,7 @@ mod adm_agent_config_tests {
     #[test]
     fn mcp_add_writes_entry_and_rejects_duplicates() {
         let t = temp_config_dir("mcp_add");
-        let path = t.dir.join("admAgent.json");
+        let path = t.dir.join("tigerAgent.json");
         std::fs::write(&path, SAMPLE).expect("写入样本配置");
 
         let name = add_mcp_server_core(&mcp_default()).expect("新增应成功");
@@ -4368,7 +3609,7 @@ mod adm_agent_config_tests {
     #[test]
     fn mcp_update_renames_and_preserves_unknown_fields() {
         let t = temp_config_dir("mcp_update");
-        let path = t.dir.join("admAgent.json");
+        let path = t.dir.join("tigerAgent.json");
         std::fs::write(
             &path,
             r#"{"mcp":{"old":{"type":"stdio","command":"npx","args":["a"],"enabled_tools":["t1"]}}}"#,
@@ -4402,7 +3643,7 @@ mod adm_agent_config_tests {
     #[test]
     fn mcp_delete_removes_entry() {
         let t = temp_config_dir("mcp_delete");
-        let path = t.dir.join("admAgent.json");
+        let path = t.dir.join("tigerAgent.json");
         std::fs::write(
             &path,
             r#"{"mcp":{"a":{"type":"stdio","command":"x"},"b":{"type":"http","url":"https://e.com/mcp"}}}"#,
@@ -4496,7 +3737,7 @@ mod sse_sub_agent_filter_tests {
 
     #[test]
     fn qwen_style_nested_session_dropped() {
-        // 真实事故样本（adm_api_debug 2026-09）：$$call_ 前缀不匹配导致误转发
+        // 真实事故样本（tigerAgent_debug 2026-09）：$$call_ 前缀不匹配导致误转发
         let p = serde_json::json!({ "type": "run_complete", "payload": { "type": "updated", "payload": {
             "session_id": "c5a4abbd-ec37-42ef-9e4f-e691f131b83a$$chatcmpl-tool-b577aa9f6c9ceb61",
             "run_id": "run-1788225954786-v2gyqeynm", "error": "context deadline exceeded" } } });

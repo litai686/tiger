@@ -4,35 +4,36 @@
 export {};
 
 declare global {
-  /** 微信 Bot（iLink）状态（get_ilink_status 命令返回 / ilink-status 事件 payload 子集） */
-  interface IlinkStatus {
-    state: "stopped" | "waiting_scan" | "running" | "error";
-    bound: boolean;
-    enabled: boolean;
-    bot_id: string;
-    owner: string;
-    error: string;
-    msg_in: number;
-    msg_out: number;
-    /** 微信跟随模式：开启时微信消息注入桌面当前打开的会话 */
-    follow: boolean;
-  }
-
   interface Window {
     /** Tauri invoke（index.html 初始化时暴露给所有视图模块） */
-    __adm_invoke: (cmd: string, args?: Record<string, unknown>) => Promise<any>;
+    __agent_invoke: (cmd: string, args?: Record<string, unknown>) => Promise<any>;
     /** Tauri event.listen（返回 unlisten 函数的 Promise） */
-    __adm_listen: (event: string, handler: (event: { payload: any }) => void) => Promise<() => void>;
+    __agent_listen: (event: string, handler: (event: { payload: any }) => void) => Promise<() => void>;
     /** 跨视图共享状态（agentBusy 等） */
-    __adm_state: {
+    __agent_state: {
       agentBusy: boolean;
       [key: string]: any;
     };
     /** index.html 暴露的更新弹窗控制 + i18n */
-    ADM: {
-      showUpdateDialog: (html: string) => void;
+    Agent: {
+      showUpdateDialog: (html: string, owner?: string) => void;
       hideUpdateDialog: () => void;
       checkForUpdate: (silent?: boolean) => Promise<void>;
+      /** 应用自升级：manual=true 时展示下载进度与「查看升级日志」入口 */
+      startAppUpdate: (result: {
+        has_update?: boolean;
+        remote_version?: string;
+        current_version?: string;
+        download_url?: string;
+        changelog_url?: string;
+      }, opts?: { manual?: boolean }) => void;
+      /** 当前升级状态（settings 版号面板用于提示「已下载，可升级」） */
+      getAppUpdate: () => any;
+      /** 升级日志按钮：地址由 update.json 的 content 字段下发，缺失时返回空串 */
+      changelogButton: (url?: string) => string;
+      openChangelog: () => void;
+      /** 读取服务端硬件信息（CPU/内存/硬盘）并刷新底部状态栏；连接成功后可立即调用 */
+      refreshSystemInfo: () => Promise<any>;
       i18n?: {
         t: (str: string) => string;
         tV: (str: string, vars?: Record<string, string | number>) => string;

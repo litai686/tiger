@@ -1,20 +1,14 @@
-//! admAgent server 本地传输：Unix socket / Windows named pipe。
+//! Agent 服务端传输：TCP + TLS 1.3（服务端 SPKI pin）+ Bearer token。
 //!
-//! admAgent 的 `serve` 命令默认绑定平台原生本地传输（对应 Go 侧
-//! `internal/server.DefaultHost()`），不占用 TCP 端口；reqwest 不支持
-//! 这两种传输，因此这里用 hyper 直接对 socket / named pipe 发起
-//! HTTP/1.1 请求（含 SSE 长连接流）。
-//!
-//! 默认地址与 Go 侧保持一致（这样多客户端/多实例共享同一 server）：
-//! - Windows：`\\.\pipe\admAgent-<sid>.sock`（sid = 当前用户 SID）
-//! - macOS/Linux：`<XDG_RUNTIME_DIR | temp_dir>/admAgent-<uid>.sock`，
-//!   路径超 104 字节（macOS sun_path 上限）时回退 `/tmp`。
+//! 桌面端不再有「本地 sidecar」模式：服务端由用户自行启动，桌面端只做客户端，
+//! 设置页只需粘贴一条连接串（地址 + 服务端指纹 + token，见
+//! `docs/tcp-tls-ecdsa.md` §11）。reqwest 无法固定自签证书的 pin，因此这里用
+//! hyper 直接对 TLS 流发起 HTTP/1.1 请求（含 SSE 长连接流）。
 
 use std::future::Future;
 use std::io;
-use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -24,22 +18,40 @@ use http_body_util::Full;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use tokio_rustls::TlsConnector;
 
-use crate::common::device_identity::{self, DeviceIdentity};
+use base64::Engine;
+use sha2::{Digest, Sha256};
 
-/// 远程服务端目标（`docs/tcp-tls-ed25519.md` §11.3）。
-#[derive(Clone, Debug)]
+/// 客户端 TLS 握手中发送的 SNI。
+///
+/// 固定值，与服务端自签证书的 SAN 一致（`docs/tcp-tls-ecdsa.md` §11）。
+/// 服务端身份由 pin 校验收口，SNI 不参与判定，因此不做成设置项。
+pub const SERVER_SNI: &str = "tigerAgent.local";
+
+/// 服务端目标（`docs/tcp-tls-ecdsa.md` §11.3）。
+#[derive(Clone)]
 pub struct TcpTarget {
     pub host: String,
     pub port: u16,
-    /// SNI，默认 `tigerAgent.local`（与服务端 SAN 一致；真正的身份校验靠 pin）
-    pub sni: String,
     /// 服务端 SPKI 指纹 `sha256:<base64url-nopad>`
     pub pin: String,
-    pub device: Arc<DeviceIdentity>,
+    /// 服务端令牌，随每个请求放进 `Authorization: Bearer ...`
+    pub token: String,
+}
+
+// 手写 Debug：TcpTarget 会出现在错误上下文里，token 绝不能进日志。
+impl std::fmt::Debug for TcpTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TcpTarget")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("pin", &self.pin)
+            .field("token", &"<redacted>")
+            .finish()
+    }
 }
 
 impl TcpTarget {
@@ -63,7 +75,7 @@ impl ServerCertVerifier for SpkiPinVerifier {
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        let got = device_identity::spki_fingerprint(end_entity.as_ref())
+        let got = spki_fingerprint(end_entity.as_ref())
             .map_err(|e| rustls::Error::General(format!("parse server certificate: {}", e)))?;
         if got != self.expected {
             // Hard failure: never fall back to plaintext or auto-accept a new key.
@@ -110,310 +122,102 @@ impl ServerCertVerifier for SpkiPinVerifier {
     }
 }
 
-/// 平台默认传输地址（对应 Go `server.DefaultHost()`）。
-/// 两个变体在任意平台都保留（跨平台数据），但只会在对应平台被构造，
-/// 因此按平台各有一个变体在死代码分析中“未使用”，属预期。
-#[allow(dead_code)]
-#[derive(Clone, Debug)]
-pub enum AgentTransport {
-    /// Unix domain socket 路径（macOS / Linux）
-    Unix(PathBuf),
-    /// Windows 命名管道路径，如 `\\.\pipe\admAgent-<sid>.sock`
-    NamedPipe(String),
-    /// 远程服务端：TCP + TLS 1.3 + Ed25519 双向认证（§11.2 remote 模式）
-    Tcp(Box<TcpTarget>),
-}
+/// TLS 客户端流（服务端证书已按 pin 校验；客户端以 Bearer token 认证，不出示客户端证书）。
+pub struct AgentStream(Box<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>);
 
-impl AgentTransport {
-    /// 与 Go `server.DefaultHost()` 等价的默认地址。
-    pub fn default_host() -> Self {
-        #[cfg(target_os = "windows")]
-        {
-            let sid = current_user_sid().unwrap_or_default();
-            AgentTransport::NamedPipe(format!(r"\\.\pipe\admAgent-{}.sock", sid))
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            // SAFETY: getuid 无失败路径，返回当前进程真实 uid。
-            let uid = unsafe { libc::getuid() };
-            let dir = std::env::var("XDG_RUNTIME_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| std::env::temp_dir());
-            let mut path = dir.join(format!("admAgent-{}.sock", uid));
-            // macOS sun_path 上限 104 字节：超长回退 /tmp（对齐 Go 逻辑）
-            if path.as_os_str().len() > 104 {
-                path = PathBuf::from("/tmp").join(format!("admAgent-{}.sock", uid));
-            }
-            AgentTransport::Unix(path)
-        }
-    }
-
-    /// 展示用地址（对齐 Go 的 host URL 格式，如 `unix:///tmp/admAgent-501.sock`）
-    pub fn display(&self) -> String {
-        match self {
-            AgentTransport::Unix(p) => format!("unix://{}", p.display()),
-            AgentTransport::NamedPipe(n) => format!("npipe://{}", n),
-            AgentTransport::Tcp(t) => t.display(),
-        }
-    }
-}
-
-/// 平台 socket 流：统一实现 tokio AsyncRead/AsyncWrite，供 hyper 传输使用
-pub enum AgentStream {
-    #[cfg(unix)]
-    Unix(tokio::net::UnixStream),
-    #[cfg(windows)]
-    Pipe(tokio::net::windows::named_pipe::NamedPipeClient),
-    /// 远程服务端：TLS over TCP
-    Tls(Box<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>),
-}
-
-#[cfg(unix)]
 impl tokio::io::AsyncRead for AgentStream {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            AgentStream::Unix(s) => Pin::new(s).poll_read(cx, buf),
-            #[cfg(windows)]
-            AgentStream::Pipe(p) => Pin::new(p).poll_read(cx, buf),
-            AgentStream::Tls(s) => Pin::new(s).poll_read(cx, buf),
-        }
+        let s = self.get_mut();
+        Pin::new(&mut *s.0).poll_read(cx, buf)
     }
 }
 
-#[cfg(unix)]
 impl tokio::io::AsyncWrite for AgentStream {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            AgentStream::Unix(s) => Pin::new(s).poll_write(cx, buf),
-            #[cfg(windows)]
-            AgentStream::Pipe(p) => Pin::new(p).poll_write(cx, buf),
-            AgentStream::Tls(s) => Pin::new(s).poll_write(cx, buf),
-        }
+        let s = self.get_mut();
+        Pin::new(&mut *s.0).poll_write(cx, buf)
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            AgentStream::Unix(s) => Pin::new(s).poll_flush(cx),
-            #[cfg(windows)]
-            AgentStream::Pipe(p) => Pin::new(p).poll_flush(cx),
-            AgentStream::Tls(s) => Pin::new(s).poll_flush(cx),
-        }
+        let s = self.get_mut();
+        Pin::new(&mut *s.0).poll_flush(cx)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            AgentStream::Unix(s) => Pin::new(s).poll_shutdown(cx),
-            #[cfg(windows)]
-            AgentStream::Pipe(p) => Pin::new(p).poll_shutdown(cx),
-            AgentStream::Tls(s) => Pin::new(s).poll_shutdown(cx),
-        }
+        let s = self.get_mut();
+        Pin::new(&mut *s.0).poll_shutdown(cx)
     }
 }
 
-#[cfg(windows)]
-impl tokio::io::AsyncRead for AgentStream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            AgentStream::Pipe(p) => Pin::new(p).poll_read(cx, buf),
-            #[cfg(unix)]
-            AgentStream::Unix(s) => Pin::new(s).poll_read(cx, buf),
-            AgentStream::Tls(s) => Pin::new(s).poll_read(cx, buf),
-        }
-    }
-}
-
-#[cfg(windows)]
-impl tokio::io::AsyncWrite for AgentStream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            AgentStream::Pipe(p) => Pin::new(p).poll_write(cx, buf),
-            #[cfg(unix)]
-            AgentStream::Unix(s) => Pin::new(s).poll_write(cx, buf),
-            AgentStream::Tls(s) => Pin::new(s).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            AgentStream::Pipe(p) => Pin::new(p).poll_flush(cx),
-            #[cfg(unix)]
-            AgentStream::Unix(s) => Pin::new(s).poll_flush(cx),
-            AgentStream::Tls(s) => Pin::new(s).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            AgentStream::Pipe(p) => Pin::new(p).poll_shutdown(cx),
-            #[cfg(unix)]
-            AgentStream::Unix(s) => Pin::new(s).poll_shutdown(cx),
-            AgentStream::Tls(s) => Pin::new(s).poll_shutdown(cx),
-        }
-    }
-}
-
-/// Windows：获取当前用户 SID（对应 Go `os/user.Current().Uid`，
-/// 用于拼出与 Go `DefaultHost()` 一致的命名管道路径）。
-#[cfg(target_os = "windows")]
-fn current_user_sid() -> io::Result<String> {
-    use windows::core::PWSTR;
-    use windows::Win32::Foundation::{HLOCAL, LocalFree};
-    use windows::Win32::Security::{
-        GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
-    };
-    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-
-    unsafe {
-        let mut token = Default::default();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
-            return Err(io::Error::last_os_error());
-        }
-        // 先取所需缓冲区大小（返回 ERROR_INSUFFICIENT_BUFFER 属预期）
-        let mut size: u32 = 0;
-        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut size);
-        let mut buf = vec![0u8; size.max(1) as usize];
-        if GetTokenInformation(
-            token,
-            TokenUser,
-            Some(buf.as_mut_ptr() as *mut _),
-            size,
-            &mut size,
-        )
-        .is_err()
-        {
-            return Err(io::Error::last_os_error());
-        }
-        let tu = &*(buf.as_ptr() as *const TOKEN_USER);
-        let mut sid_str: PWSTR = PWSTR::null();
-        if ConvertSidToStringSidW(tu.User.Sid, &mut sid_str).is_err() {
-            return Err(io::Error::last_os_error());
-        }
-        let s = sid_str.to_string().unwrap_or_default();
-        let _ = LocalFree(HLOCAL(sid_str.0 as *mut _));
-        if s.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "无法获取当前用户 SID",
-            ));
-        }
-        Ok(s)
-    }
-}
-
-/// hyper-util 连接元数据：本地传输无额外信息，返回空 Connected。
+/// hyper-util 连接元数据：无额外信息，返回空 Connected。
 impl hyper_util::client::legacy::connect::Connection for AgentStream {
-    fn connected(
-        &self,
-    ) -> hyper_util::client::legacy::connect::Connected {
+    fn connected(&self) -> hyper_util::client::legacy::connect::Connected {
         hyper_util::client::legacy::connect::Connected::new()
     }
 }
 
-/// hyper 连接器：忽略请求 URI 的 authority，仅按 transport 建立本地连接。
-/// 连接过程受 connect_timeout 约束（server 未启动时立即失败，无需长等）。
+/// hyper 连接器：忽略请求 URI 的 authority，只按 target 建立 TLS 连接。
+/// 连接过程受 connect_timeout 约束（服务端不可达时快速失败）。
 #[derive(Clone)]
 pub struct AgentConnector {
-    pub transport: AgentTransport,
+    pub target: TcpTarget,
     pub connect_timeout: Duration,
 }
 
 impl AgentConnector {
     async fn connect(self) -> io::Result<AgentStream> {
-        match self.transport {
-            AgentTransport::Unix(path) => {
-                #[cfg(unix)]
-                {
-                    let s = tokio::net::UnixStream::connect(path).await?;
-                    Ok(AgentStream::Unix(s))
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = &path;
-                    Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "unix socket 不支持当前平台",
-                    ))
-                }
-            }
-            AgentTransport::NamedPipe(_name) => {
-                #[cfg(windows)]
-                {
-                    let p = connect_pipe(&_name).await?;
-                    Ok(AgentStream::Pipe(p))
-                }
-                #[cfg(not(windows))]
-                {
-                    Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "named pipe 不支持当前平台",
-                    ))
-                }
-            }
-            AgentTransport::Tcp(t) => {
-                let tcp = tokio::net::TcpStream::connect((t.host.as_str(), t.port)).await?;
-                tcp.set_nodelay(true)?;
-                let cfg = tls_client_config(&t)?;
-                let sni = ServerName::try_from(t.sni.clone())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("invalid SNI: {}", e)))?;
-                let stream = TlsConnector::from(cfg)
-                    .connect(sni, tcp)
-                    .await
-                    .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, format!("TLS 握手失败: {}", e)))?;
-                Ok(AgentStream::Tls(Box::new(stream)))
-            }
-        }
+        let t = self.target;
+        let tcp = tokio::net::TcpStream::connect((t.host.as_str(), t.port)).await?;
+        tcp.set_nodelay(true)?;
+        let cfg = tls_client_config(&t)?;
+        let sni = ServerName::try_from(SERVER_SNI)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("invalid SNI: {}", e)))?;
+        let stream = TlsConnector::from(cfg)
+            .connect(sni, tcp)
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, format!("TLS 握手失败: {}", e)))?;
+        Ok(AgentStream(Box::new(stream)))
     }
 }
 
-/// 构建远程模式的 rustls 配置：
+/// 构建 TLS 客户端配置：
 /// - 只允许 TLS 1.3（与服务端一致）
 /// - 服务端证书校验完全由 SPKI pin 完成（自签证书不进系统信任库）
-/// - 出示本机 Ed25519 客户端证书（服务端白名单是信任锚）
+/// - 不出示客户端证书：客户端身份由 Bearer token 证明
 fn tls_client_config(target: &TcpTarget) -> Result<Arc<ClientConfig>, io::Error> {
     let verifier = Arc::new(SpkiPinVerifier { expected: target.pin.clone() });
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let cert = CertificateDer::from(target.device.cert_der.clone());
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(target.device.key_pkcs8.clone()));
     let cfg = ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("TLS 配置失败: {}", e)))?
         .dangerous()
         .with_custom_certificate_verifier(verifier)
-        .with_client_auth_cert(vec![cert], key)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("加载客户端证书失败: {}", e)))?;
+        .with_no_client_auth();
     Ok(Arc::new(cfg))
 }
 
-static ACTIVE_TRANSPORT: OnceLock<AgentTransport> = OnceLock::new();
+/// 当前生效的服务端目标。用 RwLock 而不是 OnceLock：设置页保存新配置后可以立即
+/// 重新解析并覆盖，不必等应用重启（旧目标已建立的连接池由 hyper 自身回收）。
+static ACTIVE_TARGET: std::sync::RwLock<Option<TcpTarget>> = std::sync::RwLock::new(None);
 
-/// 设置本进程使用的服务端传输（启动时根据模式解析一次）。
-pub fn set_active_transport(transport: AgentTransport) {
-    let _ = ACTIVE_TRANSPORT.set(transport);
+/// 设置本进程使用的服务端目标（启动/保存配置时按配置解析）。
+pub fn set_active_target(target: TcpTarget) {
+    if let Ok(mut guard) = ACTIVE_TARGET.write() {
+        *guard = Some(target);
+    }
 }
 
-/// 当前生效的传输；未设置时回退平台默认本地传输（与改造前行为一致）。
-pub fn active_transport() -> AgentTransport {
-    ACTIVE_TRANSPORT
-        .get()
-        .cloned()
-        .unwrap_or_else(AgentTransport::default_host)
+/// 当前生效的服务端目标；未配置（或配置不完整）时为 None。
+pub fn active_target() -> Option<TcpTarget> {
+    ACTIVE_TARGET.read().ok().and_then(|guard| guard.clone())
 }
 
 impl tower_service::Service<Uri> for AgentConnector {
@@ -434,50 +238,67 @@ impl tower_service::Service<Uri> for AgentConnector {
                 Ok(r) => r.map(TokioIo::new),
                 Err(_) => Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "连接 admAgent server 超时",
+                    "连接 Agent server 超时",
                 )),
             }
         })
     }
 }
 
-/// 打开 Windows 命名管道：管道忙（服务端正在接受连接/客户端过多）时短暂重试；
-/// 管道不存在则立即失败。tokio 的 ClientOptions::open 是同步 CreateFileW，
-/// 本地管道打开耗时微秒级，可接受。
-#[cfg(windows)]
-async fn connect_pipe(
-    name: &str,
-) -> io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
-    use tokio::net::windows::named_pipe::ClientOptions;
-    const ERROR_PIPE_BUSY: i32 = 231; // windows_sys::ERROR_PIPE_BUSY
-    let mut attempt = 0u32;
-    loop {
-        match ClientOptions::new().open(name) {
-            Ok(c) => return Ok(c),
-            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && attempt < 10 => {
-                attempt += 1;
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(e) => return Err(e),
-        }
-    }
+/// `sha256:<base64url_nopad>` over the certificate's SubjectPublicKeyInfo.
+///
+/// 必须与服务端 `server.SPKIFingerprint` 相同：用 SPKI 而不是整张证书，
+/// 这样“换证不换钥”时指纹不变，客户端不需要重新配置。
+pub fn spki_fingerprint(cert_der: &[u8]) -> Result<String, String> {
+    let (_, cert) = x509_parser::parse_x509_certificate(cert_der)
+        .map_err(|e| format!("解析证书失败: {}", e))?;
+    let spki = cert.tbs_certificate.subject_pki.raw;
+    let digest = Sha256::digest(spki);
+    Ok(format!(
+        "sha256:{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+    ))
 }
 
-/// admAgent server 的 HTTP 客户端（连接池按 transport 复用）
-pub type AgentHttpClient = Client<AgentConnector, Full<Bytes>>;
+/// Agent server 的 HTTP 客户端（连接池按 target 复用）。
+///
+/// 包一层是为了在每个请求上统一附加 `Authorization: Bearer <token>`，
+/// 这样 `send` / `stream_get` 之外不会出现漏带凭据的调用路径。
+#[derive(Clone)]
+pub struct AgentHttpClient {
+    inner: Client<AgentConnector, Full<Bytes>>,
+    token: String,
+}
+
+impl AgentHttpClient {
+    pub async fn request(
+        &self,
+        mut req: hyper::Request<Full<Bytes>>,
+    ) -> Result<hyper::Response<Incoming>, hyper_util::client::legacy::Error> {
+        if !self.token.is_empty() {
+            if let Ok(value) = hyper::http::HeaderValue::from_str(&format!("Bearer {}", self.token)) {
+                req.headers_mut().insert(hyper::header::AUTHORIZATION, value);
+            }
+        }
+        self.inner.request(req).await
+    }
+}
 
 /// 构建连接超时受限的 HTTP 客户端。
 /// 注意：这里的超时只约束建连；请求总体超时由调用方用 tokio::time::timeout 包一层
 /// （SSE 长连接绝不能设总超时，见 agent.rs forward_sse_events 注释）。
 pub fn build_client(
-    transport: &AgentTransport,
+    target: &TcpTarget,
     connect_timeout: Duration,
 ) -> Result<AgentHttpClient, String> {
     let connector = AgentConnector {
-        transport: transport.clone(),
+        target: target.clone(),
         connect_timeout,
     };
-    Ok(Client::builder(TokioExecutor::new()).build(connector))
+    Ok(AgentHttpClient {
+        inner: Client::builder(TokioExecutor::new()).build(connector),
+        token: target.token.clone(),
+    })
 }
 
 /// 生成请求 URI：authority 固定为 "agent"（连接器忽略主机，只用 path）
@@ -556,57 +377,5 @@ pub async fn health_check(client: &AgentHttpClient) -> bool {
     {
         Ok(Ok((status, _))) => (200..300).contains(&status),
         _ => false,
-    }
-}
-
-#[cfg(all(test, windows))]
-mod tests {
-    use super::*;
-    use std::process::Stdio;
-
-    /// 对真实 admAgent 二进制的命名管道连通性验证：
-    /// 1) 探测默认管道——已有 server 在跑就直接验证；
-    /// 2) 否则 spawn admAgent server（默认 host），轮询 /v1/health。
-    /// 同时验证 Rust 计算的管道名与 Go `DefaultHost()` 一致、tokio 管道
-    /// 客户端与 go-winio MessageMode 服务端兼容。
-    #[tokio::test]
-    async fn named_pipe_health_check_against_real_server() {
-        let exe = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../admAgent/admAgent.exe");
-        if !exe.exists() {
-            eprintln!("[test] admAgent.exe 不存在，跳过");
-            return;
-        }
-        let transport = AgentTransport::default_host();
-        eprintln!("[test] 默认传输地址: {}", transport.display());
-        let client = build_client(&transport, Duration::from_secs(2)).expect("build client");
-
-        let mut spawned: Option<tokio::process::Child> = None;
-        let mut healthy = health_check(&client).await;
-        if !healthy {
-            let mut cmd = tokio::process::Command::new(&exe);
-            cmd.arg("server")
-                .kill_on_drop(true)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            cmd.creation_flags(0x08000000);
-            let child = cmd.spawn().expect("spawn admAgent server");
-            spawned = Some(child);
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-            while tokio::time::Instant::now() < deadline {
-                if health_check(&client).await {
-                    healthy = true;
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(300)).await;
-            }
-        }
-        assert!(
-            healthy,
-            "named pipe 健康检查失败，transport={}",
-            transport.display()
-        );
-        if let Some(mut c) = spawned {
-            let _ = c.start_kill();
-        }
     }
 }

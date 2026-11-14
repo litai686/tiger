@@ -1,12 +1,12 @@
-# admAgent 改造：同目录多会话并行的写保护（已实现）
+# Agent 改造：同目录多会话并行的写保护（已实现）
 
 > 桌面端「同目录多会话并行」（`src/views/agent/*`，开关 `agent_concurrent_sessions` **默认关**，
 > 需在 Agent 设置→基础设置手动开启；并发上限 3）不需要
-> admAgent 改动即可运行——服务端运行态本就按会话隔离（`activeRequests`/`messageQueue`/`cancelMark`/
+> Agent 改动即可运行——服务端运行态本就按会话隔离（`activeRequests`/`messageQueue`/`cancelMark`/
 > `sessionMu` 均以 sessionID 为键，见 `internal/agent/agent.go`，子 Agent 早已在同目录并发运行）。
 >
-> 本文档记录**并行带来的文件级风险**与对应的服务端防护（P0/P1/P2 均已在 admAgent 侧实现）。
-> 注意：admAgent 改动后需重新编译并推送 sidecar（`admAgent/build.ps1` → `pnpm agent:push`）才会在 ADM 里生效。
+> 本文档记录**并行带来的文件级风险**与对应的服务端防护（P0/P1/P2 均已在 Agent 侧实现）。
+> 注意：Agent 改动后需重新编译并推送 sidecar（`Agent/build.ps1` → `pnpm agent:push`）才会在 Tiger 里生效。
 
 ## P0 — undo 并发保护（已实现）
 

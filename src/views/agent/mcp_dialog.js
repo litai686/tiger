@@ -1,8 +1,8 @@
 // MCP 服务添加 / 修改弹窗
 //
-// 配置持久化在 admAgent.json 顶层 `mcp` 映射（Rust 命令 list/add/update/delete_mcp_server），
+// 配置持久化在 tigerAgent.json 顶层 `mcp` 映射（Rust 命令 list/add/update/delete_mcp_server），
 // 与 Go 端 config.MCPConfig 字段对齐：stdio 用 command/args/env，http/sse 用 url/headers。
-// 注意：admAgent server 只在启动时初始化 MCP 客户端，保存后须重启 Agent 服务才会
+// 注意：Agent server 只在启动时初始化 MCP 客户端，保存后须重启 Agent 服务才会
 // 建立连接（/config/set 只触发配置内存重载，不会重建 MCP 会话），保存成功后询问用户
 // 是否立即重启。
 import { t as _t } from "../../i18n.js";
@@ -124,7 +124,7 @@ function mcpDialogMsg(text, isError) {
   el.style.color = isError ? "#ef4444" : "#22c55e";
 }
 
-// 读取表单为提交结构（字段名与 Rust McpServerView / admAgent.json 对齐）
+// 读取表单为提交结构（字段名与 Rust McpServerView / tigerAgent.json 对齐）
 function readMcpForm() {
   var args = $input("mcp-dialog-args").value.split("\n").map(function(s) { return s.trim(); })
     .filter(function(s) { return s !== ""; });

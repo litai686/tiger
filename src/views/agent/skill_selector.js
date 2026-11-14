@@ -2,7 +2,7 @@
 // 职责：
 //   1. 列出当前工作区可用的「用户技能」（source=user 或 source=project，且 user_invocable=true）；
 //      默认显示全部，不区分全局/项目，但用 badge 标识来源。
-//   2. 用户点击技能项 → 调 /skills/read 读 SKILL.md 内容 → 通过 save_attachment_file 落盘为真实文件路径
+//   2. 用户点击技能项 → 调 /skills/read 读 SKILL.md 内容 → 以 base64 附件发送（服务端负责落盘）
 //      → 作为 markdown 附件加入 S.pendingFiles（沿用 attach.js 的"路径模式"流程）。
 //   3. 下一次发送消息时，附件内容会随消息一起被服务端 ingest（与 TUI 的 attachSkill 行为一致）。
 //   4. 重复点击同一项：先取消已附加（移除待发送里的对应技能附件），再点击重新附加。
@@ -24,7 +24,7 @@ var skillsLoaded = false; // 是否已成功拉取过（列表为空时避免每
 
 /**
  * 把 base64 字符串解码为 Uint8Array（兼容带不带 data: 前缀、兼容 url-safe 字符）。
- * admAgent 服务端 `ReadSkillResponse.Content` 是 []byte，JSON 编码后是标准 base64。
+ * Agent 服务端 `ReadSkillResponse.Content` 是 []byte，JSON 编码后是标准 base64。
  */
 function decodeBase64(b64) {
   var s = String(b64 || "");
@@ -52,7 +52,7 @@ function uint8ToBase64(bytes) {
 }
 
 /** 过滤掉内置（system）技能，只保留用户/项目。
- * 注意：不能按 user_invocable 过滤 —— admAgent 的 Skill.UserInvocable 是 bool，
+ * 注意：不能按 user_invocable 过滤 —— Agent 的 Skill.UserInvocable 是 bool，
  * YAML 缺省即 false（与文档"默认 true"不一致），绝大多数本地技能都没写
  * user-invocable: true，会被服务端标为 false 而误过滤。按用户需求
  *「只显示用户技能（全局+项目），默认全部」，只按 source 过滤。 */
@@ -70,7 +70,7 @@ function filterUserSkills(list) {
  *  - 服务端 /skills 返回的字段：id(SkillFilePath), name, description, label, source, user_invocable
  *  - 磁盘扫描 list_installed_skills 返回的字段：name, path(技能目录), source, description,
  *    user_invocable, content_base64（SKILL.md 全量 base64，供快照外的新装技能直接附加）
- * id 必须指向 SKILL.md 的完整文件路径（与 admAgent FindEffective 比较 SkillFilePath 一致）：
+ * id 必须指向 SKILL.md 的完整文件路径（与 Agent FindEffective 比较 SkillFilePath 一致）：
  *  - 服务端直接拿 s.id
  *  - 磁盘扫描 s.path 是目录，需拼上 /SKILL.md */
 function normalizeSkillItem(s) {
@@ -318,20 +318,15 @@ export async function invokeSkill(skill) {
     var bytes = decodeBase64(contentB64);
     var base64Str = uint8ToBase64(bytes);
 
-    // 落盘 → 拿到真实磁盘路径，沿用 attach.js "路径模式"流程
-    var realPath = await invoke("save_attachment_file", {
-      file_name: displayName + ".md",
-      base64_content: base64Str
-    });
-
-    // 加入 pendingFiles（type 用 text/markdown，与 TUI attachSkill 一致）
+    // 直接以 base64 作为附件发送：服务端会落盘到自己的 session 附件目录。
+    // 不再在客户端落盘取本地路径——服务端可能不在本机，那个路径它读不到。
     S.pendingFiles.push({
       name: attachName,
       type: "text/markdown",
       size: bytes.length,
       base64: base64Str,
       dataUrl: "data:text/markdown;base64," + base64Str,
-      path: realPath,
+      path: null,
       _skill: { id: skill.id, name: displayName, source: skill.source }
     });
     renderAttachPreviewPublic();

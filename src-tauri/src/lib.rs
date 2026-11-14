@@ -3,7 +3,7 @@ mod common;
 mod pages;
 
 use app_state::AppState;
-use pages::{agent, index, settings, ilink, skills};
+use pages::{agent, index, logs, settings, skills};
 
 use tauri::Manager;
 use tauri::menu::{Menu, MenuItem};
@@ -33,13 +33,13 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
-/// 清理所有子进程（Agent / admAgent）。
+/// 清理所有子进程（Agent / Agent）。
 /// 从原 `on_window_event(CloseRequested)` 提取，供托盘"退出"、正常关闭与
 /// 应用自升级（拉起安装包后退出）复用。
 pub(crate) fn cleanup_processes(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
 
-    // 关闭 Agent 会话（只杀本进程拉起的 admAgent server 子进程；复用的共享
+    // 关闭 Agent 会话（只杀本进程拉起的 Agent server 子进程；复用的共享
     // server 不杀，由服务端在最后一个工作区被 teardown 时自行退出）
     agent::kill_agent_session(&state);
 }
@@ -56,13 +56,12 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_hwinfo::init())
         .manage(AppState::new())
-        .manage(ilink::IlinkManaged::default())
         .setup(|app| {
             // 调试日志：按持久化设置恢复开关（开启时截断重建 → 每次重启清空上次日志），
-            // 早于任何 admAgent 交互，确保本次会话从头开始记录。
+            // 早于任何 Agent 交互，确保本次会话从头开始记录。
             agent::init_debug_logging(app.handle());
 
-            // admAgent.json 备份与损坏恢复：首次启动备份；检测到损坏时弹窗引导从备份恢复
+            // tigerAgent.json 备份与损坏恢复：首次启动备份；检测到损坏时弹窗引导从备份恢复
             agent::init_agent_config_recovery(app.handle());
 
             // ===== 系统托盘 =====
@@ -129,12 +128,6 @@ pub fn run() {
                 .tray_available
                 .store(tray_ok, std::sync::atomic::Ordering::Relaxed);
 
-            // iLink 微信 Bot：已绑定且启用时自动恢复桥接（内部等待 admAgent 就绪）
-            ilink::auto_start(app.handle().clone());
-
-            // macOS：清理旧版「运行时下载」模式遗留在 app_data_dir 的 admAgent（新版用安装包内置 sidecar）
-            #[cfg(target_os = "macos")]
-            agent::cleanup_legacy_adm_agent(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -179,16 +172,17 @@ pub fn run() {
             settings::get_tauri_version,
             settings::get_server_connection,
             settings::set_server_connection,
-            settings::prepare_device_identity,
             settings::test_server_connection,
-            // agent.rs - server mode
+            // agent.rs - 服务端连接（TCP + TLS，服务端由用户自行启动）
             agent::get_platform_os,
             agent::get_platform_arch,
-            agent::check_adm_agent,
-            agent::get_adm_agent_version,
+            agent::get_server_version,
+            agent::apply_server_settings,
+            agent::get_server_settings,
+            agent::local_agent_config_diff,
+            agent::import_local_agent_config,
             agent::get_agent_workdir,
             agent::set_agent_workdir,
-            agent::pick_workdir_folder,
             agent::get_workdirs,
             agent::add_workdir,
             agent::remove_workdir,
@@ -215,37 +209,25 @@ pub fn run() {
             agent::open_debug_log_dir,
             agent::read_attachment_file,
             agent::is_directory,
-            agent::check_git_repo,
-            agent::save_attachment_file,
             agent::read_clipboard_files,
             agent::clipboard_read_text,
             agent::clipboard_write_text,
-            agent::agent_lsp_fix,
-            agent::agent_lsp_fix_targets,
-            agent::read_project_memory,
-            agent::update_project_memory,
-            // ilink.rs - 微信 Bot 桥接
-            ilink::start_ilink_login,
-            ilink::cancel_ilink_login,
-            ilink::submit_ilink_verify_code,
-            ilink::get_ilink_status,
-            ilink::start_ilink_bridge,
-            ilink::stop_ilink_bridge,
-            ilink::unbind_ilink,
-            ilink::set_ilink_follow,
-            ilink::set_ilink_current_session,
             // skills.rs - 技能管理
             skills::fetch_skill_store,
             skills::install_skill,
             skills::install_skill_from_zip,
             skills::uninstall_skill,
             skills::list_installed_skills,
+            // logs.rs - 服务端日志查看 / 下载（GET /v1/logs）
+            logs::fetch_server_logs,
+            logs::fetch_server_log_text,
+            logs::download_server_log,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
     // macOS：Cmd+Q / Dock 菜单退出走 RunEvent::ExitRequested（不是 CloseRequested），
-    // 只有在这里才能统一拦截清理子进程，否则 admAgent 残留为孤儿（端口被占用、
+    // 只有在这里才能统一拦截清理子进程，否则 Agent 残留为孤儿（端口被占用、
     // 下次启动服务报"端口占用"）。cleanup_processes 幂等，重复调用安全。
     app.run(|app_handle, event| {
         if let tauri::RunEvent::ExitRequested { .. } = event {

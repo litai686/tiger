@@ -1,4 +1,4 @@
-// 设置弹窗 / 云端模型添加 / admAgent 版本显示
+// 设置弹窗 / 云端模型添加 / Agent 版本显示
 import { t as _t } from "../../i18n.js";
 import { S, invoke } from "./store.js";
 import { api } from "./api.js";
@@ -7,14 +7,8 @@ import { showConfirm, reportError } from "./ui.js";
 import { updateWorkspaceSelector } from "./workspace.js";
 import { updateModelDropdown, switchModel, refreshServerProviders, firstCloudModelKey, updateModelBtn } from "./model.js";
 
-// 内置多模态模型（图片识别）在服务端的显示名：admAgent 的图片后端池只暴露 adm-models。
-// 旧版本使用 admImage-model（服务端两者等价），这里统一归一化，避免下拉出现重复项。
-export const BUILTIN_VISION_KEY = "admAgent/adm-models";
-const LEGACY_BUILTIN_VISION_KEY = "admAgent/admImage-model";
-
-function normalizeVisionKey(value) {
-  return value === LEGACY_BUILTIN_VISION_KEY ? BUILTIN_VISION_KEY : value;
-}
+// 内置多模态模型（图片识别）在服务端的显示名：Agent 的图片后端池只暴露一个模型。
+export const BUILTIN_VISION_KEY = "tigerAgent/agent-models";
 
 // ===== 设置弹窗 =====
 export function showSettings() {
@@ -33,7 +27,7 @@ export function updateSettingsUI() {
   // 调试模式（持久化到 config.json 的 debug_logging，由后端开关控制）
   $input("settings-debug-logging").checked = !!S.settings.debug_logging;
 
-  // 开启所有工具调用（关闭 admAgent 内置 bash 命令黑名单）
+  // 开启所有工具调用（关闭 Agent 内置 bash 命令黑名单）
   $input("settings-allow-all-tools").checked = !!S.settings.agent_allow_all_tools;
 
   // 同目录多会话并行（默认关：开启后才允许同一工作目录内多会话并行）
@@ -45,14 +39,10 @@ export function updateSettingsUI() {
   // 温度
   tempInput.value = S.settings.agent_temperature || "";
 
-  // 多模态模型（图片识别）：默认内置 adm-models，自动轮询远程图片后端
-  // 迁移：旧版内置名 admImage-model 归一化为 adm-models；仅在服务端快照就绪时校验当前值并
-  // 重置为内置默认值，快照未就绪时保留原值，交给下方 renderVisionModelSelect 的保留逻辑
-  // 兜底（避免离线时把 local/localModel 等有效配置误重置 —— S.providers 来自
-  // list_cloud_providers，不含 local 条目）
-  if (S.settings.agent_vision_model) {
-    S.settings.agent_vision_model = normalizeVisionKey(S.settings.agent_vision_model);
-  }
+  // 多模态模型（图片识别）：默认内置 agent-models，自动轮询远程图片后端。
+  // 仅在服务端快照就绪时校验当前值并重置为内置默认值，快照未就绪时保留原值，
+  // 交给下方 renderVisionModelSelect 的保留逻辑兜底（避免离线时把 local/localModel
+  // 等有效配置误重置 —— S.providers 来自 list_cloud_providers，不含 local 条目）
   if (S.serverProvidersLoaded && S.settings.agent_vision_model) {
     var visionValid = S.serverProviders.some(function(sp) {
       return Array.isArray(sp.models) && sp.models.some(function(m) {
@@ -69,16 +59,16 @@ export function updateSettingsUI() {
   renderProviderList();
 }
 
-// 渲染「多模态模型」下拉：固定首项内置 adm-models（默认）+ 所有 supports_images=true
+// 渲染「多模态模型」下拉：固定首项内置 agent-models（默认）+ 所有 supports_images=true
 // 的已配置模型（云端 provider + 本地多模态，复用服务端 /providers 快照；离线回退磁盘列表）
 export function renderVisionModelSelect() {
   var sel = $input("settings-vision-model");
   if (!sel) return;
-  var current = normalizeVisionKey(S.settings.agent_vision_model || BUILTIN_VISION_KEY);
+  var current = S.settings.agent_vision_model || BUILTIN_VISION_KEY;
   sel.innerHTML = "";
   var first = document.createElement("option");
   first.value = BUILTIN_VISION_KEY;
-  first.textContent = _t("adm-models（内置 · 自动轮询）");
+  first.textContent = _t("agent-models（内置 · 自动轮询）");
   sel.appendChild(first);
   var seen = {};
   seen[BUILTIN_VISION_KEY] = true;
@@ -86,8 +76,8 @@ export function renderVisionModelSelect() {
   if (S.serverProvidersLoaded) {
     S.serverProviders.forEach(function(sp) {
       if (!sp || !Array.isArray(sp.models)) return;
-      // 内置 admAgent provider 已由首项覆盖，不再按服务端模型名重复列出
-      if (sp.id === "admAgent") return;
+      // 内置 Agent provider 已由首项覆盖，不再按服务端模型名重复列出
+      if (sp.id === "tigerAgent") return;
       sp.models.forEach(function(m) {
         if (!m || m.supports_images !== true) return;
         entries.push({ key: sp.id + "/" + m.id, name: m.name || m.id });
@@ -136,11 +126,11 @@ export async function saveSettings() {
     s.agent_reasoning_effort = normalizeReasoningEffort(S.settings.agent_reasoning_effort);
     s.agent_temperature = S.settings.agent_temperature || null;
     s.debug_logging = S.settings.debug_logging || false;
-    s.agent_vision_model = normalizeVisionKey(S.settings.agent_vision_model) || BUILTIN_VISION_KEY;
+    s.agent_vision_model = S.settings.agent_vision_model || BUILTIN_VISION_KEY;
     s.agent_allow_all_tools = S.settings.agent_allow_all_tools === true;
     s.agent_concurrent_sessions = S.settings.agent_concurrent_sessions === true;
     // 压缩时自动提取记忆规则（默认开：只有显式 false 才关闭），
-    // 后端 save_settings 会同步进 admAgent.json 的 options.project_memory_sync
+    // 后端 save_settings 会同步进 tigerAgent.json 的 options.project_memory_sync
     s.agent_project_memory_sync = S.settings.agent_project_memory_sync !== false;
     await invoke("save_settings", { settings: s });
     updateWorkspaceSelector();
@@ -297,6 +287,8 @@ function showEditModelDialog(p) {
   $input("add-model-name").value = p.name || "";
   $input("add-model-baseurl").value = p.base_url || "";
   $input("add-model-apikey").value = p.api_key || "";
+  // 服务端只回传掩码，永不回传明文 key：留空表示保留已保存的 key。
+  $input("add-model-apikey").placeholder = p.has_key || p.api_key ? _t("已保存，留空则不修改") : "";
   $input("add-model-ctx").value = formatCtxInput(p.context_window);
   $input("add-model-images").checked = !!p.supports_images;
   document.getElementById("add-model-msg").textContent = "";
@@ -390,22 +382,26 @@ export async function addModel() {
   var supportsImages = $input("add-model-images").checked;
   // 思考模式不再单独勾选：云端模型一律按支持思考写入（can_reason=true）
 
-  if (!modelId || !baseUrl || !apiKey) {
+  var editing = editingProviderKey !== null;
+  if (!modelId || !baseUrl || (!apiKey && !editing)) {
     addModelMsg(_t("请填写模型ID、API地址和密钥"), true);
     return;
   }
 
   // 提交前校验 API 地址与密钥：请求 {base}/models，不通过则阻止添加（新增/修改均校验）。
   // 走 Rust 侧（`probe_models_endpoint`，10s 超时）：前端直连会被 CORS 拦成假报错。
+  // 修改时留空 key 就无法探测，直接跳过（服务端会保留原 key）。
   var probeBase = baseUrl.replace(/\/+$/, "");
-  addModelMsg(_t("正在校验 API 地址与密钥…"), false);
-  try {
-    await probeModels(probeBase, apiKey);
-  } catch (verifyErr) {
-    addModelMsg(_t("校验失败，API 地址或密钥不正确：") + verifyErr, true);
-    return;
+  if (apiKey) {
+    addModelMsg(_t("正在校验 API 地址与密钥…"), false);
+    try {
+      await probeModels(probeBase, apiKey);
+    } catch (verifyErr) {
+      addModelMsg(_t("校验失败，API 地址或密钥不正确：") + verifyErr, true);
+      return;
+    }
+    addModelMsg(_t("校验通过，正在保存…"), false);
   }
-  addModelMsg(_t("校验通过，正在保存…"), false);
 
   // 新增时先查键冲突：providers 是对象，slug 后同名的两个名称会指向同一个键，
   // 后加的会静默覆盖先加的（agent.rs add_cloud_provider 直接 providers[key] = ...），
@@ -429,21 +425,6 @@ export async function addModel() {
         key: key,
         input: { name: name, base_url: baseUrl, api_key: apiKey, context_window: ctx, model_id: modelId, supports_images: supportsImages, can_reason: true }
       });
-      // 同步运行中的 server：与添加路径同理，只写标量 api_key 触发服务端落盘+从磁盘全量重载，
-      // 让刚写入 admAgent.json 的新参数（base_url / model id / 上下文等）立即生效
-      if (S.serverInfo && S.serverInfo.workspace_id) {
-        try {
-          await api("POST", "/v1/workspaces/" + S.serverInfo.workspace_id + "/config/set", {
-            scope: 0,
-            key: "providers." + key + ".api_key",
-            value: apiKey
-          });
-          delete S.pendingProviderKeys[key];
-        } catch (e) {
-          S.pendingProviderKeys[key] = true;
-          console.warn("[agent] 同步修改后的 provider 到服务端失败（重启后生效）:", e);
-        }
-      }
       S.providers = await invoke("list_cloud_providers");
       await refreshServerProviders();
       renderVisionModelSelect();
@@ -470,39 +451,11 @@ export async function addModel() {
     var addResp = await invoke("add_cloud_provider", {
       input: { name: name, base_url: baseUrl, api_key: apiKey, context_window: ctx, model_id: modelId, supports_images: supportsImages, can_reason: true }
     });
-    // 关键：把新 provider 同步进运行中的 server（/config/set 会写盘并自动重载内存）。
-    // 否则 server 只在启动时读 admAgent.json，选中新模型会报
-    // "active model provider not configured"，且后续 /agent/init 失败会把 coordinator 置空。
-    // 注意只写标量 api_key、不写完整 provider 对象：/config/set 落盘到服务端数据配置
-    // （Windows 为 %LOCALAPPDATA%/admAgent/admAgent.json），与 add_cloud_provider 写入的
-    // ~/.config/admAgent/admAgent.json 是两个文件，服务端加载时用 go-jsons 合并且
-    // 数组按「拼接」处理——完整 provider（含 models 数组）写两处会让同一模型在
-    // 下拉列表出现两次；写标量即可触发 SetConfigField 的自动重载，让服务端从磁盘
-    // 合并进 Rust 侧刚写入的完整 provider。
-    var runtimeSynced = false;
-    var syncError = null;
-    if (addResp && addResp.key && S.serverInfo && S.serverInfo.workspace_id) {
-      try {
-        await api("POST", "/v1/workspaces/" + S.serverInfo.workspace_id + "/config/set", {
-          scope: 0,
-          key: "providers." + addResp.key + ".api_key",
-          value: apiKey
-        });
-        runtimeSynced = true;
-        delete S.pendingProviderKeys[addResp.key];
-      } catch (e) {
-        syncError = e;
-        S.pendingProviderKeys[addResp.key] = true;
-        console.warn("[agent] 同步新 provider 到服务端失败（重启后生效）:", e);
-      }
-    } else if (addResp && addResp.key) {
-      S.pendingProviderKeys[addResp.key] = true;
-    }
-    S.providers = await invoke("list_cloud_providers");
-    // 只有 /config/set 成功且 /providers 快照确实包含该 key，才算运行时可用。
+    // add_cloud_provider 已经直接写服务端（POST /v1/settings）并触发热重载，
+    // 这里只确认 /providers 快照确实包含该 key。
     var snapshotLoaded = await refreshServerProviders();
     renderVisionModelSelect();
-    var runtimeConfirmed = runtimeSynced && snapshotLoaded && S.serverProviders.some(function(sp) {
+    var runtimeConfirmed = snapshotLoaded && S.serverProviders.some(function(sp) {
       return sp && sp.id === addResp.key;
     });
     if (!runtimeConfirmed && addResp && addResp.key) S.pendingProviderKeys[addResp.key] = true;
@@ -511,7 +464,7 @@ export async function addModel() {
     if (runtimeConfirmed) {
       addModelMsg(_t("添加成功"), false);
     } else {
-      addModelMsg(_t("配置已保存，但当前服务未加载该模型；重启 Agent 后生效") + (syncError ? ": " + syncError : ""), true);
+      addModelMsg(_t("配置已保存到服务端，但当前服务未加载该模型；重启 Agent 后生效"), true);
       return;
     }
     setTimeout(function() {

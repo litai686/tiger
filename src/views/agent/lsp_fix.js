@@ -1,71 +1,47 @@
-// LSP 启动失败检测与修复（三层）：
-//  T1 自动安装：命令白名单在 Rust 端（agent_lsp_fix），目标列表由 agent_lsp_fix_targets 提供
-//  T2 安装指引：不可自动安装的服务器（二进制发行版 / 系统包管理器 / 随 SDK）给出推荐命令 + 文档
+// LSP 启动失败检测与修复（三层，安装与启动都在服务端执行）：
+//  T1 自动安装：安装命令表在服务端（internal/lsp/fix.go），一条
+//     POST /lsps/{lsp}/fix 完成「装二进制 + 启动」，客户端只展示结果
+//  T2 安装指引：不可自动安装的服务器（二进制发行版 / 系统包管理器 / 随 SDK）
+//     由服务端下发推荐命令 + 文档链接
 //  T3 AI 安装：把安装任务交给当前会话的 agent（bash + 网络）兜底任意语言
 import { t as _t } from "../../i18n.js";
-import { S, invoke } from "./store.js";
+import { S } from "./store.js";
 import { api } from "./api.js";
 import { log } from "./log.js";
 import { showInfo, showWarning, reportError } from "./ui.js";
 import { loadTools, renderToolsList } from "./tools.js";
 import { sendMessageWithText } from "./send.js";
 
-// T2：推荐安装方式与官方文档（Rust 白名单之外的常见服务器）
-var LSP_GUIDES = {
-  clangd: { hint: "winget install LLVM.LLVM / brew install llvm / apt install clangd", url: "https://clangd.llvm.org/installation" },
-  lua_ls: { hint: "brew install lua-language-server / scoop install lua-language-server（或下载 GitHub Releases）", url: "https://luals.github.io/" },
-  zls: { hint: "下载 GitHub Releases（版本需与 Zig 匹配）", url: "https://github.com/zigtools/zls" },
-  dartls: { hint: "安装 Dart SDK 后自带 dart 分析器", url: "https://dart.dev/get-dart" },
-  elixirls: { hint: "下载 GitHub Releases（需 Erlang/Elixir 环境）", url: "https://github.com/elixir-lsp/elixir-ls" },
-  metals: { hint: "cs install metals（需先安装 coursier）", url: "https://scalameta.org/metals/docs/editors/new-editor/" },
-  kotlin_language_server: { hint: "下载 GitHub Releases 并加入 PATH", url: "https://github.com/fwcd/kotlin-language-server" },
-  omnisharp: { hint: "下载 GitHub Releases（或随 VS Code C# 扩展安装）", url: "https://github.com/OmniSharp/omnisharp-roslyn" },
-  sourcekit: { hint: "macOS 随 Xcode 命令行工具提供", url: "https://github.com/swiftlang/sourcekit-lsp" },
-  phpactor: { hint: "composer global require phpactor/phpactor", url: "https://phpactor.readthedocs.io/" },
-  nil_ls: { hint: "nix profile install nixpkgs#nil", url: "https://github.com/oxalica/nil" },
-  lemminx: { hint: "下载 GitHub Releases（需 Java 运行时）", url: "https://github.com/eclipse-lemminx/lemminx" },
-};
-
-// 触发 /lsps/start 的探测文件扩展名（需能被 DetectLanguage 识别为该语言）
-var LSP_PROBE_EXT = {
-  rust_analyzer: ".rs",
-  gopls: ".go",
-  vtsls: ".ts",
-  pyright: ".py",
-  basedpyright: ".py",
-  pylsp: ".py",
-  bashls: ".sh",
-  svelte: ".svelte",
-  vue_ls: ".vue",
-  intelephense: ".php",
-  dockerls: ".dockerfile",
-  sqlls: ".sql",
-  sqls: ".sql",
-  emmet_ls: ".html",
-  taplo: ".toml",
-  texlab: ".tex",
-  cmake: ".cmake",
-  solargraph: ".rb",
-};
-
 var AUTO_FIX_KEY = "agent_lsp_auto_fix";
 var AUTO_FIX_INTERVAL_MS = 30 * 60 * 1000;
 var NOTICE_INTERVAL_MS = 10 * 60 * 1000;
+// 服务端装包最长 10 分钟：POST 只调度任务，这里轮询作业状态（HTTP 请求本身
+// 有 180s 上限，不能把安装挂在一次请求上）
+var FIX_POLL_INTERVAL_MS = 1500;
+var FIX_POLL_TIMEOUT_MS = 12 * 60 * 1000;
 
-var fixTargets = null;        // name -> { command, requires }（来自 Rust 端白名单）
+// name -> { command, requires, hint, url }（来自 GET /v1/lsp/fix-targets：
+// command 非空 = 服务端可自动安装，否则是需手工安装的指引）
+var fixTargets = null;
 var fixTargetsLoading = null;
 var fixInFlight = {};
 var lastFixAttemptAt = {};
 var lastNoticeAt = {};
 
-/** 拉取 Rust 端可自动安装的 LSP 列表（缓存，只失败时重试） */
+/** 拉取服务端的 LSP 安装目标列表（缓存，只失败时重试） */
 export function ensureFixTargets() {
   if (fixTargets) return Promise.resolve(fixTargets);
   if (fixTargetsLoading) return fixTargetsLoading;
-  fixTargetsLoading = invoke("agent_lsp_fix_targets").then(function(list) {
+  fixTargetsLoading = api("GET", "/v1/lsp/fix-targets").then(function(list) {
     var map = {};
     (list || []).forEach(function(t) {
-      if (t && t.name) map[t.name] = { command: t.command || "", requires: t.requires || "" };
+      if (!t || !t.name) return;
+      map[t.name] = {
+        command: t.command || "",
+        requires: t.requires || "",
+        hint: t.hint || "",
+        url: t.url || "",
+      };
     });
     fixTargets = map;
     fixTargetsLoading = null;
@@ -73,7 +49,7 @@ export function ensureFixTargets() {
     renderToolsList();
     return map;
   }).catch(function(e) {
-    log.debug("LSP", "获取自动修复目标失败: " + e);
+    log.debug("LSP", "获取安装目标失败: " + e);
     fixTargets = {};
     fixTargetsLoading = null;
     renderToolsList();
@@ -83,15 +59,20 @@ export function ensureFixTargets() {
 }
 
 export function isLspFixable(name) {
-  return !!(fixTargets && fixTargets[name]);
+  var target = fixTargets && fixTargets[name];
+  return !!(target && target.command);
 }
 
 export function fixTarget(name) {
   return (fixTargets && fixTargets[name]) || null;
 }
 
+/** 手工安装指引；可自动安装或没有指引时返回 null（按钮不显示） */
 export function guideFor(name) {
-  return LSP_GUIDES[name] || null;
+  var target = fixTargets && fixTargets[name];
+  if (!target || target.command) return null;
+  if (!target.hint && !target.url) return null;
+  return { hint: target.hint, url: target.url };
 }
 
 export function isLspAutoFixEnabled() {
@@ -135,25 +116,35 @@ export function onLspStateEvent(name, state, errorText, errorType) {
   showWarning(name + _t(" 启动失败：") + reason + hint);
 }
 
-/** T1：执行自动修复（安装 → 触发启动 → 刷新面板） */
+/** T1：请求服务端安装并启动（服务端在一条请求里完成装包 → 启动），随后刷新面板 */
 export async function runLspFix(name, opts) {
   opts = opts || {};
   if (!isLspFixable(name) || fixInFlight[name]) return false;
+  var wsId = S.serverInfo ? S.serverInfo.workspace_id : "";
+  if (!wsId) return false;
   fixInFlight[name] = true;
   try {
     var target = fixTarget(name) || {};
-    log.debug("LSP", "修复 " + name + "：执行 " + (target.command || ""));
-    await invoke("agent_lsp_fix", { lspName: name });
-    var started = await triggerLspStart(name);
+    log.debug("LSP", "修复 " + name + "：请求服务端执行 " + (target.command || ""));
+    var fixUrl = "/v1/workspaces/" + wsId + "/lsps/" + encodeURIComponent(name) + "/fix";
+    var result = await api("POST", fixUrl);
+    result = await waitFixDone(fixUrl, result);
     await loadTools();
+    // 服务端返回值里 state 与 /lsps 一致：2=已连接 1=启动中
+    var started = !!result && (result.state === 2 || result.state === 1);
     if (started) {
       // 修复成功后抑制本会话内的重复自动安装（避免误判反复重装）
       lastFixAttemptAt[name] = Date.now();
       showInfo(name + _t(" 已修复并启动"));
+    } else if (result && result.running) {
+      // 轮询到自身超时：作业还在跑，交给用户稍后自查（不误报成失败）
+      showInfo(name + _t(" 仍在安装中，完成后可在「工具」→ LSP 页查看状态"));
     } else {
-      // 未就绪（安装失败 / 服务端未在探测窗口内就绪）：清零时间戳，下次报错可重试
+      // 未就绪（服务端安装失败 / 启动没到 ready）：清零时间戳，下次报错可重试
       lastFixAttemptAt[name] = 0;
-      showWarning(name + _t(" 已安装，但服务尚未就绪；打开对应文件时会再次自动启动"));
+      var msg = name + _t(" 已安装，但服务尚未就绪；打开对应文件时会再次自动启动");
+      if (result && result.error) msg += " " + String(result.error);
+      showWarning(msg);
     }
     return started;
   } catch (e) {
@@ -165,56 +156,20 @@ export async function runLspFix(name, opts) {
   }
 }
 
+/** 轮询服务端修复作业直到结束；超时返回最后一次状态（可能仍在装） */
+async function waitFixDone(fixUrl, result) {
+  var deadline = Date.now() + FIX_POLL_TIMEOUT_MS;
+  while (result && result.running && Date.now() < deadline) {
+    await new Promise(function(resolve) { setTimeout(resolve, FIX_POLL_INTERVAL_MS); });
+    result = await api("GET", fixUrl);
+  }
+  return result;
+}
+
 /** T3：把安装任务交给当前会话的 agent（兜底任意语言/任意安装方式） */
 export function runAiInstall(name, errorText) {
   var prompt = _t("请帮我安装并配置语言服务器「") + name + _t("」，让它能正常启动。当前失败原因：") +
     (errorText ? String(errorText) : _t("未知原因")) +
     _t("。请选择合适的包管理器安装（npm/pip/go/cargo 等），安装完成后验证 LSP 能否正常启动。");
   sendMessageWithText(prompt);
-}
-
-/** 触发 LSP 启动并等待就绪：覆盖服务端"启动失败后 30s 内不再尝试"的冷却窗口 */
-async function triggerLspStart(name) {
-  var wsId = S.serverInfo ? S.serverInfo.workspace_id : "";
-  if (!wsId) return false;
-  var dir = (S.workspaceInfo && S.workspaceInfo.path) || "";
-  var canProbe = !!dir && dir !== "默认";
-  var ext = LSP_PROBE_EXT[name] || "";
-  var sep = dir.indexOf("\\") >= 0 ? "\\" : "/";
-
-  for (var i = 0; i < 4; i++) {
-    if (canProbe) {
-      var probePath = dir + sep + "__lsp_start__" + ext;
-      try {
-        await api("POST", "/v1/workspaces/" + wsId + "/lsps/start", { path: probePath });
-      } catch (e) {
-        log.debug("LSP", "触发启动失败: " + e);
-      }
-    }
-    var state = await waitLspSettled(wsId, name, 6000);
-    if (state === 2 || state === 1) return true;
-    await new Promise(function(resolve) { setTimeout(resolve, 3000); });
-  }
-  return false;
-}
-
-/** 轮询目标 LSP 状态：ready(2) 立即返回，starting(1)/未知 继续等，超时返回最后状态 */
-async function waitLspSettled(wsId, name, timeoutMs) {
-  var deadline = Date.now() + timeoutMs;
-  var last = null;
-  while (Date.now() < deadline) {
-    last = await readLspState(wsId, name);
-    if (last === 2) return 2;
-    if (last !== 1 && last !== null) return last;
-    await new Promise(function(resolve) { setTimeout(resolve, 1000); });
-  }
-  return last;
-}
-
-async function readLspState(wsId, name) {
-  try {
-    var states = await api("GET", "/v1/workspaces/" + wsId + "/lsps");
-    if (states && states[name]) return states[name].state;
-  } catch (_) {}
-  return null;
 }

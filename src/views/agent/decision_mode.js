@@ -1,17 +1,17 @@
 import { t as _t } from "../../i18n.js";
 import { S } from "./store.js";
 
-var STORAGE_KEY = "adm_agent_decision_modes_v1";
+var STORAGE_KEY = "agent_decision_modes_v1";
 var memoryModes = null;
-var REQUEST_RE = /<adm_decision_request>\s*([\s\S]*?)\s*<\/adm_decision_request>/i;
-var RESULT_RE = /<adm_decision_result>\s*([\s\S]*?)\s*<\/adm_decision_result>/i;
-// 早期服务端把决策结果重放进模型上下文时用的标记（admAgent
+var REQUEST_RE = /<agent_decision_request>\s*([\s\S]*?)\s*<\/agent_decision_request>/i;
+var RESULT_RE = /<agent_decision_result>\s*([\s\S]*?)\s*<\/agent_decision_result>/i;
+// 早期服务端把决策结果重放进模型上下文时用的标记（Agent
 // internal/message/content.go 的 ContextText 旧格式）。它本只给模型看，但模型
 // 会把它当成输出格式照抄进正文，于是普通对话里出现裸 JSON / 决策标签。
 // ContextText 现已改成不含 JSON 的自然语言脚注，不再产出该标记；这里保留解析
 // 只为清理**已落库**的旧消息——遇到就静默剥掉，绝不再画成决策卡片。
 var CONTEXT_RESULT_RE = /\[decision result \((choice|bool|score|decision)\)\]/i;
-var CONTRACT_RE = /(?:<adm_decision_contract>\s*)?\[ADM Decision Output Contract\][\s\S]*?(?:<\/adm_decision_contract>|(?=\n<system_info>)|$)/i;
+var CONTRACT_RE = /(?:<agent_decision_contract>\s*)?\[tigerAgent Decision Output Contract\][\s\S]*?(?:<\/agent_decision_contract>|(?=\n<system_info>)|$)/i;
 // label 与模板下拉项文案保持一致（同一功能两处显示同一名称，便于 _t 复用）
 var MODES = {
   text: { label: "普通对话", requestMode: null },
@@ -130,7 +130,7 @@ export function bindDecisionModeEvents() {
 }
 
 // 决策模式的请求载荷（POST /v1/workspaces/{id}/agent 的 decision 字段）。
-// 输出契约已由服务端负责（admAgent internal/decision + decision_turn.go），
+// 输出契约已由服务端负责（Agent internal/decision + decision_turn.go），
 // 前端不再把控制块拼进用户消息，因此控制文本不会进入会话历史、自动标题，
 // 也不会出现在其它客户端（TUI / 微信）的消息里。
 export function decisionRequestPayload(mode) {
@@ -252,13 +252,13 @@ export function decisionReplayFromText(text) {
 }
 
 export function hasDecisionSyntax(text) {
-  return Boolean(text && (/<adm_decision_request>/i.test(text) || /<adm_decision_result>/i.test(text)));
+  return Boolean(text && (/<agent_decision_request>/i.test(text) || /<agent_decision_result>/i.test(text)));
 }
 
 function stripDecisionRequestAndContract(text) {
   if (!text) return "";
   var clean = text;
-  if (/<adm_decision_request>/i.test(text) || /<\/adm_decision_contract>/i.test(text)) {
+  if (/<agent_decision_request>/i.test(text) || /<\/agent_decision_contract>/i.test(text)) {
     clean = clean.replace(CONTRACT_RE, "");
   }
   return clean.replace(REQUEST_RE, "").replace(/\n{3,}/g, "\n\n").trim();

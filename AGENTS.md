@@ -1,32 +1,40 @@
-# Tiger — Agent 指南
+# Tiger 桌面端 — Agent 指南
 
-本文件只做**索引**：命令速查 + 代码/文档地图 + 少量硬规则。约定、踩坑记录与设计决策都在 `doc/` 下，
+仓库级范围划分、Go 端（服务端 / CLI）命令与通用硬规则见 [`../AGENTS.md`](../AGENTS.md)。
+服务端代码在**仓库根** `main.go` + `internal/`，不在本目录；只改 `desktop/` 时按本文件执行。
+
+本文件只做**索引**：命令速查 + 代码/文档地图 + 桌面端硬规则。约定、踩坑记录与设计决策都在 `doc/` 下，
 动手前按下面的索引打开对应文档，不要凭记忆猜。
+
+## 目录结构
+
+| 路径 | 内容 |
+| --- | --- |
+| `src/` | 前端 SPA（vanilla JS，无框架，用 `vite`/直接加载，见 `doc/frontend-architecture.md`） |
+| `src-tauri/` | Rust 后端与 Tauri 配置（命令、自升级、下载链路），见 `doc/rust-backend.md` |
+| `doc/` | 桌面端 + 服务端对接文档（下文索引） |
+| `scripts/` | 构建、签名、`push-agent-binaries.mjs` 等 |
+| `website/` | 营销网站 |
 
 ## 开发命令（始终使用 `pnpm`，不要用 `npm`/`yarn`）
 
-- `pnpm tauri dev` — 热重载开发模式
-- `pnpm tauri build` — 生产构建
+- `pnpm tauri:dev` / `pnpm tauri dev` — 热重载开发模式
+- `pnpm tauri:build` — 生产构建（另有 `pnpm tauri:build:windows` / `:macos` / `:linux` 跨平台构建）
 - `pnpm tauri clean` — 清理构建产物
-- `pnpm tauri:build:windows` / `:macos` / `:linux` — 跨平台构建
-- `pnpm typecheck` — 前端类型检查（tsc --noEmit，只检查不产出，改完前端必跑）
+- `pnpm typecheck` — 前端类型检查（`tsc -p jsconfig.json`，只检查不产出，改完前端必跑）
+- `pnpm agent:push` — 推送服务端二进制（可选打包流程，需手动恢复 `bundle.externalBin`）
+- `pnpm sign:windows` / `pnpm sign:macos` — 签名
 
-### admAgent（Go，`admAgent/` 目录内执行）
-- `go build ./...` — 编译检查
-- `go test ./internal/... -count=1` — 全量单测（Windows 上 `internal/shell` 的 shebang 测试依赖 /bin/bash、`internal/server` 与 `internal/backend`（`TestBackend_ReloadSkills`）偶发 TempDir 句柄/文件锁抖动，属环境问题可忽略——均可在未改动的 HEAD 上复现）
-- `go test ./internal/agent/ -run 'TestName' -count=1` — 单个测试
-- `scripts/eval.sh` / `scripts/eval.ps1` — agent 行为 eval（手动入口，**不接入构建链路**；退出码 0 通过 / 1 回归 / 2 跳过）。判分器自测：`go test ./internal/eval/ -count=1`
-- `build.ps1` — Windows 构建脚本；改完 Go 代码需重新编译服务端并**单独安装/分发**（桌面端默认不打包服务端）
-- 运行时日志：`%LOCALAPPDATA%\admAgent\cache\admAgent.log`（Windows）/ `~/.cache/admAgent/admAgent.log`（macOS、Linux）。单文件、每次启动截断重写（`GlobalLogPath()`），直接读内容为准；注意 Windows 目录列表可能显示 0 字节。panic 栈单独写同目录 `admAgent-panic.log`（只追加、超 8MB 轮转 `.prev`；回合 goroutine 的 recover 与 runtime fatal 都进这里），排查“对话突然中断 / 服务异常退出”先看它。排查“对话突然中断”类问题 grep `Loop step response|ending turn|nudg`：`text_bytes=0` 但 `output_tokens` 很大 = 模型输出全部漏进 reasoning（典型为 localModel 在 40k+ 上下文下退化）
+Go 服务端（仓库根执行）：`go build ./...`、`go test ./internal/... -count=1`、`build.ps1` 等，见 [`../AGENTS.md`](../AGENTS.md#go-端命令速查仓库根执行)。
 
 ## 硬规则（违反会返工）
 
-1. **先确认改动目标**：桌面端 = `src/` + `src-tauri/`，TUI / 服务端 = `admAgent/`；未经明确指示不混改两端。
-2. **`admAgent/` 目录只读**：需要结论先搜源码；确认是 admAgent 的问题时，列出问题与改动点交给用户审核，不要直接改。
-3. **改完 Go 代码需重新编译服务端并单独安装/分发**（桌面端默认不打包服务端）：本地模式会先从程序目录、再从 PATH 找 `admAgent`/`tigerAgent`；可选打包流程仍需 `pnpm agent:push` + 手动恢复 `bundle.externalBin`。
-4. 前端改动跑 `pnpm typecheck`；仓库没有 linter / formatter / 测试框架，不要新增。
-5. **代码改动必须同步更新对应文档**：同一次改动里改完，映射表见 [`doc/conventions.md`](doc/conventions.md#文档同步更新强制)；行为/契约变了而文档没跟，视为改动未完成。
-6. 复杂问题排查需要日志时，按 `doc/conventions.md` 的类型标记写 `adm_api_debug.log`。
+1. **先确认改动目标**：桌面端 = `src/` + `src-tauri/`；Go 服务端 / CLI = 仓库根 `main.go` + `internal/`。未经明确指示不混改两端。
+2. **改完 Go 代码需重新编译服务端并单独安装/分发**（桌面端不打包、不启动服务端）：桌面端只通过 TCP + TLS 1.3 连接用户自行启动的 `tigerAgent --host tcp://…`，设置页粘贴服务端打印的连接串（地址 + SPKI 指纹 + token）；可选打包流程仍需 `pnpm agent:push` + 手动恢复 `bundle.externalBin`。细节见 [`doc/build-and-release.md`](doc/build-and-release.md)。
+3. 前端改动跑 `pnpm typecheck`；本仓库没有 linter / formatter / 前端测试框架，不要新增。
+4. **代码改动必须同步更新对应文档**：同一次改动里改完，映射表见 [`doc/conventions.md`](doc/conventions.md#文档同步更新强制)；行为/契约变了而文档没跟，视为改动未完成。
+5. 服务端接口/行为变化时，同步更新 [`doc/server-api.md`](doc/server-api.md)（与仓库根 `docs/server-api.md` 保持一致）。
+6. 复杂问题排查需要日志时，按 `doc/conventions.md` 的类型标记写 `tigerAgent_debug.log`。
 
 ## 文档索引
 
@@ -36,27 +44,22 @@
 | [`doc/frontend-agent-conventions.md`](doc/frontend-agent-conventions.md) | Agent 视图错误处理、自动续跑、假完成检测、拖拽保护、每轮撤销入口、轮级对话记录大纲、同目录多会话并行（前台状态模型） |
 | [`doc/attachments.md`](doc/attachments.md) | 剪贴板粘贴（三平台差异）与 PDF 分批转图 |
 | [`doc/rust-backend.md`](doc/rust-backend.md) | Rust 命令地图、应用自升级、下载链路、VC++ / Vulkan 运行库预检、平台差异 |
-| [`doc/admAgent-server.md`](doc/admAgent-server.md) | 服务端 loop 抖动恢复、压缩与事实块、系统提示词预算与提示词缓存、归档编号、决策模式、工具与权限边界（撤销清理的会话 ID 校验、bash 只读白名单、工作区包含性判断、符号链接、LSP 通知路径）、代理链路、配置词表 |
-| [`doc/admAgent-context-compaction-flow.md`](doc/admAgent-context-compaction-flow.md) | 压缩机制全流程：触发路径、参数派生、Summarize 13 步、取回通路、熔断与日志、审核风险点 |
+| [`doc/agent-server.md`](doc/agent-server.md) | 服务端 loop 抖动恢复、压缩与事实块、系统提示词预算与提示词缓存、归档编号、决策模式、工具与权限边界（撤销清理的会话 ID 校验、bash 只读白名单、工作区包含性判断、符号链接、LSP 通知路径）、代理链路、配置词表 |
+| [`doc/agent-context-compaction-flow.md`](doc/agent-context-compaction-flow.md) | 压缩机制全流程：触发路径、参数派生、Summarize 13 步、取回通路、熔断与日志、审核风险点 |
 | [`doc/agent-settings.md`](doc/agent-settings.md) | Agent 设置项、推理强度与思考开关、云端模型 `can_reason`、开关写入链路 |
 | [`doc/build-and-release.md`](doc/build-and-release.md) | CI、构建与发布、服务端分发（默认不打包）、Linux 打包/更新链路 |
 | [`doc/conventions.md`](doc/conventions.md) | 工作边界、工作目录功能归属、代码↔文档同步映射表（改动收尾必查）、调试日志格式与标记 |
-| [`doc/server-api.md`](doc/server-api.md) | admAgent HTTP API（服务端权威文档） |
-| [`doc/admAgent-eval-harness-plan.md`](doc/admAgent-eval-harness-plan.md) | agent 行为 eval：`admAgent eval` + `scripts/eval.{ps1,sh}`、任务/判分器定义、基线判定 |
+| [`doc/server-api.md`](doc/server-api.md) | 服务端 HTTP API（与仓库根 `docs/server-api.md` 同步） |
+| [`doc/agent-eval-harness-plan.md`](doc/agent-eval-harness-plan.md) | agent 行为 eval：`tigerAgent eval` + 仓库根 `scripts/eval.{ps1,sh}`、任务/判分器定义、基线判定 |
 
 方案与实施记录（改动相关模块前先读，避免重复踩坑）：
 
-- [`doc/admAgent-fact-block-and-recall-refs-plan.md`](doc/admAgent-fact-block-and-recall-refs-plan.md) — 确定性事实块 + 归档编号 `#N` + `recall` 区间/展开取回
-- [`doc/admAgent-parallel-sessions-file-guards.md`](doc/admAgent-parallel-sessions-file-guards.md) — 同目录多会话并行的服务端写保护
-- [`doc/admAgent-undo-anchor-plan.md`](doc/admAgent-undo-anchor-plan.md) — 每轮/跨轮撤销的服务端方案（anchor 参数、快照保留窗口、非 git 目录），**待审核，未落地**
-- [`doc/admAgent-prefix-budget-plan.md`](doc/admAgent-prefix-budget-plan.md) — 固定前缀（系统提示词 + 工具 schema）瘦身与预算守卫：bash 描述里的 git 剧本已搬进 skill、前缀预算单测与日志落地（8.9k），按窗口分档/MCP 延迟未做
-- [`doc/admAgent-patch-bash-allow-all.md`](doc/admAgent-patch-bash-allow-all.md) — `options.bash_allow_all`
-- [`doc/admAgent-patch-project-memory-sync.md`](doc/admAgent-patch-project-memory-sync.md) — `options.project_memory_sync`
+- [`doc/agent-fact-block-and-recall-refs-plan.md`](doc/agent-fact-block-and-recall-refs-plan.md) — 确定性事实块 + 归档编号 `#N` + `recall` 区间/展开取回
+- [`doc/agent-parallel-sessions-file-guards.md`](doc/agent-parallel-sessions-file-guards.md) — 同目录多会话并行的服务端写保护
+- [`doc/agent-undo-anchor-plan.md`](doc/agent-undo-anchor-plan.md) — 每轮/跨轮撤销的服务端方案（anchor 参数、快照保留窗口、非 git 目录），**待审核，未落地**
+- [`doc/agent-prefix-budget-plan.md`](doc/agent-prefix-budget-plan.md) — 固定前缀（系统提示词 + 工具 schema）瘦身与预算守卫：bash 描述里的 git 剧本已搬进 skill、前缀预算单测与日志落地（8.9k），按窗口分档/MCP 延迟未做
+- [`doc/agent-patch-bash-allow-all.md`](doc/agent-patch-bash-allow-all.md) — `options.bash_allow_all`
+- [`doc/agent-patch-project-memory-sync.md`](doc/agent-patch-project-memory-sync.md) — `options.project_memory_sync`
 - [`doc/agent-decision-mode-server-plan.md`](doc/agent-decision-mode-server-plan.md) / [`doc/agent-decision-output-plan.md`](doc/agent-decision-output-plan.md) — 决策输出模式（服务端方案 / 前端 MVP 记录）
 
-## 项目结构
-
-- **项目结构**：
-  - `src/` + `src-tauri/` — Tauri 桌面端（vanilla JS 前端 + Rust 后端）
-  - `website/` — 营销网站
-  - `scripts/` — 工具脚本
+服务端协议类文档在仓库根 [`docs/`](../docs/)：`server-api.md`、`subagent-model.md`、`tcp-tls-ecdsa.md`、`hooks/`。

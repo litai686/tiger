@@ -182,7 +182,7 @@ var FRIENDLY_EN = {
 /** @type {Array<[RegExp, string]>} */
 var EN2ZH = [
   // 断流重试耗尽后的包装形态（"llm: stream interrupted: stream ended prematurely..."，
-  // 见 admAgent internal/llm/client.go）：整体命中并整段替换，避免"stream interrupted"
+  // 见 Agent internal/llm/client.go）：整体命中并整段替换，避免"stream interrupted"
   // 与后半段原因各翻译一次，拼出"模型输出流被中断：输出流提前中断：..."的重复文案
   [/^stream interrupted: stream ended prematurely with incomplete tool calls/i,
     "输出流提前中断：工具调用数据不完整"],

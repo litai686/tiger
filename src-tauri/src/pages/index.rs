@@ -1,9 +1,7 @@
 // index.html 对应逻辑（硬件信息、全局更新）
 
 use crate::common::*;
-use crate::app_state::AppState;
 use crate::common::config;
-use crate::common::utils::platform;
 use crate::common::utils::download::download_with_resume;
 use crate::bail;
 
@@ -38,8 +36,11 @@ fn compare_versions(current: &str, remote: &str) -> std::cmp::Ordering {
 
 // ===== Tauri Command =====
 
+/// 远程更新清单地址：桌面端升级检测的唯一入口（各平台安装包地址与 content 升级日志链接都从这里下发）
+pub(crate) const UPDATE_INFO_URL: &str = "https://tiger.kuda520.com/update.json";
+
 /// 拉取远程更新清单 update.json（15s 超时）。
-/// 供 check_update 与 admAgent 版本检查共用。
+/// 供 check_update 与 Agent 版本检查共用。
 pub(crate) async fn fetch_update_info() -> Result<UpdateInfo, AppError> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -47,7 +48,7 @@ pub(crate) async fn fetch_update_info() -> Result<UpdateInfo, AppError> {
         .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
 
     let response = client
-        .get("https://adm.tuduoduo.top/update.json")
+        .get(UPDATE_INFO_URL)
         .send()
         .await
         .map_err(|e| format!("检查更新失败: {}", e))?;
@@ -64,50 +65,28 @@ pub(crate) async fn fetch_update_info() -> Result<UpdateInfo, AppError> {
     serde_json::from_str(&text).map_err(|e| AppError::msg(format!("解析更新信息失败: {}", e)))
 }
 
+/// 首页硬件信息：读取**服务端**主机规格（GET /v1/system/info）。
+///
+/// 桌面端只是远程 UI，用户看这块数字是为了判断「服务端这台机器能不能跑某个
+/// 模型」，所以不能再采集本机硬件。未连接服务端时直接报错，由前端显示加载失败。
 #[tauri::command]
-pub async fn get_system_info(state: tauri::State<'_, AppState>) -> Result<SystemInfo, AppError> {
-    let mut sys = state.sys.lock().map_err(|e| format!("锁获取失败: {}", e))?;
-    sys.refresh_all();
-
-    let total_ram = sys.total_memory();
-    let used_ram = sys.used_memory();
-    let cpu_usage = sys.global_cpu_usage();
-    let cpu_physical_cores = sys.physical_core_count().unwrap_or(0);
-    let cpu_logical_cores = sys.cpus().len();
-
-    let gpus = platform::get_gpu_devices();
-    // 枚举到显卡时以逐卡结果为准（nvidia-smi 显存准确、多卡求和正确、虚拟显示驱动已过滤）。
-    // macOS 例外：Apple Silicon 显存即共享内存，total_vram 保持等于总内存的约定（前端据此识别统一内存）。
-    // 这里不能退回 get_gpu_info()：它内部还会再跑一次 system_profiler（耗时数秒且无缓存），
-    // 首屏就会把 system_profiler 执行两遍；改为复用上面已缓存的逐卡结果。
-    #[cfg(target_os = "macos")]
-    let (total_vram, used_vram, has_gpu) = if gpus.is_empty() {
-        platform::get_gpu_info()
-    } else {
-        (sys.total_memory(), 0, true)
-    };
-    #[cfg(not(target_os = "macos"))]
-    let (total_vram, used_vram, has_gpu) = if gpus.is_empty() {
-        platform::get_gpu_info()
-    } else {
-        (
-            gpus.iter().map(|g| g.total_vram).sum(),
-            gpus.iter().map(|g| g.used_vram).sum(),
-            true,
-        )
-    };
-
-    Ok(SystemInfo {
-        total_ram,
-        used_ram,
-        total_vram,
-        used_vram,
-        has_gpu,
-        cpu_usage,
-        cpu_physical_cores,
-        cpu_logical_cores,
-        gpus,
-    })
+pub async fn get_system_info() -> Result<SystemInfo, AppError> {
+    let target = agent_http::active_target()
+        .ok_or_else(|| AppError::msg("未连接服务端：无法读取服务端硬件信息"))?;
+    let client = agent_http::build_client(&target, std::time::Duration::from_secs(3))
+        .map_err(AppError::msg)?;
+    let (status, body) = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        agent_http::send(&client, "GET", "/v1/system/info", None),
+    )
+    .await
+    .map_err(|_| AppError::msg("读取服务端硬件信息超时"))?
+    .map_err(|e| AppError::msg(format!("读取服务端硬件信息失败: {}", e)))?;
+    if !(200..300).contains(&status) {
+        bail!("读取服务端硬件信息失败: HTTP {}（服务端版本可能过低，请升级服务端）", status);
+    }
+    serde_json::from_slice::<SystemInfo>(&body)
+        .map_err(|e| AppError::msg(format!("解析服务端硬件信息失败: {}", e)))
 }
 
 #[tauri::command]

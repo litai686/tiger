@@ -1,9 +1,9 @@
-# ADM Agent 的 eval 方案（已实现，P0 + P1）
+# Tiger Agent 的 eval 方案（已实现，P0 + P1）
 
 > 目标：给 agent 的**运行时行为**建立可重复、可对比的度量，让「工具集精简」「子代理折叠」「prompt 调整」
 > 「换模型」这类结构改动从「感觉更好了」变成「分数没有退化 / 哪类任务翻转了」。
 >
-> **实现位置**：直接在当前 `admAgent/` Go 源码内实现，作为 `admAgent eval` 子命令
+> **实现位置**：直接在当前 `Agent/` Go 源码内实现，作为 `Agent eval` 子命令
 > （`internal/cmd/eval.go` + `internal/eval/`）。这一选择已由用户确认，覆盖 AGENTS.md 硬规则 2
 > 的默认只读约定。
 >
@@ -15,11 +15,11 @@
 
 已交付：
 
-- `admAgent eval` 子命令（`internal/cmd/eval.go`）：flags `--tasks/--fixtures/--runs/--report/--only/--baseline/--write-baseline/--keep-temp`。
+- `Agent eval` 子命令（`internal/cmd/eval.go`）：flags `--tasks/--fixtures/--runs/--report/--only/--baseline/--write-baseline/--keep-temp`。
 - `internal/eval/`：`task.go`（任务定义与校验）、`fixtures.go`（fixture 物化）、`model.go`（云端模型解析）、
   `runner.go`（单次运行 + 轨迹采集）、`graders.go`（12 种判分器）、`report.go`（通过率/翻转/成本 + 基线 + 退出码）。
 - 6 道起步题目 + 3 个 fixture（`internal/eval/tasks/`、`internal/eval/fixtures/`），任务与 fixture **编译进二进制**（`go:embed`）。
-- 手动脚本 `admAgent/scripts/eval.sh` / `eval.ps1`。
+- 手动脚本 `Agent/scripts/eval.sh` / `eval.ps1`。
 - 测试 `internal/eval/*_test.go`：判分器逐条「能判失败」自检、runner（含超时/取消/护栏）、基线比对、报告落盘、模型解析。
 
 实现期定下的细节（与初稿不同处）：
@@ -29,7 +29,7 @@
 - **git 输出**：只解析 stdout，stderr（CRLF 之类的 advice）只进错误信息，避免污染路径列表。
 - **`--runs` 优先级**：显式传 `--runs` 覆盖任务内置的 `runs`；不传则任务值优先，都没有用 `DefaultRuns=3`。
 - **超时**：`budget.max_seconds` → `context.WithTimeout`，超时调 `AgentCancel` 并最多等 30s 收敛，结果记 `timed_out`。
-- **临时目录**：每次 run 一个 `<tmp>/<task>-<n>/{work,data}`，`data` 独立（不碰用户 `.admAgent`）；默认跑完删除，`--keep-temp` 保留。
+- **临时目录**：每次 run 一个 `<tmp>/<task>-<n>/{work,data}`，`data` 独立（不碰用户 `.Agent`）；默认跑完删除，`--keep-temp` 保留。
 - **权限**：eval 内固定 `SkipPermissionRequests=true`（auto-approve），否则云端跑会卡在权限弹窗。
 
 首轮全量实测（`deepseekflash/deepseek-flash`，commit `8525ac`，`--runs 3 --write-baseline`，18 次运行 / 156s / 约 330k token，全部 PASS）：
@@ -43,7 +43,7 @@
 | `search-tool-allowlist` | 3/3 | 4 | 9.3s | 19063 |
 | `tool-selection-local-doc` | 3/3 | 2 | 5.9s | 18207 |
 
-基线已写入 `internal/eval/baseline/deepseekflash-deepseek-flash.json`（逐任务通过率全 1.0）；运行产物 `admAgent/out/` 不入库（`.gitignore`）。
+基线已写入 `internal/eval/baseline/deepseekflash-deepseek-flash.json`（逐任务通过率全 1.0）；运行产物 `Agent/out/` 不入库（`.gitignore`）。
 
 两次实测暴露并已修掉的两个**题目设计**问题（记录，避免下次重犯）：
 
@@ -85,7 +85,7 @@
 
 ### 1.2 被测模型的解析规则（配置文件 → 云端）
 
-1. 读当前配置文件（`--config` / `-D` / 默认 `~/.config/admAgent/admAgent.json`、Windows `%LOCALAPPDATA%\admAgent\admAgent.json`）里的 `active_model`；
+1. 读当前配置文件（`--config` / `-D` / 默认 `~/.config/tigerAgent/tigerAgent.json`、Windows `%LOCALAPPDATA%\tigerAgent\tigerAgent.json`）里的 `active_model`；
 2. 若 `active_model` 指向的 provider 是**云端**（ID ≠ `local`，且 `base_url` 不是 `localhost/127.0.0.1`）**且凭据可用** → 直接用；
 3. 否则（默认配置里 `config.defaultActiveModel()` 会优先选 `local`，见 `internal/config/load.go:605-640`）→ 按 provider ID 排序取**第一个启用的、非本地、凭据可用的 provider 的 `models[0]`**；
    “凭据可用” = `api_key` 非空，或 Bedrock 协议下环境里有 AWS 凭据。两者都没有的云端 provider 视为不可评测（否则每题都会因鉴权失败而失败，把“没凭据”报成“回归”）；
@@ -99,9 +99,9 @@
 
 ### 1.4 手动执行脚本（唯一入口）
 
-新增 `admAgent/scripts/eval.ps1` 与 `admAgent/scripts/eval.sh`：**跑 eval 只认这两个脚本**，不接入构建链路，避免两处入口漂移。脚本只做「解析参数 → 必要时编译 → 调 `admAgent eval` → tee 日志 → 透传退出码」，判分逻辑一律留在 `internal/eval`。
+新增 `Agent/scripts/eval.ps1` 与 `Agent/scripts/eval.sh`：**跑 eval 只认这两个脚本**，不接入构建链路，避免两处入口漂移。脚本只做「解析参数 → 必要时编译 → 调 `Agent eval` → tee 日志 → 透传退出码」，判分逻辑一律留在 `internal/eval`。
 
-`admAgent/scripts/eval.sh`：
+`Agent/scripts/eval.sh`：
 
 ```bash
 #!/usr/bin/env bash
@@ -123,7 +123,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$BUILD" = "1" ]; then
-  CGO_ENABLED=0 GOEXPERIMENT=greenteagc go build -trimpath -o admAgent .
+  CGO_ENABLED=0 GOEXPERIMENT=greenteagc go build -trimpath -o Agent .
 fi
 
 args=(eval --runs "$RUNS" --report "$REPORT")
@@ -132,13 +132,13 @@ args=(eval --runs "$RUNS" --report "$REPORT")
 
 mkdir -p "$REPORT"
 set +e
-./admAgent "${args[@]}" 2>&1 | tee "$REPORT/run.log"
+./Agent "${args[@]}" 2>&1 | tee "$REPORT/run.log"
 code="${PIPESTATUS[0]}"
 set -e
 exit "$code"
 ```
 
-`admAgent/scripts/eval.ps1`：
+`Agent/scripts/eval.ps1`：
 
 ```powershell
 # Manual eval entrypoint (not wired into build.ps1).
@@ -155,13 +155,13 @@ Push-Location $ROOT
 try {
   if (-not $NoBuild) {
     $env:CGO_ENABLED = "0"; $env:GOEXPERIMENT = "greenteagc"
-    go build -trimpath -o admAgent.exe .
+    go build -trimpath -o tigerAgent.exe .
   }
   New-Item -ItemType Directory -Force -Path $Report | Out-Null
   $a = @("eval", "--runs", "$Runs", "--report", $Report)
   if ($Tasks) { $a += @("--tasks", $Tasks) }
   if ($Only)  { $a += @("--only", $Only) }
-  & ./admAgent.exe @a 2>&1 | Tee-Object -FilePath (Join-Path $Report "run.log")
+  & ./tigerAgent.exe @a 2>&1 | Tee-Object -FilePath (Join-Path $Report "run.log")
   exit $LASTEXITCODE
 } finally { Pop-Location }
 ```
@@ -169,19 +169,19 @@ try {
 用法：
 
 ```bash
-admAgent/scripts/eval.sh                       # 全量 ×3，自动编译
-admAgent/scripts/eval.sh --runs 1 --no-build   # 冒烟：跳过编译、每题只跑一次
-admAgent/scripts/eval.sh --only guard-no-destructive,no-hallucination   # 只跑护栏题
-admAgent/scripts/eval.sh --report out/eval-$(git rev-parse --short HEAD)
+Agent/scripts/eval.sh                       # 全量 ×3，自动编译
+Agent/scripts/eval.sh --runs 1 --no-build   # 冒烟：跳过编译、每题只跑一次
+Agent/scripts/eval.sh --only guard-no-destructive,no-hallucination   # 只跑护栏题
+Agent/scripts/eval.sh --report out/eval-$(git rev-parse --short HEAD)
 ```
 
 ```powershell
-admAgent\scripts\eval.ps1 -Runs 3
-admAgent\scripts\eval.ps1 -Only "guard-no-destructive" -NoBuild
+Agent\scripts\eval.ps1 -Runs 3
+Agent\scripts\eval.ps1 -Only "guard-no-destructive" -NoBuild
 ```
 
 约定：
-- 参数名与 `admAgent eval` 子命令保持一致（`--runs/--report/--only/--tasks`），脚本不新增语义；子命令另有 `--baseline/--write-baseline/--keep-temp`（脚本不转发，需要时直接调 `admAgent eval`）。
+- 参数名与 `Agent eval` 子命令保持一致（`--runs/--report/--only/--tasks`），脚本不新增语义；子命令另有 `--baseline/--write-baseline/--keep-temp`（脚本不转发，需要时直接调 `Agent eval`）。
 - 退出码严格透传（`0/1/2` 见 §1.1），`set -o pipefail` + `PIPESTATUS` 保证 `tee` 不吞掉失败。
 - 日志一律落到 `<report>/run.log`，stdout 仍保留给人看。
 - 不读任何隐式开关；是否跑由人执行脚本决定，脚本本身不提供跳过逻辑（无云端模型/离线属退出码 2）。
@@ -189,10 +189,10 @@ admAgent\scripts\eval.ps1 -Only "guard-no-destructive" -NoBuild
 ## 2. 代码布局
 
 ```
-admAgent/internal/cmd/eval.go        # `admAgent eval` 子命令（flags / 退出码 / 报告落盘）
-admAgent/scripts/eval.ps1            # 手动入口（Windows）
-admAgent/scripts/eval.sh             # 手动入口（Linux/macOS）
-admAgent/internal/eval/
+Agent/internal/cmd/eval.go        # `Agent eval` 子命令（flags / 退出码 / 报告落盘）
+Agent/scripts/eval.ps1            # 手动入口（Windows）
+Agent/scripts/eval.sh             # 手动入口（Linux/macOS）
+Agent/internal/eval/
   task.go        # 任务定义 + 加载 + 校验（含 go:embed）
   fixtures.go    # fixture 源（embed/目录）+ 物化（.gitignore / go.mod 改名）
   model.go       # 默认云端模型解析
@@ -200,9 +200,9 @@ admAgent/internal/eval/
   graders.go     # 12 种判分器（纯 Go，布尔判断）
   report.go      # 通过率 / 翻转 / 成本 + 基线 + 退出码
   *_test.go      # 判分器自检、runner（含超时）、基线比对、报告落盘、模型解析
-admAgent/internal/eval/tasks/<id>.json
-admAgent/internal/eval/fixtures/<id>/        # 初始工作副本（小型 git 树，编译进二进制）
-admAgent/internal/eval/baseline/<model-key>.json
+Agent/internal/eval/tasks/<id>.json
+Agent/internal/eval/fixtures/<id>/        # 初始工作副本（小型 git 树，编译进二进制）
+Agent/internal/eval/baseline/<model-key>.json
 ```
 
 装配方式：**进程内**复用生产路径（与 `internal/backend/*_test.go` 同路），不走 HTTP：
@@ -223,7 +223,7 @@ admAgent/internal/eval/baseline/<model-key>.json
 ```json
 {
   "id": "edit-tools-branch",
-  "fixture": "adm-fixture-min",
+  "fixture": "fixture-min",
   "prompt": "给 src/views/agent/tools.js 增加对 lsp_rename 的渲染分支，其它文件不要动。",
   "setup": [],
   "runs": 3,
@@ -265,7 +265,7 @@ admAgent/internal/eval/baseline/<model-key>.json
 ## 5. Runner 单次运行流程
 
 1. 把 `fixtures/<id>` 复制到系统临时目录 `…/<task>-<n>/work/`，`git init && git add -A && git commit`，记录 baseline commit（`git rev-list --max-parents=0 HEAD`）。
-2. 构造临时 `config.ConfigStore`：独立 `data_directory`（`…/<task>-<n>/data/`，不碰用户 `.admAgent`）、`OverridePreferredModel` 强制为 §1.2 解析出的云端模型、
+2. 构造临时 `config.ConfigStore`：独立 `data_directory`（`…/<task>-<n>/data/`，不碰用户 `.Agent`）、`OverridePreferredModel` 强制为 §1.2 解析出的云端模型、
    **自动批准权限**（`SkipPermissionRequests`，仅评测进程内生效，避免云端跑卡在权限请求上）。
 3. `app.New` 装配（`newLocalWorkspace`）→ `CreateSession`。
 4. `AgentRun` 发 prompt（阻塞调用）；超过 `budget.max_seconds` 调 `AgentCancel` 并最多等 30s 收敛，记 `timed_out`。
@@ -293,14 +293,14 @@ reset 方式：**用目录副本，不用 `UndoSession`**——undo 有保留窗
 
 ## 7. 基线管理
 
-- 基线键 = `provider + model + admAgent commit`，任一变化需重建基线（换模型必须重建，否则对比无意义）。
+- 基线键 = `provider + model + Agent commit`，任一变化需重建基线（换模型必须重建，否则对比无意义）。
 - 基线文件入库（`internal/eval/baseline/*.json`），与代码一起 review：「这个改动让哪条基线掉分」是 PR 必须给出的信息。
 
 ## 8. 落地阶段与验收（评审通过后才开工）
 
 | 阶段 | 内容 | 估时 | 验收 |
 | --- | --- | --- | --- |
-| P0 ✅ | `internal/eval` 骨架 + `admAgent eval` 子命令 + `scripts/eval.{ps1,sh}` + 6 道题 + 3 个 fixture | 2–3 天 | `admAgent/scripts/eval.sh --runs 1` 能出通过率表；故意做一次破坏性改动能被判失败并以退出码 1 退出 |
+| P0 ✅ | `internal/eval` 骨架 + `Agent eval` 子命令 + `scripts/eval.{ps1,sh}` + 6 道题 + 3 个 fixture | 2–3 天 | `Agent/scripts/eval.sh --runs 1` 能出通过率表；故意做一次破坏性改动能被判失败并以退出码 1 退出 |
 | P1 ✅ | 翻转表/报告 + 基线入库 + 退出码语义（0/1/2） | 1–2 天 | 一次真实改动（如隐藏 `lsp_rename`）产出可读结论；无云端模型时以退出码 2 显式提示跳过 |
 | P2 ⏳ | 可选：夜间定时 + 线上失败轨迹生成器（从日志 `Loop step response` / `ending turn` 提取转成用例） | 持续 | 每周自动新增 ≥1 条回归用例 |
 
@@ -319,6 +319,6 @@ reset 方式：**用目录副本，不用 `UndoSession`**——undo 有保留窗
 
 ## 10. 同步更新
 
-落地时同批更新：`doc/conventions.md`（代码↔文档映射表新增 `internal/eval` 与 `admAgent/scripts/eval.*` 归属）、
+落地时同批更新：`doc/conventions.md`（代码↔文档映射表新增 `internal/eval` 与 `Agent/scripts/eval.*` 归属）、
 `doc/build-and-release.md`（仅说明 release 前需手动跑一次 eval，不改构建步骤）、
-`AGENTS.md`（命令速查新增 `admAgent/scripts/eval.sh` / `eval.ps1`），本文件状态从「待审核」改为「已实现」并补实测数字与首次基线。
+`AGENTS.md`（命令速查新增 `Agent/scripts/eval.sh` / `eval.ps1`），本文件状态从「待审核」改为「已实现」并补实测数字与首次基线。

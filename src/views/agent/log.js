@@ -1,11 +1,11 @@
-// 统一日志封装 — 所有前端调试日志通过 Rust 端 api_debug_log 写入 adm_api_debug.log
+// 统一日志封装 — 所有前端调试日志通过 Rust 端 api_debug_log 写入 tigerAgent_debug.log
 // 格式: {epoch_ms} {HH:MM:SS.mmm 本地时间} UI: [CATEGORY][level] message
 // Rust 端 api_debug_log 负责加时间戳，前端只传 [CATEGORY][level] message
 //
-// 不依赖 store.js：直接用 window.__adm_invoke 避免循环依赖
+// 不依赖 store.js：直接用 window.__agent_invoke 避免循环依赖
 // （store.js imports log, log 不能同时 import store）
 
-var _invoke = window.__adm_invoke;
+var _invoke = window.__agent_invoke;
 
 var LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
 // 默认静默（99），由 agent.js init 中 setLogEnabled(!!S.settings.debug_logging) 开启

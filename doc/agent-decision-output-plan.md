@@ -1,14 +1,16 @@
 # Agent 特殊决策输出模式开发计划
 
+> 后续变更：决策协议标签已统一为 `agent_decision_*`（服务端 `<agent_decision_result>`、旧版前端 `<agent_decision_request>` / `<agent_decision_contract>`），内置显示模型为 `tigerAgent/agent-models`；实现以 [`server-api.md`](server-api.md) 与代码为准。
+
 > 状态：桌面端无概率 MVP 已实现，待运行态联调验收  
-> 实施范围：桌面端（`src/`）；关联只读端 admAgent（`admAgent/`）未修改
+> 实施范围：桌面端（`src/`）；关联只读端 Agent（`Agent/`）未修改
 > 参考模式：JEV 风格的 Choice / Noul / Score 决策输出
 
 ## 0. 实际实现（无概率 MVP，已落地）
 
 > 本节描述当前代码的真实行为。第 4~8 节的请求字段、专用消息 part、自动判断策略与服务端依赖清单是**原提案，尚未实现**，不要据此找代码。
 
-- **协议**：**P1 起输出契约由服务端负责**（`admAgent/internal/decision` + `internal/agent/decision_turn.go`，见 `doc/agent-decision-mode-server-plan.md`）。桌面端不再往 `prompt` 里拼控制块，只发送一个请求字段：
+- **协议**：**P1 起输出契约由服务端负责**（`Agent/internal/decision` + `internal/agent/decision_turn.go`，见 `doc/agent-decision-mode-server-plan.md`）。桌面端不再往 `prompt` 里拼控制块，只发送一个请求字段：
 
   ```json
   { "decision": { "mode": "auto|choice|bool|score", "tool_policy": "none", "structured_output": "auto" } }
@@ -19,8 +21,8 @@
   > 旧会话（P1 之前）里正文仍带 `<adm_decision_request>` / `<adm_decision_contract>`，前端保留剥离与解析逻辑以便历史仍能画卡片。
 - **渲染**：`decision_mode.js` 解析 **服务端专用 part**（`type=decision`，优先）或旧的正文结果标签，渲染 Choice / Bool / Score 卡片；未知 kind 折叠展示 `raw`。旧协议的控制块与结果标签在桌面端渲染前仍会剥离（`stripDecisionControlText`），轮标题与会话列表预览同样剥离。
 - **只输出结果**：该轮一旦出现可解析的决策结果，assistant 侧只保留结果卡片——正文叙述、思考过程、工具调用/结果气泡全部不渲染（用户消息、轮标题、图片/附件不受影响）；**本轮运行期间就已隐藏**（不等到卡片出现，避免先闪过程输出再被卡片替换）；本轮跑完若始终没有有效结果，则回落为照常展示全部内容，便于排查模型违约。**整轮只渲染一张卡片**：模型在分步/重试里重复输出结果时，只取本轮最后一条带结果的消息；同一消息里出现多个结果块时也只取最后一个。契约中已明确要求"每个问题只输出一次结果块"。
-- **模式持久化**：按 `workspace + session` 存 localStorage（`adm_agent_decision_modes_v1`），删除会话时清理；无会话时按钮禁用。
-- **思考由服务端强制关闭**：决策轮的请求在服务端固定 `reasoning_effort: none`（`admAgent/internal/agent/decision_turn.go`），不读 model 配置里的 thinking 开关——那份配置是全 app 状态，TUI/微信从不触碰，用户也能随时改，所以不能由它决定决策轮是否推理。若 provider 把 `reasoning_effort` 与 `thinking.disabled` 两种写法都拒（`llm.ThinkingModeUnsupported`），服务端去掉该参数继续本轮（契约提示词仍约束只输出一个 JSON 块）。**桌面端不再联动**全局推理设置：切会话/切模式都不会改写用户选定的推理强度，普通对话的思考行为与之前完全一致（该下拉只剩「推理强度」一项，见 AGENTS.md 的 Agent 设置条目）。
+- **模式持久化**：按 `workspace + session` 存 localStorage（`agent_decision_modes_v1`），删除会话时清理；无会话时按钮禁用。
+- **思考由服务端强制关闭**：决策轮的请求在服务端固定 `reasoning_effort: none`（`Agent/internal/agent/decision_turn.go`），不读 model 配置里的 thinking 开关——那份配置是全 app 状态，TUI 从不触碰，用户也能随时改，所以不能由它决定决策轮是否推理。若 provider 把 `reasoning_effort` 与 `thinking.disabled` 两种写法都拒（`llm.ThinkingModeUnsupported`），服务端去掉该参数继续本轮（契约提示词仍约束只输出一个 JSON 块）。**桌面端不再联动**全局推理设置：切会话/切模式都不会改写用户选定的推理强度，普通对话的思考行为与之前完全一致（该下拉只剩「推理强度」一项，见 AGENTS.md 的 Agent 设置条目）。
 - **PDF 组合**：决策模式 + PDF 附件直接拒绝并提示，不进入分批流程。
 - **模式集合**：可选四种决策模式 `auto` / `choice` / `bool` / `score`。原提案的 Noul 已被 Bool 取代，**不做兼容**：老会话里存的 `noul` 模式值回落为普通对话，历史消息里的 noul 结果不再解析成卡片。
 - **结果校验**：`run_complete` 后若该轮为决策模式且历史中没有可解析的结果，提示"模型未返回有效的 Choice / Bool / Score 决策结果"，不自动重试。
@@ -84,7 +86,7 @@
 
 ### 底层能力结论（只读调研）
 
-现有 admAgent 客户端支持工具参数 JSON Schema，可通过工具参数 `enum` 间接约束候选标签；但没有独立的分类结果、完整概率分布或期望值协议。`extra_body` 可透传结构化输出或 `logprobs` 请求字段，但当前响应解析会忽略 `logprobs`。
+现有 Agent 客户端支持工具参数 JSON Schema，可通过工具参数 `enum` 间接约束候选标签；但没有独立的分类结果、完整概率分布或期望值协议。`extra_body` 可透传结构化输出或 `logprobs` 请求字段，但当前响应解析会忽略 `logprobs`。
 
 因此：
 
@@ -323,7 +325,7 @@ Score：
 
 ## 8. 服务端依赖清单（原提案，未实现；仅记录，不在本轮修改）
 
-审核桌面端方案前需确认 admAgent 后续是否允许增加以下能力：
+审核桌面端方案前需确认 Agent 后续是否允许增加以下能力：
 
 1. `POST /agent` 接收可选 `decision` 字段。
 2. 决策模式使用专用工具或结构化输出约束，避免普通 Agent 自由发挥。
@@ -413,7 +415,7 @@ Score：
 ## 12. 待审核决策
 
 1. **Noul 名称**：图片与 JEV 资料中使用 `Noul`，是否按官方拼写保留；还是产品 UI 显示“无法判断”、协议内仍用 `noul`。
-2. **是否允许无概率 MVP**：若 admAgent 暂时不改，建议先做结构化标签/分数卡片，但明确没有真实概率。
+2. **是否允许无概率 MVP**：若 Agent 暂时不改，建议先做结构化标签/分数卡片，但明确没有真实概率。
 3. **Auto 判断范围**：只判断三類决策，还是普通问答也由模型先分类后再走 Agent。
 4. **配置粒度**：推荐 workspace 默认 + session 覆盖；是否需要每个历史会话可修改。
 5. **概率来源**：只接受模型 API 的原始概率，还是接受后续校准后的分数；本计划默认不接受模型自报“概率”。
@@ -430,4 +432,4 @@ Score：
 - 不自动执行动作。
 - 服务端概率与期望值能力待协议确认后接入。
 
-这样能先验证交互和业务价值，同时避免桌面端自行拼装不可靠的 JEV 模拟结果。正式具备“完整候选概率分布 + 期望值”的版本，应在 admAgent 协议能力确认后作为第二阶段实施。
+这样能先验证交互和业务价值，同时避免桌面端自行拼装不可靠的 JEV 模拟结果。正式具备“完整候选概率分布 + 期望值”的版本，应在 Agent 协议能力确认后作为第二阶段实施。

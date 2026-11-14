@@ -1,5 +1,5 @@
 // pnpm agent:push：委托本地 adm-binaries 仓库的 push.mjs（单个提交 + 强制覆盖远端）。
-// 本地 adm-binaries/ 由 admAgent 的编译脚本（build.ps1 / build.sh）直接写入压缩包。
+// 本地 adm-binaries/ 由 Agent 的编译脚本（build.ps1 / build.sh）直接写入压缩包。
 //
 // 用法：pnpm agent:push [-- --dry-run]
 

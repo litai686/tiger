@@ -1,10 +1,10 @@
-# admAgent 改动：options.project_memory_sync —— 压缩时是否自动提取记忆规则
+# Agent 改动：options.project_memory_sync —— 压缩时是否自动提取记忆规则
 
-> 已按审核意见落盘（`admAgent/` 已有改动，4 个文件）。`go build ./...`、
+> 已按审核意见落盘（`Agent/` 已有改动，4 个文件）。`go build ./...`、
 > `go test ./internal/context/... ./internal/config/... ./internal/agent/... -count=1` 均通过；
-> `admAgent/build.ps1` 已重新打包并写入 `adm-binaries/`。本文件保留为设计记录。
+> `Agent/build.ps1` 已重新打包并写入 `adm-binaries/`。本文件保留为设计记录。
 
-桌面端「项目记忆」弹窗里的「压缩时自动提取记忆规则」开关会往 `admAgent.json` 写：
+桌面端「项目记忆」弹窗里的「压缩时自动提取记忆规则」开关会往 `tigerAgent.json` 写：
 
 ```json
 { "options": { "project_memory_sync": false } }
@@ -14,7 +14,7 @@
 （`UpdateModels` → 重建 agent/context manager），与 `options.bash_allow_all` 完全同一套流程
 （见 `src-tauri/src/pages/agent.rs` 的 `sync_agent_project_memory` / `write_agent_option_bool`）。
 开关默认开启：桌面端字段 `agent_project_memory_sync` 是 `Option<bool>`，**None = 未设置 = 开**
-（`skip_serializing_if` 使其不落盘），只有用户显式关过才写 `false`；admAgent 侧同理，
+（`skip_serializing_if` 使其不落盘），只有用户显式关过才写 `false`；Agent 侧同理，
 `options.project_memory_sync` 缺失即开启（`*bool`）。
 
 ## 背景 / 问题
@@ -34,12 +34,12 @@
 3. `ProjectStore.Sync` 合并进内存副本并原子写 `<workspace data_dir>/project_memory.json`。
 
 用户希望「这次压缩不要自动沉淀记忆规则」时（例如在探索性会话里，不想让临时结论污染跨会话记忆），
-当前**没有任何开关**：只能压缩完再手工删除条目 —— 而 admAgent 进程内仍持有同一份内存副本，
+当前**没有任何开关**：只能压缩完再手工删除条目 —— 而 Agent 进程内仍持有同一份内存副本，
 下一次压缩会把删掉的条目合并回写文件（见 `src/views/agent/memory.js` 文件头注释），所以手工清理基本无效。
 
 ## 改动清单（3 个源文件 + 1 个测试文件）
 
-### 1. `admAgent/internal/config/config.go` — Options 新增字段
+### 1. `Agent/internal/config/config.go` — Options 新增字段
 
 `Options` 结构体末尾（`FactBlock` / `FactBlockRead` 之后，`MaxSummarizeTokens` 之前）：
 
@@ -54,7 +54,7 @@
 
 用 `*bool` 与 `FactBlock` 一致：nil = 开启（老配置不变行为）。
 
-### 2. `admAgent/internal/context/manager.go` — Manager 增加开关并据此跳过 Sync
+### 2. `Agent/internal/context/manager.go` — Manager 增加开关并据此跳过 Sync
 
 Manager 结构体（`FactBlock bool` 之后，第 61 行附近）：
 
@@ -82,7 +82,7 @@ Manager 结构体（`FactBlock bool` 之后，第 61 行附近）：
 注意：**只跳过 Sync，不动 `ProjectRender()`**（`manager.go:637-640`）——已沉淀的条目继续注入，
 与该开关的文案「已有条目保留并继续生效」一致。
 
-### 3. `admAgent/internal/agent/agent.go` — 从配置透传到 Manager
+### 3. `Agent/internal/agent/agent.go` — 从配置透传到 Manager
 
 `SessionAgentOptions`（`FactBlock bool` 之后，第 810 行附近）：
 
@@ -101,7 +101,7 @@ Manager 结构体（`FactBlock bool` 之后，第 61 行附近）：
 +	mgr.ProjectMemorySync = opts.ProjectMemorySync
 ```
 
-### 4. `admAgent/internal/agent/coordinator.go` — 读取选项（第 572 行附近）
+### 4. `Agent/internal/agent/coordinator.go` — 读取选项（第 572 行附近）
 
 ```diff
  		ProjectStore:              c.projectStore,
@@ -133,7 +133,7 @@ Manager 结构体（`FactBlock bool` 之后，第 61 行附近）：
 **下一次压缩**（无论自动、手动 `/summarize`，还是 TUI）就按新值执行，
 既不需要 `/agent/update`，也不需要重启 server。
 
-### 5. 新增回归测试（`admAgent/internal/context/project_test.go`）
+### 5. 新增回归测试（`Agent/internal/context/project_test.go`）
 
 ```go
 // TestManagerCompactSkipsProjectMemorySync: options.project_memory_sync=false
@@ -155,12 +155,12 @@ func TestManagerCompactSkipsProjectMemorySync(t *testing.T) {
 ## 验证步骤
 
 ```bash
-cd admAgent
+cd Agent
 go build ./...
 go test ./internal/context/... ./internal/agent/... -count=1
 ```
 
-1. `admAgent.json` 写 `"options": { "project_memory_sync": false }`（无需重启 server，
+1. `tigerAgent.json` 写 `"options": { "project_memory_sync": false }`（无需重启 server，
    只要 `/config/set` 触发过一次磁盘重载——桌面端点开关会发）；
 2. 桌面端压缩一次会话 → `project_memory.json` 不应新增条目；
 3. 改回 `true`（或删除该字段）再压缩 → 新条目重新出现；

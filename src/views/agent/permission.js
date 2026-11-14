@@ -7,7 +7,7 @@ import { api } from "./api.js";
 // 弹窗与排队逻辑已删除，保留空实现以兼容各调用点（session/sse/workspace）。
 export function resetPermissionState() {}
 
-// 将本地权限模式实时同步到 admAgent 服务端（中途切换下一轮 run 时生效）。
+// 将本地权限模式实时同步到 Agent 服务端（中途切换下一轮 run 时生效）。
 // 服务端状态只在创建工作区时传入一次，之后必须靠这个接口更新。
 export async function syncModeToServer() {
   if (!S.serverInfo || !S.serverInfo.workspace_id) return;

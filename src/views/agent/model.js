@@ -48,9 +48,9 @@ export async function switchModel(providerKey, displayName, ctxLen) {
   }
 
   // 通知服务端 Agent 切换模型并重新加载配置（关键！）
-  // 必须先调 /config/model 把首选模型写进 admAgent 的配置（agent_default_provider
-  // 只存在 Tiger 自己的 config.json 里，admAgent 服务端不读它），再调 /agent/update 重载，
-  // 否则服务端会一直用 admAgent.json 里旧的 model 字段。
+  // 必须先调 /config/model 把首选模型写进 Agent 的配置（agent_default_provider
+  // 只存在 Tiger 自己的 config.json 里，Agent 服务端不读它），再调 /agent/update 重载，
+  // 否则服务端会一直用 tigerAgent.json 里旧的 model 字段。
   if (S.serverInfo && S.serverInfo.workspace_id) {
     try {
       var target = resolveAgentModel(providerKey);
@@ -96,8 +96,8 @@ export async function refreshAgentInfo() {
   } catch (_) { return null; }
 }
 
-// 从 admAgent 服务端拉取完整 provider 列表（含编译内置的 provider，
-// admAgent.json 里没有、仅 CLI 能看到的内置模型也在其中）
+// 从 Agent 服务端拉取完整 provider 列表（含编译内置的 provider，
+// tigerAgent.json 里没有、仅 CLI 能看到的内置模型也在其中）
 export async function refreshServerProviders() {
   if (!S.serverInfo || !S.serverInfo.workspace_id) return false;
   var url = "/v1/workspaces/" + S.serverInfo.workspace_id + "/providers";
@@ -105,9 +105,9 @@ export async function refreshServerProviders() {
     var list = await api("GET", url);
     if (!Array.isArray(list)) return false;
     // 自愈历史脏数据：旧版添加云端模型时把完整 provider（含 models 数组）同时写进了
-    // 服务端数据配置与 admAgent.json，两文件合并时数组被拼接，同一模型出现两次。
+    // 服务端数据配置与 tigerAgent.json，两文件合并时数组被拼接，同一模型出现两次。
     // 检测到 Tiger 管理的 provider 存在重复 model id 时，从服务端数据配置移除该
-    // models 数组（模型定义以 admAgent.json 为准，/config/remove 会自动重载），再重取一次快照。
+    // models 数组（模型定义以 tigerAgent.json 为准，/config/remove 会自动重载），再重取一次快照。
     if (await cleanupDuplicatedProviderModels(list)) {
       var relist = await api("GET", url);
       if (Array.isArray(relist)) list = relist;
@@ -153,10 +153,10 @@ async function cleanupDuplicatedProviderModels(list) {
 }
 
 // 把前端 providerKey（"local" / "local:xxx" / "provider/model" / 云端 provider key）解析成
-// admAgent /config/model 接口需要的 { provider, model }
+// Agent /config/model 接口需要的 { provider, model }
 export function resolveAgentModel(providerKey) {
   if (providerKey === "local" || providerKey.startsWith("local:")) {
-    // 本地模型统一走 admAgent.json 里自动维护的 local provider（唯一 model id 为 localModel）
+    // 本地模型统一走 tigerAgent.json 里自动维护的 local provider（唯一 model id 为 localModel）
     return { provider: "local", model: "localModel" };
   }
   // "provider/model" 复合 key（服务端 provider 列表条目，含内置模型）
@@ -217,8 +217,8 @@ export function updateModelDropdown() {
 
   var currentProvider = S.settings.agent_default_provider || "";
 
-  // 云端模型：运行中服务只信任 /providers 已确认快照（含 admAgent 内置模型，一个 provider 可能多个 model）；
-  // 仅在没有 serverInfo 的离线状态下回退 admAgent.json 列表
+  // 云端模型：运行中服务只信任 /providers 已确认快照（含 Agent 内置模型，一个 provider 可能多个 model）；
+  // 仅在没有 serverInfo 的离线状态下回退 tigerAgent.json 列表
   var cloudEntries = [];
   if (S.serverProvidersLoaded) {
     var seenKeys = {};
