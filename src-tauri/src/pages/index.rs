@@ -70,9 +70,14 @@ pub(crate) async fn fetch_update_info() -> Result<UpdateInfo, AppError> {
 /// 桌面端只是远程 UI，用户看这块数字是为了判断「服务端这台机器能不能跑某个
 /// 模型」，所以不能再采集本机硬件。未连接服务端时直接报错，由前端显示加载失败。
 #[tauri::command]
-pub async fn get_system_info() -> Result<SystemInfo, AppError> {
-    let target = agent_http::active_target()
-        .ok_or_else(|| AppError::msg("未连接服务端：无法读取服务端硬件信息"))?;
+pub async fn get_system_info(app: tauri::AppHandle) -> Result<SystemInfo, AppError> {
+    // 页面首次打开时底部状态栏与首屏并行拉取，此时 Agent 会话可能尚未建立
+    // （全局 active target 还没初始化）。这里按当前连接串补一次解析并落地目标，
+    // 让首个请求就能成功，而不是等 Agent 页建链后靠下一轮轮询恢复。
+    let target = match agent_http::active_target() {
+        Some(target) => target,
+        None => crate::common::server_mode::apply(&app)?,
+    };
     let client = agent_http::build_client(&target, std::time::Duration::from_secs(3))
         .map_err(AppError::msg)?;
     let (status, body) = tokio::time::timeout(

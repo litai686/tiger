@@ -404,15 +404,25 @@ function positionCommitPop(pop, row) {
   const rect = row.getBoundingClientRect();
   const graph = state.root ? state.root.querySelector("#scm-graph") : null;
   const anchor = graph ? graph.getBoundingClientRect() : rect;
+  // 底部 TAB 栏（#hardware-bar）始终可见，卡片底边最多到栏顶，不能盖住它。
+  const bar = document.getElementById("hardware-bar");
+  const bottomLimit = (bar ? bar.getBoundingClientRect().top : window.innerHeight) - 8;
+  const minTop = 8;
   const gap = 10;
   pop.style.left = "0px";
   pop.style.top = "0px";
+  pop.style.maxHeight = "";
   const width = pop.offsetWidth;
   const height = pop.offsetHeight;
   let left = anchor.right + gap;
   if (left + width > window.innerWidth - 8) left = Math.max(8, window.innerWidth - width - 8);
   let top = rect.top;
-  if (top + height > window.innerHeight - 8) top = Math.max(8, window.innerHeight - height - 8);
+  if (top + height > bottomLimit) top = bottomLimit - height;
+  if (top < minTop) {
+    // 上方空间不足时压缩卡片高度（正文另有 32vh 限高），而不是越到底部 TAB 栏上。
+    top = minTop;
+    pop.style.maxHeight = Math.max(0, bottomLimit - minTop) + "px";
+  }
   pop.style.left = left + "px";
   pop.style.top = top + "px";
 }
