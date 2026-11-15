@@ -61,6 +61,6 @@ Go 服务端（仓库根执行）：`go build ./...`、`go test ./internal/... -
 - [`doc/agent-patch-bash-allow-all.md`](doc/agent-patch-bash-allow-all.md) — `options.bash_allow_all`
 - [`doc/agent-patch-project-memory-sync.md`](doc/agent-patch-project-memory-sync.md) — `options.project_memory_sync`
 - [`doc/agent-decision-mode-server-plan.md`](doc/agent-decision-mode-server-plan.md) / [`doc/agent-decision-output-plan.md`](doc/agent-decision-output-plan.md) — 决策输出模式（服务端方案 / 前端 MVP 记录）
-- [`../docs/project-management-plan.md`](../docs/project-management-plan.md) — 桌面端「项目管理」标签页（项目列表 / 文件树 / 预览 / Git 状态与差异 / Git 常用命令面板）+ 所需服务端接口（只读查询 + 受控 Git 执行），**待审核，未落地**
+- [`../docs/project-management-plan.md`](../docs/project-management-plan.md) — 桌面端「项目管理」标签页（项目列表 / 文件树 / 预览 / Git 状态与差异 / Git 常用命令面板）+ 服务端文件/Git 接口，**已落地（S1–S5）**；接口契约见 [`doc/server-api.md`](doc/server-api.md) §12，刷新策略见 [`doc/frontend-architecture.md`](doc/frontend-architecture.md#项目管理视图projects)
 
 服务端协议类文档在仓库根 [`docs/`](../docs/)：`server-api.md`、`subagent-model.md`、`tcp-tls-ecdsa.md`、`hooks/`。

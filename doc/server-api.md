@@ -27,6 +27,7 @@
 - [9. 项目接口](#9-项目接口)
 - [10. Skills 接口](#10-skills-接口)
 - [11. MCP 接口](#11-mcp-接口)
+- [12. 文件与 Git 接口（项目管理）](#12-文件与-git-接口项目管理)
 - [附录 A：数据结构定义](#附录-a数据结构定义)
 - [附录 B：GUI 开发建议](#附录-bgui-开发建议)
 
@@ -90,9 +91,10 @@ Authorization: Bearer <token>
 
 | HTTP 状态码 | 触发条件 |
 |-------------|----------|
-| `400 Bad Request` | 请求体解析失败、Agent 未初始化、缺少路径参数、缺少 `client_id` 或 `client_id` 非 UUID 格式、无效的权限操作、未知命令、无效的 client_id |
-| `404 Not Found` | 工作区不存在、LSP 客户端不存在 |
-| `409 Conflict` | 工作区正在关闭中、客户端未挂载（无活跃 SSE 流）、服务器非空闲（有活跃会话）、客户端已被回收 |
+| `400 Bad Request` | 请求体解析失败、Agent 未初始化、缺少路径参数、缺少 `client_id` 或 `client_id` 非 UUID 格式、无效的权限操作、未知命令、无效的 client_id；Git 命令参数非法或 `ack` 不匹配 |
+| `403 Forbidden` | 路径不在当前项目内（逃逸 workspace、命中 `.git/`、跨盘符/UNC） |
+| `404 Not Found` | 工作区不存在、文件不存在、LSP 客户端不存在 |
+| `409 Conflict` | 工作区正在关闭中、客户端未挂载（无活跃 SSE 流）、服务器非空闲（有活跃会话）、客户端已被回收；同一 workspace 目录已有写类 Git 命令在执行 |
 | `500 Internal Server Error` | 其他未预期错误 |
 | `503 Service Unavailable` | 服务器正在关闭中 |
 
@@ -359,7 +361,8 @@ GET /v1/version
   "build_id": "构建ID",
   "go_version": "Go版本",
   "platform": "操作系统/架构",
-  "pid": 12345
+  "pid": 12345,
+  "capabilities": ["settings_v1", "fs_list", "workspace_files", "workspace_git", "workspace_git_exec"]
 }
 ```
 
@@ -371,6 +374,7 @@ GET /v1/version
 | `go_version` | string | 编译用的 Go 版本 |
 | `platform` | string | 运行平台 (如 `linux/amd64`) |
 | `pid` | int | 服务器进程 PID（用于升级时定位进程） |
+| `capabilities` | string[] | 可选能力列表；客户端据此对老服务端降级（`settings_v1`、`fs_list`、`workspace_files`、`workspace_git`、`workspace_git_exec` 等） |
 
 ---
 
@@ -1911,6 +1915,287 @@ POST /v1/workspaces/{id}/mcp/docker/disable
 禁用 Docker MCP 服务器。
 
 **响应**：`200 OK`（无响应体）
+
+---
+
+## 12. 文件与 Git 接口（项目管理）
+
+> 对应桌面端「项目管理」标签页（`#/projects`）。文件与 Git 数据全部由**服务端主机**读取/执行：桌面端可能连接远程服务端，客户端本地文件系统不可信。
+>
+> 所有路径参数都是 **workspace 相对路径**，使用 `/` 分隔，空串表示 workspace 根。路径中出现 `..` 上跳、绝对路径、盘符/UNC、NUL 或任一段为 `.git`（Windows 上大小写不敏感，`.GIT`、`.git.` 视为同一目录）时返回 `403`；workspace 不存在返回 `404`。
+
+### 12.0 capability
+
+有本组接口的服务端在 `GET /v1/version` 的 `capabilities` 中返回：
+
+| capability | 含义 |
+| --- | --- |
+| `workspace_files` | 目录列表与文件内容 |
+| `workspace_git` | Git 状态与差异 |
+| `workspace_git_exec` | Git 命令目录与受控执行 |
+
+老服务端缺少对应项时客户端按能力降级：缺 `workspace_files` 整页不可用并提示升级；缺 `workspace_git` 只隐藏 Git 颜色/差异；缺 `workspace_git_exec` 时源码管理降级为只读（可看状态/差异，隐藏提交与暂存），项目管理只保留文件浏览与差异。
+
+### 12.1 列出目录（单层）
+
+```
+GET /v1/workspaces/{id}/files?path=src%2Fviews&show_hidden=1
+```
+
+| 参数 | 位置 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | path | 是 | Workspace ID |
+| `path` | query | 否 | 相对目录，默认 `""`（根） |
+| `show_hidden` | query | 否 | `0` 过滤 `.` 开头的条目；默认 `1` |
+
+**响应** `200 OK`：
+
+```json
+{
+  "path": "src/views",
+  "entries": [
+    { "name": "agent", "path": "src/views/agent", "is_dir": true, "size": 0, "mtime": 1726300000, "symlink": false, "external": false, "hidden": false },
+    { "name": "agent.js", "path": "src/views/agent.js", "is_dir": false, "size": 12345, "mtime": 1726300000, "symlink": false, "external": false, "hidden": false }
+  ],
+  "truncated": false
+}
+```
+
+语义：
+
+- 排序为「目录优先、名称不区分大小写」；单目录最多 2000 条，超出时 `truncated:true`。
+- 永不返回 `.git` 条目（Windows 上含大小写与结尾点号变体）；其余隐藏文件按 `show_hidden` 决定。
+- 符号链接：`symlink:true`；目标在 workspace 内且为目录时 `is_dir:true` 可展开；目标在 workspace 外时 `external:true`，客户端禁用展开/预览。`path` 始终是逻辑相对路径，不是解析后的物理路径。
+- 目录不存在/不可读 → `400`。
+
+### 12.2 读取文件内容
+
+```
+GET /v1/workspaces/{id}/files/content?path=README.md&max_bytes=1048576
+```
+
+| 参数 | 位置 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | path | 是 | Workspace ID |
+| `path` | query | 是 | 相对文件路径 |
+| `max_bytes` | query | 否 | 读取上限，默认 1 MiB；下限 4 KiB、上限 8 MiB |
+
+**响应** `200 OK`：
+
+```json
+{
+  "path": "README.md",
+  "size": 8123,
+  "mtime": 1726300000,
+  "binary": false,
+  "encoding": "utf-8",
+  "truncated": false,
+  "line_count": 123,
+  "content": "# tigerAgent\n..."
+}
+```
+
+语义：
+
+- 二进制判定与 Agent `view` 工具一致：读到的字节不是合法 UTF-8 即 `binary:true`，此时 `content:""`、`encoding:""`。
+- `encoding` 为 `utf-8` 或 `utf-8-bom`（内容不剥离 BOM，客户端展示前自行处理）。
+- `truncated:true` 表示还有剩余字节未读；截断点若落在多字节字符中间，服务端回退到上一个合法 UTF-8 边界。
+- 目录 → `400`；文件不存在 → `404`；`.git/` → `403`。
+- 内容不做日志输出。
+
+### 12.3 Git 状态
+
+```
+GET /v1/workspaces/{id}/git/status
+```
+
+**响应** `200 OK`（仓库）：
+
+```json
+{
+  "exists": true,
+  "is_repo": true,
+  "git_installed": true,
+  "branch": "main",
+  "detached": false,
+  "head": "3f9c1ab",
+  "ahead": 1,
+  "behind": 0,
+  "entries": [
+    { "path": "src/views/agent.js", "orig_path": "", "index": "M", "worktree": " ", "untracked": false, "ignored": false },
+    { "path": "src/views/new.js", "orig_path": "", "index": "?", "worktree": "?", "untracked": true, "ignored": false },
+    { "path": "src/views/renamed.js", "orig_path": "src/views/old.js", "index": "R", "worktree": " ", "untracked": false, "ignored": false }
+  ],
+  "truncated": false
+}
+```
+
+非仓库 / 未安装 git 同样是 `200`（`is_repo:false` / `git_installed:false`，`entries:[]`），客户端据此禁用仓库级 Git 功能（命令面板）而不是显示错误。
+
+主目录本身不是仓库、但子目录里有仓库时（多项目根目录），服务端会扫描子目录中的 `.git`（深度 5 层、最多 2000 个目录 / 20 个仓库，跳过 `.git`、`node_modules`、`.tigerAgent`、`.cache`），把这些仓库的状态聚合进 `entries`（路径带子目录前缀，如 `pi/a.txt`），并在 `nested_repos` 返回仓库相对根（如 `["pi"]`）。此时 `is_repo` 仍为 `false`，因为仓库级命令不适用于该目录本身。
+
+语义：
+
+- `entries[].path` 是 workspace 相对路径：workspace 位于仓库子目录时，服务端按 `git rev-parse --show-prefix` 裁剪仓库内其它子树。`orig_path` 仅重命名/复制条目有值。
+- `index` / `worktree` 即 `git status --porcelain=v1` 的两列（`" "`、`M`、`A`、`D`、`R`、`C`、`U`、`?`、`!`）。
+- 最多 5000 条，按路径排序后截断并置 `truncated:true`。
+- `ahead` / `behind` 仅在上游存在时计算，失败归 0。
+- workspace 目录在服务端已不存在时 `exists:false`。
+
+### 12.4 Git 差异
+
+```
+GET /v1/workspaces/{id}/git/diff?path=src%2Fa.js&staged=0
+```
+
+| 参数 | 位置 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | path | 是 | Workspace ID |
+| `path` | query | 是 | 相对文件路径 |
+| `staged` | query | 否 | `1` = 索引 vs HEAD；默认 `0` = 工作区 vs 索引 |
+
+**响应** `200 OK`：
+
+```json
+{
+  "path": "src/a.js",
+  "staged": false,
+  "untracked": false,
+  "binary": false,
+  "truncated": false,
+  "diff": "diff --git a/src/a.js b/src/a.js\n..."
+}
+```
+
+语义：
+
+- 未跟踪文件：`untracked:true`、`diff:""`，客户端用内容接口渲染「全部新增」。
+- 二进制差异（`Binary files ` / `GIT binary patch`）：`binary:true`、`diff:""`。
+- 无变更：`200` + `diff:""`。
+- 直接返回 `git diff` 的 unified 文本（`--no-ext-diff --no-textconv --unified=3 --relative`），上限 2 MiB，超出截断并置 `truncated:true`。
+- 已删除文件仍返回删除 diff；内容接口对同一路径返回 `404`。
+- 主目录不是仓库时，服务端向上查找文件所属的子目录仓库并在该仓库执行 diff；文件不属于任何仓库 → `400`。
+- `path` 命中 `.git/` 或逃逸 workspace → `403`；非 Git 仓库 → `400`；git 执行失败 → `500`。
+
+### 12.5 Git 命令目录
+
+```
+GET /v1/workspaces/{id}/git/commands
+```
+
+返回**纯静态**命令目录（不执行 git、不探测仓库），桌面端据此渲染表单、风险标识与确认级别。目录项字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 稳定契约标识（见 12.8 表），命令只能按 id 执行 |
+| `group` | `read` / `sync` / `change` / `danger` |
+| `risk` | `read` / `write` / `danger` |
+| `confirm` | `none` / `normal` / `strong`（`strong` 要求输入目标名或勾选红色确认） |
+| `network` | 可能访问远端（fetch/pull/push） |
+| `mutates` | 可能改动工作区/索引/引用，成功后客户端应刷新状态与文件树 |
+| `timeout_sec` | 服务端硬超时（≤150s，小于桌面端代理 180s 上限） |
+| `preview` | 展示用命令模板（`{param}` 占位，不参与执行） |
+| `params[]` | `type` ∈ `text` / `int` / `bool` / `path` / `branch` / `rev`；`required`、`default`、`min`/`max`、`max_len`、`options` |
+
+### 12.6 执行 Git 命令
+
+```
+POST /v1/workspaces/{id}/git/exec
+Content-Type: application/json
+```
+
+```json
+{
+  "id": "commit",
+  "params": { "message": "fix: prevent session loading from crashing on missing metadata" },
+  "ack": "normal"
+}
+```
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `id` | 是 | 命令目录中的 id；未知 id → `400` |
+| `params` | 否 | 参数值统一为字符串（`int` 传 `"20"`、`bool` 传 `"true"`）；出现 schema 之外的键、缺必填、越界 → `400` |
+| `ack` | 视命令 | `confirm != "none"` 时必须等于命令的确认级别；不匹配 → `400`（防误触的 UX 闸门，不是授权机制） |
+
+**响应** `200 OK`（命令已执行完毕，**包括 git 非 0 退出**）：
+
+```json
+{
+  "id": "commit",
+  "display": "git commit -m \"fix: ...\"",
+  "exit_code": 0,
+  "stdout": "[main 3f9c1ab] fix: ...\n 1 file changed, 2 insertions(+)\n",
+  "stderr": "",
+  "duration_ms": 842,
+  "timed_out": false,
+  "truncated": false
+}
+```
+
+语义：
+
+- `display` 是服务端按最终 argv 拼出的展示串（仅回显/日志，不参与执行）。
+- `stdout` 上限 512 KiB、`stderr` 上限 256 KiB；任一截断时 `truncated:true` 并在对应输出末尾追加提示。
+- 超时：`timed_out:true`、`exit_code:-1`，`stderr` 写入「命令超时（Ns）」；超时也是 `200`。
+- 同一 workspace 目录（按解析后的路径判定，跨 workspace id）已有**写类**命令在执行时返回 `409`；读类命令不互斥。
+- 无法启动 git（未安装等）→ `500`；git 非 0 退出**不是** HTTP 错误。
+- 服务端日志只记录 `id / exit_code / duration_ms / timed_out`，不记录 stdout/stderr。
+- 执行环境：`cmd.Dir = workspace`、参数数组（不经 shell）、`GIT_TERMINAL_PROMPT=0`、`GIT_PAGER=cat`、`GIT_LITERAL_PATHSPECS=1`；只读命令额外 `GIT_OPTIONAL_LOCKS=0`。仓库 hooks 照常执行，由超时兜底。
+
+### 12.7 错误码
+
+| 状态码 | 场景 |
+| --- | --- |
+| `200` | 成功（含 `is_repo:false`、`untracked:true`、`binary:true`、git 非 0 退出、执行超时等业务态） |
+| `400` | 路径缺失/格式非法、目标是目录（content）、目录不可读、`max_bytes` 非法、未知命令 id、参数缺失/越界/多余、`ack` 不匹配、非 Git 仓库（diff/exec） |
+| `403` | 路径逃逸 workspace、命中 `.git/`、跨盘符/UNC |
+| `404` | workspace 不存在、文件不存在 |
+| `409` | 同一 workspace 目录已有写类 Git 命令在执行 |
+| `500` | git 执行失败（无法启动/未安装）、读取文件失败等内部错误 |
+
+### 12.8 内置命令目录（契约表）
+
+> 新增/删除命令必须同时改本表、`internal/backend/git_commands.go` 与桌面端 i18n。
+
+| id | group | argv（`cmd.Dir=workspace`） | 参数 | risk | confirm | network | mutates | 超时 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `status` | read | `git status --short --branch` | — | read | none | false | false | 15s |
+| `log` | read | `git log --oneline --graph --decorate -n {limit}` | `limit` int 1..200=20 | read | none | false | false | 20s |
+| `show_head` | read | `git show --stat --oneline HEAD` | — | read | none | false | false | 20s |
+| `show_commit` | read | `git show --name-status --format= --relative -z --find-renames {rev}` | `rev` rev req | read | none | false | false | 20s |
+| `commit_file_diff` | read | `git show --format= --no-ext-diff --no-textconv --unified=3 --relative {rev} -- {path}` | `rev` rev req；`path` path req（不校验存在性） | read | none | false | false | 20s |
+| `commit_detail` | read | `git show --numstat --format=<hash NUL author NUL email NUL date NUL subject NUL body NUL> {rev}` | `rev` rev req | read | none | false | false | 20s |
+| `branch_list` | read | `git branch -a -vv` | — | read | none | false | false | 15s |
+| `remote_list` | read | `git remote -v` | — | read | none | false | false | 15s |
+| `tag_list` | read | `git tag --list --sort=-creatordate` | — | read | none | false | false | 15s |
+| `diff_stat` | read | `git diff --stat`（+`--cached`） | `staged` bool=false | read | none | false | false | 15s |
+| `stash_list` | read | `git stash list` | — | read | none | false | false | 15s |
+| `fetch` | sync | `git fetch --all --prune` | — | write | normal | true | true | 120s |
+| `pull` | sync | `git pull --ff-only` | — | write | normal | true | true | 120s |
+| `push` | sync | `git push` | — | write | normal | true | true | 120s |
+| `add_all` | change | `git add -A -- .` | — | write | none | false | true | 30s |
+| `add_file` | change | `git add -- {path}` | `path` path req | write | none | false | true | 30s |
+| `unstage_file` | change | `git reset -- {path}` | `path` path req | write | none | false | true | 30s |
+| `unstage_all` | change | `git reset -- .` | — | write | none | false | true | 30s |
+| `commit` | change | `git commit -m {message}` | `message` text req ≤2000 | write | normal | false | true | 60s |
+| `stash_push` | change | `git stash push -m {message} -- .`（无 message 去掉 `-m`） | `message` text opt ≤200 | write | normal | false | true | 30s |
+| `stash_pop` | change | `git stash pop` | — | write | normal | false | true | 30s |
+| `switch_branch` | change | `git switch {branch}` | `branch` branch req | write | normal | false | true | 30s |
+| `branch_create` | change | `git switch -c {branch}` | `branch` branch req | write | normal | false | true | 30s |
+| `merge` | change | `git merge --no-edit {branch}` | `branch` branch req | write | normal | false | true | 60s |
+| `restore_file` | danger | `git restore --worktree -- {path}` | `path` path req | danger | strong | false | true | 30s |
+| `branch_delete` | danger | `git branch -d {branch}` | `branch` branch req | danger | strong | false | true | 30s |
+| `reset_soft` | danger | `git reset --soft {rev}` | `rev` rev req | write | normal | false | true | 30s |
+| `reset_hard` | danger | `git reset --hard {rev}` | `rev` rev req | danger | strong | false | true | 30s |
+| `clean_dry_run` | danger | `git clean -nd` | — | read | none | false | false | 60s |
+| `clean_force` | danger | `git clean -fd` | — | danger | strong | false | true | 60s |
+
+**明确不提供**：`push --force*`、`push --delete`、`rebase`、`cherry-pick`、`submodule`、`config`、`filter-branch`、`commit --no-verify`、`gc --prune`、`reflog expire`。
+
+**提交历史命令**：`show_commit` 的 stdout 是 NUL 分隔的 `git show --name-status -z` 输出（`M\0path\0`；重命名/复制为 `R100\0old\0new\0`），路径相对 workspace（`--relative`）。`commit_file_diff` 返回指定提交中某个文件的 unified diff（二进制显示 `Binary files … differ`）；`path` 允许是工作区已删除的历史路径，服务端只做 workspace 包含性、`..`、`.git` 校验（`git_commands.go` 的 `NoStat` 参数），不做存在性检查。`commit_detail` 的 stdout 以 NUL 分隔 hash / author / email / ISO 日期 / subject / body 六个字段，随后是 `--numstat` 文本（`新增\t删除\t路径`，二进制文件为 `-\t-`）；桌面端用它渲染图表悬停卡片里的作者、时间、完整提交信息与增删统计。
+
+**作用域**：所有命令的 `cmd.Dir` 都是 workspace；`add_all` / `unstage_all` / `stash_push` / `clean` 用 `-- .` 限定在 workspace 子树（在仓库子目录直接 `git add -A` 会暂存整个仓库）。`commit` 提交整个索引；`fetch/pull/push/switch/merge/reset/branch` 是仓库级语义。
 
 ---
 
