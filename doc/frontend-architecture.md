@@ -9,8 +9,8 @@
 - **Tauri 2.11.5** + Rust 后端 + **原生 HTML/CSS/JS**（无框架、无打包工具）。
   所有前端源码在 `src/` 目录下，作为 `frontendDist` 原样提供。
 - **单窗口 SPA（单页应用）** + hash 路由：
-  - `index.html`（外壳）含 `#view-root` + `#agent-layer` 两个互斥显示的视图宿主、底部硬件栏与导航；底部 TAB 固定为 **Agent | 项目管理 | 源码管理 | 技能管理 | 设置**（默认路由 `#/agent`，未知/空 hash 回退到 Agent 页）。
-  - 5 个视图（`agent` / `projects` / `scm` / `skills` / `settings`）各自为独立 **ES 模块**（`src/views/*.js`），默认导出 `{ template, mount(root, params), unmount(), show?, hide? }`。
+  - `index.html`（外壳）含 `#view-root` + `#agent-layer` 两个互斥显示的视图宿主、底部硬件栏与导航；底部 TAB 固定为 **Agent | 模型管理 | 项目管理 | 源码管理 | 技能管理 | 设置**（默认路由 `#/agent`，未知/空 hash 回退到 Agent 页）。
+  - 6 个视图（`agent` / `models` / `projects` / `scm` / `skills` / `settings`）各自为独立 **ES 模块**（`src/views/*.js`），默认导出 `{ template, mount(root, params), unmount(), show?, hide? }`。
   - `agent` 视图已拆分：`src/views/agent.js` 为入口（init/bindEvents/生命周期），具体逻辑在 `src/views/agent/` 子模块（store/template/api/utils/ui/render/session/attach/send/sse/permission/tools/model/workspace/settings_dialog/server_logs/undo）；跨模块共享状态由 `store.js` 统一管理（`store` 为写入入口，`S` 为只读视图，workspace 字段禁止直接写 `S`）。
   - `projects` 视图拆分：`src/views/projects.js` 为入口，子模块在 `src/views/projects/`（api/store/template/projects_list/tree/viewer/diff/git/ui）。文件与 Git 数据全部经 `agent_http_request` 访问**服务端**（桌面端可能连远程服务端，客户端本地 `fs` 不可信）；`src-tauri/` 零改动。diff 解析/渲染、路径归一化与剪贴板写入复用 `src/views/shared/`（`diff.js` / `paths.js` / `clipboard.js`），视图只传各自的 CSS 类名前缀。
   - `scm` 视图拆分：`src/views/scm.js` 为入口，子模块在 `src/views/scm/`（api/store/template/render/ui/diff）。数据同样全部走服务端 HTTP；api 直接复用 `projects/api.js`（HTTP 封装 / 单飞 GET / 错误归类 / 能力探测只有一份），diff 解析与渲染复用 `views/shared/diff.js`，`diff.js` 仅保留提交记录解析。
@@ -66,6 +66,13 @@
 - **服务端连接（TCP + TLS，无本地进程）**：桌面端**不启动、不探测、不终止**服务端进程，服务端由用户在服务器侧自行启动（`tigerAgent --host tcp://0.0.0.0:<端口>`）并把打印的连接串粘贴到设置页。`start_agent_server` 只做「解析连接串 → TLS 握手 + `/v1/health` 探活 → `POST /v1/workspaces` → 起 SSE 转发」，连不上直接报错并引导去设置页。HTTP API 通过 `agent_http_request` 代理（hyper + rustls 直连 TLS 流，每个请求带 `Authorization: Bearer`），SSE 事件通过 Tauri event `agent-sse-event` 转发给前端；连续建连失败达阈值（3s×5）时 emit `agent-connection-lost`，前端重连一次并提示检查服务端。
 - **多 workspace 并发架构**：单 Agent server 进程支持多个 workspace 同时干活。每个 workspace 有独立的 `AgentCoordinator`/SQLite DB/SSE 转发任务。Rust 后端 `AppState.agent_sessions: HashMap<String, AgentServerSession>` 按 workspace_id 索引各会话，`agent_child` 全局共享子进程，`active_workspace_id` 跟踪当前 tab。前端 `S.workspaces[wsId]` 状态池存各 workspace 的会话/消息/运行状态，切换 tab 时保存当前+恢复目标，不中断旧 workspace 的 agent run。SSE 事件携带 `workspace_id`，前端只处理当前激活 tab 的事件。
 
+## 模型管理视图（`#/models`）
+
+- **定位**：底部 TAB「模型管理」（Agent 右侧）。原「云端模型管理」从 Agent 设置弹窗迁出——它管理的是服务端全局 provider 配置，与单个会话/设置无关；Agent 设置弹窗只保留推理强度/温度/多模态模型等会话级设置。
+- **数据来源**：`list_cloud_providers` / `add_cloud_provider` / `update_cloud_provider` / `delete_cloud_provider`（Rust → 服务端 `GET|POST /v1/settings`）。页面与 Agent 页共享 `agent/store.js` 的 `S`，每次增删改后刷新 `S.providers`（有 workspace 时顺带刷新 `/providers` 快照），保证模型下拉与本列表一致；服务端写入后会重载所有 workspace 配置，无需重启。
+- **独立打开**：本视图可能在 Agent 页建链之前打开，mount 时先调 `ensure_server_target` 把保存的连接串应用进全局 active target，再拉 `/v1/settings`；未配置连接串/服务端不可达时在页面内提示，引导去「设置 → 服务端连接」。
+- **弹窗**：添加/修改复用同一表单（标题/按钮按模式切换），模型 ID 候选走 Rust `probe_models_endpoint`（绕开 WebView CORS）。删除确认与结果提示用视图内自建遮罩/提示条——`agent/ui.js` 的 `showConfirm` / `showNotice` 分别挂在 `.agent-root` 与聊天消息区，切到其它 TAB 时不可见，不能复用。
+
 ## 项目管理视图（`#/projects`）
 
 - **视图结构**：左栏顶部工作目录下拉选择器（Rust `get_workdirs` ∪ `GET /v1/workspaces`，按路径去重，默认显示上次选中的工作目录）+ 下方懒加载文件树（默认全部收起，只显示项目根节点）；右侧 TAB 为 `预览 / 差异`，默认显示源文件内容，差异 TAB 仅在选中文件有 Git 变更时出现（双击变更文件可直接打开差异），差异内可切工作区/暂存。Git 命令面板已移除，受控执行能力只在源码管理视图提供。目录一次只拉一层（`GET /v1/workspaces/{id}/files`），Git 状态由服务端 `git status --porcelain=v1 -z` 解析，目录颜色由前端按子树最高优先级聚合。
@@ -84,7 +91,7 @@
 - **工作区与刷新**：与项目页相同，每次选中仓库调用 `create_workspace({path, clientId})` 并依赖 SSE 保活；首次进入复用 `localStorage["projects.activePath"]`，之后记在 `scm.activePath`。页面可见时每 15s 轮询 `git/status`（失败退避 30s，动作执行/隐藏页暂停）；SSE `file` / `run_complete`（同 workspace）防抖 800ms 后刷新状态与当前差异。提交图表走 `git/exec` 的 `log`（`limit=40`），仅在展开且「自动」开启时随状态刷新重新拉取（最短间隔 30s）。
 - **提交与丢弃语义**：提交按钮默认「已暂存优先」——有暂存内容直接 `commit`；没有任何暂存但有未提交更改时弹确认「暂存全部并提交」（先 `add_all` 再 `commit`）。`restore_file` 属强确认：单文件要求输入文件名，全部丢弃要求勾选确认；未跟踪文件没有删除接口，前端不提供丢弃入口。非仓库（主目录只聚合子目录仓库）时隐藏全部写操作，只允许查看差异。
 - **图表与历史提交**：点击图表里的提交行展开该提交改动的文件列表（`git/exec` 的 `show_commit`，服务端 `git show --name-status -z`，前端按 NUL 解析 `M\0path\0` / `R100\0old\0new\0`，结果按 hash 缓存）；点击文件在右侧展示该提交中此文件的 unified diff（`commit_file_diff`，`path` 允许工作区已删除的历史路径）。右侧顶栏显示 `提交 <hash>` 与「返回工作区」，工作区/暂存切换在历史模式下隐藏；展开状态只在当前会话内保留，切换仓库时清空。
-- **图表排版与悬停卡片**：图表固定不出横向滚动条——提交行用 flex（caret / graph / hash / 说明）布局，说明部分 `text-overflow: ellipsis` 截断；悬停提交行 180ms 后在侧栏右侧弹出详情卡片（`commit_detail`：作者、时间、完整 subject/body、`已更改 N 个文件, X 行插入(+), Y 行删除(-)`），卡片可悬停阅读、滚动图表或鼠标移开后收起，详情按 hash 缓存。
+- **图表排版与悬停卡片**：图表固定不出横向滚动条——提交行用 flex（caret / graph / hash / 说明）布局，说明部分 `text-overflow: ellipsis` 截断；悬停提交行 180ms 后在侧栏右侧弹出详情卡片（`commit_detail`：作者、时间、完整 subject/body、`已更改 N 个文件, X 行插入(+), Y 行删除(-)`），卡片可悬停阅读、滚动图表或鼠标移开后收起，详情按 hash 缓存。卡片是 `position: fixed`，定位时以底部 TAB 栏（`#hardware-bar`）的顶边为下界（不再是 `window.innerHeight`）：上方空间够就整体上移，不够则压卡片自身的 `max-height`，保证任何窗口高度下都不会盖住底部 TAB 栏。
 - **子目录 Git 仓库**：主目录不是仓库、子目录里有仓库（如 `tt/pi`）时，服务端在 `git/status` 返回 `nested_repos` 并把子仓库变更聚合进 `entries`。视图会把这些子仓库登记为独立可选仓库（下拉「子目录 Git 仓库」分组，`localStorage["scm.nestedRepos"]` 持久化），并在首次进入/刷新父目录时自动切换到第一个子仓库——以子仓库为 workspace 路径重新 `create_workspace`，从而拿到完整的暂存/提交/图表能力；手动从下拉选择父目录（`selectProject(project, {autoNested:false})`）时保持聚合只读视图，不会自动跳走。子仓库路径由「workspace 绝对路径 + 相对根」拼接，Windows/Linux 分隔符自适应。
 - **渲染安全**：路径、diff、`git log` 输出全部是服务端不可信文本，只用 `textContent` / DOM 节点写入；行内按钮的 `data-action` 与 `data-path` 由前端常量生成，不拼接服务端 HTML。
 - **接口契约**：与项目页共用 [`server-api.md`](server-api.md#12-文件与-git-接口项目管理)（§12）。

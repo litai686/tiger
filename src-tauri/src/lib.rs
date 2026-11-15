@@ -173,6 +173,7 @@ pub fn run() {
             settings::get_server_connection,
             settings::set_server_connection,
             settings::test_server_connection,
+            settings::ensure_server_target,
             // agent.rs - 服务端连接（TCP + TLS，服务端由用户自行启动）
             agent::get_platform_os,
             agent::get_platform_arch,

@@ -130,6 +130,7 @@
 
     #settings-btn,
     #agent-btn,
+    #models-btn,
     #projects-btn,
     #scm-btn,
     #skills-btn {
@@ -184,6 +185,7 @@
 
     #settings-btn:hover,
     #agent-btn:hover,
+    #models-btn:hover,
     #projects-btn:hover,
     #scm-btn:hover,
     #skills-btn:hover {
@@ -192,6 +194,7 @@
 
     #settings-btn.active,
     #agent-btn.active,
+    #models-btn.active,
     #projects-btn.active,
     #scm-btn.active,
     #skills-btn.active {
@@ -202,6 +205,7 @@
     }
     #settings-btn.active .btn-icon,
     #agent-btn.active .btn-icon,
+    #models-btn.active .btn-icon,
     #projects-btn.active .btn-icon,
     #scm-btn.active .btn-icon,
     #skills-btn.active .btn-icon {
@@ -451,6 +455,10 @@
         <span class="btn-icon">&#129302;</span>
         <span class="btn-text" data-i18n="Agent">Agent</span>
       </div>
+      <div id="models-btn" onclick="navigateTo('/models')">
+        <span class="btn-icon">&#9729;&#65039;</span>
+        <span class="btn-text" data-i18n="模型管理">模型管理</span>
+      </div>
       <div id="projects-btn" onclick="navigateTo('/projects')">
         <span class="btn-icon">📁</span>
         <span class="btn-text" data-i18n="项目管理">项目管理</span>
@@ -551,7 +559,7 @@
 
     // ===== 导航激活态 =====
     function setActiveNav(id) {
-      ["agent-btn", "projects-btn", "scm-btn", "skills-btn", "settings-btn"].forEach(function (b) {
+      ["agent-btn", "models-btn", "projects-btn", "scm-btn", "skills-btn", "settings-btn"].forEach(function (b) {
         const el = document.getElementById(b);
         if (el) el.classList.toggle("active", b === id);
       });
@@ -1149,6 +1157,7 @@
     const routes = {
       "/settings": { load: () => import("./views/settings.js"),       nav: "settings-btn" },
       "/agent":    { load: () => import("./views/agent.js"),          nav: "agent-btn" },
+      "/models":   { load: () => import("./views/models.js"),         nav: "models-btn" },
       "/projects": { load: () => import("./views/projects.js"),       nav: "projects-btn" },
       "/scm":      { load: () => import("./views/scm.js"),           nav: "scm-btn" },
       "/skills":   { load: () => import("./views/skills.js"),         nav: "skills-btn" },

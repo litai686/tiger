@@ -183,3 +183,14 @@ pub async fn test_server_connection(app: tauri::AppHandle) -> Result<String, App
     };
     Ok(format!("连接成功：{}{}", target.display(), mode_hint))
 }
+
+/// 把当前保存的连接串解析进全局 active target，不发起任何网络请求。
+///
+/// 非 Agent 页面（如「模型管理」）可能在 Agent 视图建链之前就发 HTTP 命令
+/// （`list_cloud_providers` → `/v1/settings`）；没有这一步，`active_target()`
+/// 为空时这些命令会误报「未连接服务端」。
+#[tauri::command]
+pub fn ensure_server_target(app: tauri::AppHandle) -> Result<String, AppError> {
+    let target = crate::common::server_mode::apply(&app)?;
+    Ok(target.display())
+}

@@ -45,7 +45,7 @@
 
 - **网络代理链路**（设置→网络代理，代理在**服务端主机**生效）：
   1. 前端 `settings.js` `saveProxy()` 校验（启用时 url 必填、须以 `http(s)://` 或 `socks5://` 开头）→ `save_settings` 只写本地 `config.json` 缓存 → 再 `invoke("apply_server_settings", { patch: { agent_proxy } })`，**失败直接显示服务端返回的原因**（不再静默）。
-  2. Rust `agent.rs` `send_server_settings` → `POST /v1/settings`（15s 超时）→ 服务端 `backend.ApplySettings` 校验 scheme/host → `ConfigStore.SetConfigFields(ScopeGlobal)` 原子写服务端 `tigerAgent.json`（含 `.bak`）→ `ReloadFromDisk`。
+  2. Rust `agent.rs` `send_server_settings` → `POST /v1/settings`（15s 超时）→ 服务端 `backend.ApplySettings` 校验 scheme/host → `ConfigStore.SetConfigFields(ScopeGlobal)` 原子写服务端 `tigerAgent.json`（含 `.bak`）→ `ReloadFromDisk`；落盘后还会对**每个存活 workspace** 调 `ws.Cfg.ReloadFromDisk`（`backend.reloadLiveWorkspaceConfigs`，并发执行）。每个 workspace 的 ConfigStore 是创建时各读一次盘的独立快照，store 之间不会互相通知，漏了这一步 provider/代理等补丁只存在于后端全局 store，`GET /workspaces/{id}/providers` 与 agent 模型构建读到的仍是旧快照（桌面端只能提示「重启 Agent 后生效」）。重载要并发：单次重载可能耗到模型发现超时，串行累加会撑破上面的 15s 客户端超时；`config.PushPopTigerAgentEnv` 的进程级 `TIGERAGENT_*` 环境变量窗口已按引用计数共享（内层只延长窗口、最后一个调用者才恢复原值），所以并发重载不会把临时值留在进程环境里（回归用例 `TestPushPopTigerAgentEnvConcurrent`）。
   3. `ConfigStore.setConfig` 把代理同步到进程级 `httpproxy`（`internal/config/store.go`）；`httpproxy.ProxyFunc()` 作为 `Transport.Proxy` 回调**每次请求实时读取**状态，热重载即刻生效、无需重建 client/重启 server；本地/私网地址（127.0.0.1、LAN GPU 盒）自动绕过（`internal/httpproxy/proxy.go`）。
   4. **生效范围**：LLM 客户端（`llm/client.go`）+ Agent 网络工具 fetch/web_fetch/download/web_search/sourcegraph/agentic_fetch（全部经 `SharedHTTPTransport`，`tools/fetch_helpers.go`）；**MCP HTTP/SSE 传输不走**（只认服务端进程的 `HTTP_PROXY` 环境变量）。
   5. **连通性验证**：`POST /v1/settings/proxy/test` 由服务端实际经代理发一次探测并返回延迟——桌面端无法验证服务端的出站网络。

@@ -21,7 +21,7 @@
 | Agent 视图交互与状态（`src/views/agent/` 的 store / render / ui / sse / autocontinue / workspace 等） | [frontend-agent-conventions.md](frontend-agent-conventions.md) |
 | 剪贴板粘贴、PDF 附件（`attach.js`、`pdf.js`、`pdf_batch.js`、`src/vendor/pdfjs`、Rust 侧 `read_clipboard_files` / `clipboard_*`） | [attachments.md](attachments.md) |
 | `src-tauri/src/**`（除构建链路：自升级、下载、平台差异） | [rust-backend.md](rust-backend.md) |
-| Agent 设置项与开关写入链路（`settings.rs` / `agent.rs` 的 `sync_*`、`settings_dialog.js`、`memory.js`、模型下拉） | [agent-settings.md](agent-settings.md) |
+| Agent 设置项与开关写入链路（`settings.rs` / `agent.rs` 的 `sync_*`、`settings_dialog.js`、`memory.js`、`models.js`（云端模型管理 TAB）、模型下拉） | [agent-settings.md](agent-settings.md) |
 | Agent 服务端行为与前后端契约（loop / 压缩 / 事实块 / 归档编号 / 决策模式 / 代理 / 配置词表 / 新增 part 类型） | [agent-server.md](agent-server.md) |
 | CI、打包、服务端分发（默认不打包）与更新链路（根目录 `.github/workflows/build.yml`、`prepare-agent-binary.mjs`、`tauri.conf.json` 打包项） | [build-and-release.md](build-and-release.md) |
 | 调试日志标记、工作边界与流程约定 | 本文件 |

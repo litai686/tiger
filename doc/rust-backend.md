@@ -9,7 +9,7 @@
 | 模块 | 关键命令 |
 |--------|-------------|
 | `index.rs` | `get_system_info`（底部硬件栏）, `check_update`, `download_app_update`, `install_app_update`（应用自升级，见下） |
-| `settings.rs` | `save_settings'（原子写入：`.tmp` + `rename`）, `load_settings`, `get_app_version`, `get_tauri_version` |
+| `settings.rs` | `save_settings`（原子写入：`.tmp` + `rename`）, `load_settings`, `get_app_version`, `get_tauri_version`, `get/set_server_connection`（解析并保存连接串，保存后立即 `server_mode::apply`）, `test_server_connection`（TLS 握手 + pin 校验 + `/v1/health` + 带 token 的 `/v1/workspaces`）, `ensure_server_target`（只把保存的连接串解析进全局 active target，不发网络请求；非 Agent 页面〔如模型管理〕在建链前需要它） |
 | `agent.rs` | `start_agent_server`（连接用户自行启动的 TCP + TLS 服务端并建 workspace 会话，不拉起进程）, `stop_agent_server`（断开会话/SSE）, `get_agent_server_status`（本进程是否已建好会话）, `get_server_version`（`GET /v1/version`，版本页显示服务端版本）, `agent_http_request`, `agent_subscribe_events`, `agent_unsubscribe_events`, `add/list/update/delete_cloud_provider`（`list` 过滤自动管理的 `local` 与服务端内置 `tigerAgent`，内置模型只从 `/providers` 快照进入下拉）, `probe_models_endpoint`（请求云端模型的 OpenAI 兼容 `{base}/models`，10s 超时，返回模型 ID 列表；走 Rust 是为了绕开 WebView 的 CORS，同 `fetch_skill_store`） |
 | `logs.rs` | `fetch_server_logs`（`GET /v1/logs`，服务端日志文件列表）, `fetch_server_log_text(name, tail)`（`GET /v1/logs/{name}?tail=N`，文本透传）, `download_server_log(name)`（`?download=1` 取整文件 + 系统保存对话框落盘，返回本地路径）——服务端可能不在本机，日志只能经 API 取回 |
 
