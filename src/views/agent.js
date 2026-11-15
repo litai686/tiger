@@ -7,7 +7,7 @@ import { S, invoke, listen, store } from "./agent/store.js";
 import { log, setLogEnabled } from "./agent/log.js";
 import { api } from "./agent/api.js";
 import { generateUUID, isFullyAtBottom, autoResize, $input, applyReasoningSetting, modelContextWindow } from "./agent/utils.js";
-import { updateStatusBar, updateContextUsage, updateSendButton, exitManualScrollMode, startSendSafetyTimer, clearSendSafetyTimer, showError, showWarning, showInfo, showCopyPasteMenu, updateScrollBottomBtn, reportError, showInitProgress, hideInitProgress } from "./agent/ui.js";
+import { updateStatusBar, updateContextUsage, updateSendButton, exitManualScrollMode, startSendSafetyTimer, clearSendSafetyTimer, showError, showWarning, showInfo, showCopyPasteMenu, hideCopyPasteMenu, updateScrollBottomBtn, reportError, showInitProgress, hideInitProgress } from "./agent/ui.js";
 import { loadConversations, selectConversation, newConversation, clearAllConversations, toggleOutlinePanel, setOutlinePanelOpen, renderConversationList } from "./agent/session.js";
 import { syncWorkingIndicator, onAreaScroll, scrollChatToBottom, beginSelectGuard, endSelectGuard, resetSelectGuard } from "./agent/render.js";
 import { sendMessage, cancelCurrentRun, sendMessageWithFiles } from "./agent/send.js";
@@ -966,6 +966,24 @@ export default {
       console.error("[agent] init() 兜底异常（init 内部 catch 未接住）:", e);
       hideInitProgress();
     });
+  },
+  // 从隐藏的常驻层重新显示（壳层切回 Agent 页时调用，不重挂、不重跑 init）：
+  // 隐藏期间容器尺寸为 0，轮容器高度上限与「回到底部」按钮需要补算；
+  // 自动跟随模式下补一次贴底，手动滚动模式则保留用户原来的阅读位置。
+  show() {
+    updateRoundMaxHeight();
+    updateScrollBottomBtn();
+    if (!S.manualScrollMode) {
+      var area = document.getElementById("agent-msg-area");
+      if (area) scrollChatToBottom(area);
+    }
+  },
+  // 离开 Agent 页（壳层隐藏常驻层）：收起下拉/大纲/右键菜单等浮层，
+  // 避免它们残留在其它页面上。运行态与 SSE 订阅不动——后台继续收流式事件。
+  hide() {
+    closeWorkDirDropdown();
+    setOutlinePanelOpen(false);
+    hideCopyPasteMenu();
   },
   unmount() {
     // 解除窗口 resize 监听（聊天区尺寸变化时刷新轮容器 max-height）

@@ -101,6 +101,21 @@
       will-change: opacity;
     }
 
+    /* Agent 常驻视图层：与 #view-root 互斥显示。
+       切到其它页面时只隐藏、不卸载 —— 流式渲染、SSE 订阅、滚动位置与
+       正在进行的运行态全部保留（状态管理见 doc/frontend-architecture.md）。 */
+    #agent-layer {
+      flex: 1;
+      width: 100%;
+      min-height: 0;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      background: var(--c-bg);
+      transition: opacity 0.16s ease-out;
+      will-change: opacity;
+    }
+
     #hardware-bar {
       display: flex;
       align-items: center;
@@ -133,6 +148,33 @@
     .btn-icon {
       font-size: 20px;
       line-height: 1;
+      position: relative;
+      display: inline-block;
+    }
+
+    /* Agent 导航忙碌/完成角标：运行中脉冲点，运行期间切到其它页面并在后台完成时
+       显示未读点，回到 Agent 页清除（见壳层 agent-busy-changed 监听） */
+    #agent-btn .btn-icon::after {
+      content: "";
+      position: absolute;
+      top: -2px;
+      right: -6px;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--c-accent);
+      display: none;
+    }
+    #agent-btn.busy .btn-icon::after,
+    #agent-btn.unread .btn-icon::after {
+      display: block;
+    }
+    #agent-btn.busy .btn-icon::after {
+      animation: agent-busy-pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes agent-busy-pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.35; transform: scale(0.7); }
     }
 
     .btn-text {
@@ -279,15 +321,18 @@
        注意：这里只用 opacity 做过渡，不用 transform —— view-root 内挂着
        .modal-overlay 等 position:fixed 元素，transform 会让 root 成为它们的
        containing block，过渡期间弹窗会错位。 */
-    #view-root.view-leaving {
+    #view-root.view-leaving,
+    #agent-layer.view-leaving {
       opacity: 0;
       pointer-events: none;
     }
-    #view-root.view-entering {
+    #view-root.view-entering,
+    #agent-layer.view-entering {
       opacity: 0;
       transition: none; /* 挂载后下一帧再加 transition 才会播 */
     }
-    #view-root.view-active {
+    #view-root.view-active,
+    #agent-layer.view-active {
       opacity: 1;
       transition: opacity 0.2s ease-out;
     }
@@ -467,7 +512,9 @@
 
     // 共享状态（跨视图共享）
     window.__agent_state = {
-      // agent 是否正在工作（由 agent 视图 store.js syncAgentBusy 维护，用于导航拦截）
+      // agent 是否正在工作（由 agent 视图 store.js syncAgentBusy 维护）。
+      // 仅用于底部导航的忙碌/完成角标，不再拦截页面切换：Agent 视图常驻
+      // #agent-layer，切走只隐藏不卸载，运行态与 SSE 事件都不丢。
       agentBusy: false,
     };
 
@@ -871,31 +918,52 @@
       showComingSoon._t = setTimeout(function () { tip.style.display = "none"; }, 2500);
     }
 
-    // ===== 导航拦截 =====
-    // Agent 正在工作时禁止切换到其它页面（壳层底部导航统一入口）。
-    // agentBusy 由 agent 视图 store.js syncAgentBusy 维护（startRun/completeRun/cancelRun 时更新）。
+    // ===== 导航 =====
+    // Agent 运行中允许离开 Agent 页面：视图常驻 #agent-layer，状态不丢；
+    // 这里只负责改 hash，由 renderRoute 统一处理显隐/挂载。
     function navigateTo(path) {
-      if (window.__agent_state && window.__agent_state.agentBusy) {
-        showAgentBusyTip();
-        return;
-      }
       location.hash = "#" + path;
     }
 
-    let _agentBusyTipTimer = null;
-    function showAgentBusyTip() {
-      let tip = document.getElementById("agent-busy-tip");
+    // 全局轻提示（复用同一节点，避免多条提示重叠）
+    let _globalToastTimer = null;
+    function showGlobalToast(msg) {
+      let tip = document.getElementById("global-tip");
       if (!tip) {
         tip = document.createElement("div");
-        tip.id = "agent-busy-tip";
+        tip.id = "global-tip";
         tip.className = "global-toast";
         document.body.appendChild(tip);
       }
-      tip.textContent = t("大模型正在工作，请勿切换页面");
+      tip.textContent = msg;
       tip.style.display = "block";
-      clearTimeout(_agentBusyTipTimer);
-      _agentBusyTipTimer = setTimeout(function () { tip.style.display = "none"; }, 2500);
+      clearTimeout(_globalToastTimer);
+      _globalToastTimer = setTimeout(function () { tip.style.display = "none"; }, 3000);
     }
+
+    // ===== Agent 忙碌指示 =====
+    // store.js syncAgentBusy 在运行态变化时派发 agent-busy-changed：
+    // - 运行中：#agent-btn 显示脉冲圆点（切到其它页面也能看到进度）；
+    // - 在其它页面完成：弹轻提示 + #agent-btn 显示未读圆点，回到 Agent 页清除。
+    let agentBusyPrev = false;
+    function setAgentBadge(busy, unread) {
+      const btn = document.getElementById("agent-btn");
+      if (!btn) return;
+      btn.classList.toggle("busy", !!busy);
+      btn.classList.toggle("unread", !!unread);
+    }
+    window.addEventListener("agent-busy-changed", function (ev) {
+      const busy = !!(ev && ev.detail && ev.detail.busy);
+      if (busy) {
+        setAgentBadge(true, false);
+      } else if (agentBusyPrev && currentRoutePath !== "/agent") {
+        setAgentBadge(false, true);
+        showGlobalToast(t("Agent 已完成本轮工作，可回到 Agent 页面查看"));
+      } else {
+        setAgentBadge(false, false);
+      }
+      agentBusyPrev = busy;
+    });
 
     // 暴露给视图模块（如 settings 调用）
     window.Agent = {
@@ -1086,16 +1154,43 @@
       "/skills":   { load: () => import("./views/skills.js"),         nav: "skills-btn" },
     };
 
-    let currentView = null;
+    // Agent 视图常驻层：首次进入 /agent 时创建并挂载，之后切页只隐藏不卸载——
+    // 流式渲染、SSE 订阅、滚动位置与正在进行的运行态全部保留。
+    const viewRoot = document.getElementById("view-root");
+    let agentLayer = null;
+    let agentView = null;
+    let currentView = null;       // 当前正在显示的视图实例（agent 常驻视图或普通视图）
+    let currentContainer = null;  // 当前显示视图的宿主容器（#view-root / #agent-layer）
     let renderSeq = 0;
-    // 当前已渲染路由的 path 与 path+query：用于识别「同一路由的重复渲染请求」——
-    // Agent 运行中被浏览器级导航带离页面时，会把 hash 纠正回 #/agent 并再次触发
-    // hashchange，此时视图仍在位，直接跳过可避免无谓的卸载重挂（重拉会话/消息）。
+    // 当前已渲染路由的 path 与 path+query：用于识别同一路由的重复渲染请求
+    // （如重复点击当前 TAB），视图已在位时直接跳过，避免无谓的卸载重挂/重初始化。
     let currentRoutePath = null;
     let currentRouteKey = null;
     const TRANSITION_FADE_OUT_MS = 160;
     const TRANSITION_FADE_IN_MS = 200;
     const TRANSITION_LOADING_THRESHOLD_MS = 180;
+
+    // 懒创建 agent 常驻容器（放在 #view-root 前面，二者互斥显示，始终只有一个是 display:flex）
+    function getAgentLayer() {
+      if (!agentLayer) {
+        agentLayer = document.createElement("div");
+        agentLayer.id = "agent-layer";
+        agentLayer.style.display = "none";
+        viewRoot.parentNode.insertBefore(agentLayer, viewRoot);
+      }
+      return agentLayer;
+    }
+
+    // 宿主容器互斥显示
+    function showHost(container) {
+      if (container === viewRoot) {
+        if (agentLayer) agentLayer.style.display = "none";
+        viewRoot.style.display = "flex";
+      } else {
+        viewRoot.style.display = "none";
+        container.style.display = "flex";
+      }
+    }
 
     function setProgress(active) {
       const bar = document.getElementById("view-progress");
@@ -1124,7 +1219,20 @@
       return new Promise(function (resolve) { setTimeout(resolve, ms); });
     }
 
-    // 路由诊断日志：把 hash 变化与拦截情况写进 tigerAgent_debug.log（调试模式关闭时
+    // 视图进入：先 opacity 0，下一帧加 view-active 触发 transition
+    async function fadeIn(container, seq) {
+      container.classList.add("view-entering");
+      await nextFrame();
+      if (seq !== renderSeq) return;
+      container.classList.remove("view-entering");
+      container.classList.add("view-active");
+      // fade-in 完成后清理标记（保留 class 让后续切走还能 fade-out）
+      setTimeout(function () {
+        if (seq === renderSeq) container.classList.remove("view-active");
+      }, TRANSITION_FADE_IN_MS + 30);
+    }
+
+    // 路由诊断日志：把 hash 变化与当前路由写进 tigerAgent_debug.log（调试模式关闭时
     // 服务端直接丢弃，无文件开销）。用于复盘「运行中偶发离开 Agent 页」这类浏览器级
     // 导航问题：对比相邻两行的 href 与 history.length 可判断是历史前进/后退
     // （href 无 #、len 不增）还是落到空 fragment（href 以 # 结尾）。
@@ -1140,7 +1248,7 @@
       console.log("[index] renderRoute() hash:", hash);
       const clean = hash.replace(/^#/, "");
       const qIndex = clean.indexOf("?");
-      const path = qIndex >= 0 ? clean.substring(0, qIndex) : clean;
+      const rawPath = qIndex >= 0 ? clean.substring(0, qIndex) : clean;
       const queryStr = qIndex >= 0 ? clean.substring(qIndex + 1) : "";
       const params = {};
       if (queryStr) {
@@ -1152,62 +1260,86 @@
         });
       }
 
-      const route = routes[path] || routes["/agent"];
+      // 未知/空 hash 统一回退到 Agent 页：归一化后的 path 决定宿主容器与 currentRoutePath，
+      // 不能让「回退到 agent 路由」却挂进 #view-root（否则常驻层状态判断会错位）。
+      const path = routes[rawPath] ? rawPath : "/agent";
+      const route = routes[path];
       logRouteDebug("hashchange href=" + location.href + " len=" + history.length +
         " busy=" + !!(window.__agent_state && window.__agent_state.agentBusy) +
         " cur=" + (currentRoutePath || "-"));
 
-      // Agent 运行中禁止离开 Agent 页面：底部导航点击由 navigateTo 拦截，但浏览器级
-      // 历史导航（鼠标侧键 / Alt+← / 触控板横向滑动）与「链接拖放到页面」不经过
-      // navigateTo —— 它们会把 hash 清空或改成未知路由，路由器随后回退到 Agent 页
-      // （routes["/agent"]），表现为运行中界面被卸载重挂。
-      // 这里在卸载旧视图之前拦下：用 replace 纠正 hash（不新增历史记录），视图保持挂载。
-      // 仅在 Agent 视图确实挂载时生效：视图已卸载/渲染失败时不该把用户困在拦截里。
-      if (window.__agent_state && window.__agent_state.agentBusy && currentView &&
-          currentRoutePath === "/agent" && route.nav !== "agent-btn") {
-        logRouteDebug("busy 拦截离开 Agent 页面（hash=" + (location.hash || "空") + "），已回退 #/agent");
-        showAgentBusyTip();
-        if (location.hash !== "#/agent") {
-          try { location.replace("#/agent"); } catch (_) {}
+      // 同一路由（含查询参数）重复请求：视图已在位，跳过渲染（避免卸载重挂与重初始化）。
+      // 顺手恢复过渡态：上一次切换可能在 fade-out 途中被本次路由打断，
+      // 残留的 view-leaving 会让当前视图一直停在 opacity:0。
+      const routeKey = path + "?" + queryStr;
+      if (routeKey === currentRouteKey && currentView) {
+        if (currentContainer) {
+          currentContainer.classList.remove("view-leaving");
+          currentContainer.classList.add("view-active");
         }
         return;
       }
 
-      // 同一路由（含查询参数）重复请求：视图已在位，跳过渲染（避免卸载重挂与重初始化）
-      const routeKey = path + "?" + queryStr;
-      if (routeKey === currentRouteKey && currentView) return;
-
       setActiveNav(route.nav);
+      // 回到 Agent 页：清掉「后台已完成」未读角标
+      if (route.nav === "agent-btn") {
+        setAgentBadge(!!(window.__agent_state && window.__agent_state.agentBusy), false);
+      }
 
-      const root = document.getElementById("view-root");
-
-      // 初次渲染（还没有任何 view）：跳过 fade-out，直接挂载并 fade-in
-      const isFirstRender = !currentView && !root.querySelector("[data-view-mounted]");
+      const isAgent = path === "/agent";
+      const target = isAgent ? getAgentLayer() : viewRoot;
+      const prev = currentContainer;
 
       // ===== Phase 1: fade-out 旧视图 =====
-      if (!isFirstRender) {
-        root.classList.remove("view-active");
-        root.classList.add("view-leaving");
+      if (prev) {
+        prev.classList.remove("view-active");
+        prev.classList.add("view-leaving");
         await sleep(TRANSITION_FADE_OUT_MS);
         if (seq !== renderSeq) return; // 期间又路由了，丢弃
-        // 卸载旧视图
-        if (currentView && currentView.unmount) {
-          try { currentView.unmount(); } catch (_) {}
+        prev.classList.remove("view-leaving");
+        if (prev === target) {
+          // 同一宿主切换：普通视图卸载重挂；Agent 常驻视图不卸载（仅 query 变化）
+          if (currentView && currentView !== agentView) {
+            try { currentView.unmount(); } catch (_) {}
+            currentView = null;
+          }
+          if (prev === viewRoot) prev.innerHTML = "";
+        } else {
+          prev.style.display = "none";
+          if (agentView && currentView === agentView) {
+            // Agent 常驻视图：只通知隐藏（收起浮层），不卸载——运行态/SSE/DOM 全保留
+            try { if (agentView.hide) agentView.hide(); } catch (_) {}
+          } else if (currentView) {
+            try { currentView.unmount(); } catch (_) {}
+            if (prev === viewRoot) prev.innerHTML = "";
+          }
+          currentView = null;
         }
-        currentView = null;
-        root.classList.remove("view-leaving");
-        // 立即清空旧内容：否则移除 view-leaving 后旧内容会从 opacity:0 淡回 1，
-        // 加载期间用户会看到"淡出→淡入→变 spinner"的闪烁
-        root.innerHTML = "";
       }
 
       if (seq !== renderSeq) return;
 
-      // ===== Phase 2: 加载模块 + 可选 loading =====
+      // ===== Phase 2: 目标容器就位 + 加载模块 / 复用常驻视图 =====
+      showHost(target);
+      currentContainer = target;
+
+      // Agent 常驻视图已挂载：直接复用（不重拉会话、不重连 SSE、不重跑 init）
+      if (isAgent && agentView) {
+        currentView = agentView;
+        currentContainer = target;
+        currentRoutePath = path;
+        currentRouteKey = routeKey;
+        // 隐藏期间尺寸为 0：回到页面时重算轮容器高度上限、补一次贴底
+        try { if (agentView.show) agentView.show(); } catch (e) { console.error("[index] agent show() 失败:", e); }
+        await fadeIn(target, seq);
+        console.log("[index] Agent 常驻视图已恢复:", path);
+        return;
+      }
+
       const loadingTimer = setTimeout(function () {
         if (seq !== renderSeq) return;
         setProgress(true);
-        renderLoadingInto(root);
+        renderLoadingInto(target);
       }, TRANSITION_LOADING_THRESHOLD_MS);
 
       let mod = null;
@@ -1223,11 +1355,11 @@
       if (seq !== renderSeq) return; // 加载期间路由已切换，本次渲染作废
 
       // ===== Phase 3: 挂载并 fade-in =====
-      root.innerHTML = "";
+      target.innerHTML = "";
 
       if (loadErr) {
         console.error("[index] 加载视图失败:", loadErr);
-        renderErrorInto(root, loadErr);
+        renderErrorInto(target, loadErr);
         return;
       }
 
@@ -1235,43 +1367,35 @@
         const view = mod.default;
         console.log("[index] 加载视图模块:", path);
         // mount 成功后才记账 currentView：mount 抛错时不把坏视图暴露给后续导航
-        view.mount(root, params);
+        view.mount(target, params);
         currentView = view;
+        if (isAgent) agentView = view;
+        currentContainer = target;
         currentRoutePath = path;
         currentRouteKey = routeKey;
-        // 给视图一个标记，便于下次识别 isFirstRender
-        const first = root.firstElementChild;
-        if (first) first.setAttribute("data-view-mounted", "1");
-        // 进入态：先 opacity 0，下一帧加 view-active 触发 transition
-        root.classList.add("view-entering");
-        await nextFrame();
-        if (seq !== renderSeq) return;
-        root.classList.remove("view-entering");
-        root.classList.add("view-active");
-        // fade-in 完成后清理标记（保留 class 让后续切走还能 fade-out）
-        setTimeout(function () {
-          if (seq === renderSeq) root.classList.remove("view-active");
-        }, TRANSITION_FADE_IN_MS + 30);
+        await fadeIn(target, seq);
         console.log("[index] 视图已挂载:", path);
       } catch (e) {
         console.error("[index] 挂载视图失败:", e);
-        renderErrorInto(root, e);
+        renderErrorInto(target, e);
       }
     }
 
     window.addEventListener("hashchange", renderRoute);
 
     // ===== 初始化 =====
-    async function init() {
+    // 服务端硬件检测与首屏渲染、服务端自检同时并行执行（异步、不等待）：
+    // 首次打开页面时不因硬件信息未就绪阻塞其它初始化，结果回来后由
+    // updateHardwareBar 刷新底部状态栏。
+    function init() {
       console.log("[index] init() 开始初始化");
-      try {
-        setupAppUpdateProgressListener();
-        await refreshSystemInfo();
-        setActiveNav("agent-btn");
+      setupAppUpdateProgressListener();
+      setActiveNav("agent-btn");
+      refreshSystemInfo().then(function () {
         console.log("[index] 系统信息获取完成:", systemInfo);
-      } catch (e) {
+      }).catch(function (e) {
         console.error("[index] 获取系统信息失败:", e);
-      }
+      });
       // 服务端状态栏定时刷新（5s）：服务端没连上时也会继续重试，连接成功后自动恢复
       startSystemInfoPolling();
       console.log("[index] init() 完成");

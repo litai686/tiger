@@ -9,7 +9,7 @@ declare global {
     __agent_invoke: (cmd: string, args?: Record<string, unknown>) => Promise<any>;
     /** Tauri event.listen（返回 unlisten 函数的 Promise） */
     __agent_listen: (event: string, handler: (event: { payload: any }) => void) => Promise<() => void>;
-    /** 跨视图共享状态（agentBusy 等） */
+    /** 跨视图共享状态（agentBusy：任一 workspace 有运行在飞；壳层据此显示导航角标，不拦截切换） */
     __agent_state: {
       agentBusy: boolean;
       [key: string]: any;

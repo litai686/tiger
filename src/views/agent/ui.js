@@ -197,6 +197,12 @@ export function showCopyPasteMenu(e, targetInput) {
   }, 0);
 }
 
+// 收起右键菜单：Agent 页切走时调用，避免浮层残留在其它页面上
+export function hideCopyPasteMenu() {
+  var menu = document.getElementById("agent-ctx-menu");
+  if (menu) menu.remove();
+}
+
 export function updateSendButton() {
   var btn = document.getElementById("agent-send-btn");
   if (!btn) return;

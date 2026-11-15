@@ -353,17 +353,23 @@ class Store {
   }
 
   // ===== 运行状态（按会话登记） =====
-  // 同步「agent 是否正在工作」到共享状态，供壳层（index.html）导航拦截使用。
+  // 同步「agent 是否正在工作」到共享状态，供壳层（index.html）做底部导航角标与
+  // 后台完成提示（不再拦截页面切换：Agent 视图常驻，切走只隐藏不卸载）。
   // 语义：任一 workspace 正在运行即视为工作中——sse.js 对后台 workspace 事件也
   // 会调 completeRun/startRun，若只按单个 ws 判断，后台 run 结束会错误清除
-  // agentBusy，导致激活 workspace 还在跑时导航拦截失效。
+  // agentBusy，导致激活 workspace 还在跑时角标提前消失。
+  // 变化时派发 agent-busy-changed 事件（CustomEvent.detail.busy），壳层据此更新 UI。
   syncAgentBusy() {
     try {
+      var prev = !!(window.__agent_state && window.__agent_state.agentBusy);
       var busy = false;
       this.workspaces.forEach(function(ws) {
         if (ws && ws.isSending) busy = true;
       });
       window.__agent_state.agentBusy = busy;
+      if (prev !== busy) {
+        window.dispatchEvent(new CustomEvent("agent-busy-changed", { detail: { busy: busy } }));
+      }
     } catch (_) {}
   }
 

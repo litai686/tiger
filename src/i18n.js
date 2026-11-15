@@ -63,7 +63,7 @@ const EN = {
   "将删除现有文件并重新下载安装包，请勿关闭软件": "Existing files will be removed and the package downloaded again. Do not close the app.",
   "重新安装失败: ": "Reinstall failed: ",
   "该功能即将开放，敬请期待": "This feature is coming soon",
-  "大模型正在工作，请勿切换页面": "The model is still working. Please do not switch pages.",
+  "Agent 已完成本轮工作，可回到 Agent 页面查看": "The agent finished this run. Switch back to the Agent page to view it.",
   "当前仅支持 Apple Silicon (M 系列) Mac": "Currently only supported on Apple Silicon (M-series) Macs",
   "取消": "Cancel",
   "操作失败: ": "Operation failed: ",
