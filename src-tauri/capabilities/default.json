@@ -17,10 +17,6 @@
     "core:window:allow-center",
     "core:window:allow-hide",
     "core:window:allow-show",
-    "core:window:allow-set-focus",
-    "hwinfo:allow-cpu-info",
-    "hwinfo:allow-gpu-info",
-    "hwinfo:allow-ram-info",
-    "hwinfo:allow-os-info"
+    "core:window:allow-set-focus"
   ]
 }

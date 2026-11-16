@@ -25,9 +25,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-hwinfo = "0.2.3"
 tauri-plugin-single-instance = "2"
-windows = { version = "0.58", features = ["Win32_UI_HiDpi", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_IO"] }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -43,8 +41,8 @@ rustls-pki-types = "1"
 x509-parser = "0.16"
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
-# Agent server 本地传输（Unix socket / Windows named pipe）：reqwest 不支持，
-# 用 hyper 直接对 socket/pipe 发 HTTP/1.1 请求与 SSE 流
+# Agent 服务端传输（TCP + TLS）：reqwest 无法按 SPKI pin 校验自签证书，
+# 用 hyper 直接对 TLS 流发 HTTP/1.1 请求与 SSE 流
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
@@ -54,12 +52,14 @@ tower-service = "0.3"
 dirs = "6"
 futures-util = "0.3"
 rand = "0.8"
-zip = "0.6"
 # 原生剪贴板文本读写：Linux（WebKitGTK）下 navigator.clipboard.readText 需宿主发放
 # WebKitClipboardPermissionRequest（Tauri/wry 未处理 → 默认拒绝），网页侧复制/粘贴会静默失效，
 # 故 linux 端必须由 Rust 直读系统剪贴板。wayland-data-control 让 Wayland 会话走
 # ext-data-control 协议（与 GTK 同一个剪贴板），不带该特性只会退化到 X11/XWayland。
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = ["Win32_UI_HiDpi", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_IO"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # 读取 NSPasteboard 中的文件路径列表（对应 Windows 的 CF_HDROP）

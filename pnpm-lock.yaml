@@ -7,10 +7,6 @@ settings:
 importers:
 
   .:
-    dependencies:
-      tauri-plugin-hwinfo:
-        specifier: ^0.2.3
-        version: 0.2.3
     devDependencies:
       '@tauri-apps/cli':
         specifier: ^2.11.4
@@ -20,9 +16,6 @@ importers:
         version: 7.0.2
 
 packages:
-
-  '@tauri-apps/api@2.11.0':
-    resolution: {integrity: sha512-7CinYODhky9lmO23xHnUFv0Xt43fbtWMyxZcLcRBlFkcgXKuEirBvHpmtJ89YMhyeGcq20Wuc47Fa4XjyniywA==}
 
   '@tauri-apps/cli-darwin-arm64@2.11.4':
     resolution: {integrity: sha512-1ryOF3ZhpZ/nemHV5zVwBQBz9jDGKmKPvWPADOhc83ig0P4bMc2iER4NbC6r9sjeIZ6RVQ4g3RZIYvezhcl4TQ==}
@@ -220,17 +213,12 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  tauri-plugin-hwinfo@0.2.3:
-    resolution: {integrity: sha512-jBesncrjlk+g4WfUe0HFwf4PiDfyejzd507uvQDr5sL+Bd0iGPy3HAeM5E5avlmuonLdUStxmJy28Dv/3ccSZA==}
-
   typescript@7.0.2:
     resolution: {integrity: sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA==}
     engines: {node: '>=16.20.0'}
     hasBin: true
 
 snapshots:
-
-  '@tauri-apps/api@2.11.0': {}
 
   '@tauri-apps/cli-darwin-arm64@2.11.4':
     optional: true
@@ -338,10 +326,6 @@ snapshots:
 
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
-
-  tauri-plugin-hwinfo@0.2.3:
-    dependencies:
-      '@tauri-apps/api': 2.11.0
 
   typescript@7.0.2:
     optionalDependencies:

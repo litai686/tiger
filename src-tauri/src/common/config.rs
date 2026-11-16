@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 use crate::common::error::AppError;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use tauri::Manager;
+
 pub fn get_exe_dir() -> Result<PathBuf, AppError> {
     std::env::current_exe()
         ?

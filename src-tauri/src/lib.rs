@@ -54,7 +54,6 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_hwinfo::init())
         .manage(AppState::new())
         .setup(|app| {
             // 调试日志：按持久化设置恢复开关（开启时截断重建 → 每次重启清空上次日志），
@@ -71,56 +70,63 @@ pub fn run() {
 
             // 托盘创建失败不阻断启动：Linux 上缺少 libayatana-appindicator3 或桌面无
             // StatusNotifier 宿主时创建会失败，若直接 `?` 冒泡，应用在精简桌面环境里根本起不来。
+            // 图标缺失时同样按「托盘不可用」降级，不能用 unwrap 把启动流程带崩。
             // 结果记入 AppState，关闭窗口的行为随之降级为直接退出（见 on_window_event）
-            let tray_result = TrayIconBuilder::with_id("main-tray")
-                .icon(app.default_window_icon().unwrap().clone())
-                .tooltip("Tiger")
-                .menu(&menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| match event.id().as_ref() {
-                    "show" => {
-                        show_main_window(app);
-                    }
-                    "quit" => {
-                        cleanup_processes(app);
-                        app.exit(0);
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    // Windows 上单击会触发两次 Click（Down + Up），
-                    // 仅在鼠标释放（Up）时处理，避免 show→hide 闪一下又消失
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            if window.is_minimized().unwrap_or(false) {
-                                // 最小化在任务栏：恢复显示并带到前台
-                                show_main_window(app);
-                            } else if window.is_visible().unwrap_or(false) {
-                                // 隐藏到托盘（macOS 不调 set_skip_taskbar，避免 Accessory 策略）
-                                let _ = window.hide();
-                                #[cfg(not(target_os = "macos"))]
-                                {
-                                    let _ = window.set_skip_taskbar(true);
+            let tray_result = app.default_window_icon().cloned().map(|icon| {
+                TrayIconBuilder::with_id("main-tray")
+                    .icon(icon)
+                    .tooltip("Tiger")
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app, event| match event.id().as_ref() {
+                        "show" => {
+                            show_main_window(app);
+                        }
+                        "quit" => {
+                            cleanup_processes(app);
+                            app.exit(0);
+                        }
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        // Windows 上单击会触发两次 Click（Down + Up），
+                        // 仅在鼠标释放（Up）时处理，避免 show→hide 闪一下又消失
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            let app = tray.app_handle();
+                            if let Some(window) = app.get_webview_window("main") {
+                                if window.is_minimized().unwrap_or(false) {
+                                    // 最小化在任务栏：恢复显示并带到前台
+                                    show_main_window(app);
+                                } else if window.is_visible().unwrap_or(false) {
+                                    // 隐藏到托盘（macOS 不调 set_skip_taskbar，避免 Accessory 策略）
+                                    let _ = window.hide();
+                                    #[cfg(not(target_os = "macos"))]
+                                    {
+                                        let _ = window.set_skip_taskbar(true);
+                                    }
+                                } else {
+                                    show_main_window(app);
                                 }
-                            } else {
-                                show_main_window(app);
                             }
                         }
-                    }
-                })
-                .build(app);
+                    })
+                    .build(app)
+            });
             // 托盘是「退出」的唯一入口（托盘菜单的 quit 是全项目唯一调用 app.exit 的地方），
             // 创建失败必须让关闭窗口的行为退化为直接退出，否则进程会留在后台且界面里无法退出
             let tray_ok = match tray_result {
-                Ok(_) => true,
-                Err(e) => {
+                Some(Ok(_)) => true,
+                Some(Err(e)) => {
                     eprintln!("[tray] 创建系统托盘失败（关闭窗口将直接退出）: {}", e);
+                    false
+                }
+                None => {
+                    eprintln!("[tray] 缺少窗口图标，跳过系统托盘（关闭窗口将直接退出）");
                     false
                 }
             };

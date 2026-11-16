@@ -1821,7 +1821,7 @@ pub async fn probe_models_endpoint(
 
 /// 平台默认工作目录：
 /// - Windows：软件安装目录（Tiger.exe 所在目录）
-/// - macOS：用户主目录（$HOME）
+/// - macOS / Linux：用户主目录（$HOME）
 /// - 兜底：exe 所在目录
 fn platform_default_workdir() -> PathBuf {
     #[cfg(target_os = "windows")]
@@ -1838,7 +1838,7 @@ fn platform_default_workdir() -> PathBuf {
 
 /// 工作目录为空时初始化默认工作目录（幂等）：
 /// - Windows：软件安装目录
-/// - macOS：用户主目录
+/// - macOS / Linux：用户主目录
 /// 同步写入工作目录列表（默认项）与旧字段 agent_workdir，返回当前生效的工作目录。
 fn ensure_default_workdir(app: &tauri::AppHandle) -> String {
     let existing = load_agent_workdir(app);
@@ -1966,6 +1966,18 @@ fn workdirs_from_settings(view: &serde_json::Value) -> Vec<WorkDirEntry> {
         }
     }
     out
+}
+
+/// 从服务端 `/v1/settings` 视图选择建 workspace 的路径：
+/// `is_default` 优先，否则取第一项；没有配置（或路径为空）返回 None，
+/// 调用方回退到 `"."`（服务端自身的 cwd）。
+fn default_server_workdir(view: &serde_json::Value) -> Option<String> {
+    let dirs = workdirs_from_settings(view);
+    dirs.iter()
+        .find(|d| d.is_default)
+        .or_else(|| dirs.first())
+        .map(|d| d.path.trim().to_string())
+        .filter(|p| !p.is_empty())
 }
 
 /// 获取工作目录列表：已连服务端时以**服务端**存储为准（路径按服务端视角解释，
@@ -2119,6 +2131,8 @@ pub struct AgentServerInfo {
     /// 服务端地址展示串（tcp://host:port）
     pub host: String,
     pub workspace_id: String,
+    /// 建链时实际使用的服务端 workspace 路径（"." 表示服务端 cwd）
+    pub workspace_path: String,
     pub client_id: String,
 }
 
@@ -2206,6 +2220,7 @@ pub async fn start_agent_server(
                     return Ok(AgentServerInfo {
                         host: target.display(),
                         workspace_id: ws_id,
+                        workspace_path: sess.workspace_path.clone(),
                         client_id: sess.client_id.clone(),
                     });
                 }
@@ -2231,37 +2246,48 @@ pub async fn start_agent_server(
     // 的 client_id 已挂活跃 SSE 流，否则返回 404 client not attached）。
     let client_id = generate_client_id(client_id);
 
-    // 工作目录在服务端解析（远程模式桌面端只是操作界面）：配置过的路径按服务端
-    // 视角解释；未配置时发 "."，由服务端按其自身 cwd 建工作区。
-    let workdir = load_agent_workdir(&app);
-    let workspace_path = if workdir.is_empty() { ".".to_string() } else { workdir };
-
-    let workspace_id = {
-        let client = build_client(&target, Duration::from_secs(5))
-            .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
-
-        let (status, bytes) = tokio::time::timeout(
-            Duration::from_secs(10),
-            agent_http::send(
-                &client,
-                "POST",
-                "/v1/workspaces",
-                Some(serde_json::json!({ "path": &workspace_path, "client_id": &client_id })),
-            ),
-        )
-        .await
-        .map_err(|_| "创建工作区超时".to_string())?
-        .map_err(|e| format!("创建工作区失败: {}", e))?;
-        if !(200..300).contains(&status) {
-            bail!("创建工作区失败: HTTP {}（请确认该路径在服务端存在：{}）", status, workspace_path);
+    // 工作目录以服务端为准：Phase A 里的本机默认目录只用于离线展示，跨机器/跨 OS
+    // 时它在服务端通常不存在，不能拿来建 workspace。先读服务端 settings.work_directories
+    // （is_default 优先），没有配置或读取失败时回退到 "."（服务端自身 cwd）。
+    let requested_workdir = match fetch_server_settings().await {
+        Ok(view) => default_server_workdir(&view),
+        Err(e) => {
+            eprintln!("[Agent] 读取服务端工作目录失败，改用服务端当前目录: {}", e);
+            None
         }
-        let body: serde_json::Value =
-            serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}));
-        body.get("id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "default".to_string())
-    };
+    }
+    .unwrap_or_else(|| ".".to_string());
+
+    // 服务端配置的目录可能已被删除：只有「服务端侧该路径不存在 / 不是目录」才回退到
+    // "."（服务端 cwd），避免服务端配置过期时桌面端永久停在“无法连接”。
+    // 超时、连接中断、HTTP 5xx 等瞬时/环境错误必须原样上报：否则会在用户不知情时把
+    // 工作区建到服务端 cwd，Agent 实际改的目录和用户以为的完全是两个地方。
+    let (workspace_id, workspace_path) =
+        match create_workspace_on_server(&target, &client_id, &requested_workdir).await {
+            Ok(v) => v,
+            Err(e) if requested_workdir != "." => {
+                let path_gone = matches!(
+                    validate_paths_on_server(std::slice::from_ref(&requested_workdir)).await,
+                    Some(missing) if !missing.is_empty()
+                );
+                if !path_gone {
+                    return Err(e);
+                }
+                eprintln!(
+                    "[Agent] 服务端工作目录 {} 已不存在（{}），回退到服务端当前目录",
+                    requested_workdir, e
+                );
+                create_workspace_on_server(&target, &client_id, ".")
+                    .await
+                    .map_err(|fallback_err| {
+                        AppError::msg(format!(
+                            "使用服务端工作目录 {} 创建工作区失败（{}）；回退到服务端当前目录也失败: {}",
+                            requested_workdir, e, fallback_err
+                        ))
+                    })?
+            }
+            Err(e) => return Err(e),
+        };
 
     let sse_stop = Arc::new(AtomicBool::new(false));
 
@@ -2281,6 +2307,7 @@ pub async fn start_agent_server(
             sse_stop: sse_stop.clone(),
             sse_task: Some(sse_task),
             workspace_id: workspace_id.clone(),
+            workspace_path: workspace_path.clone(),
             client_id: client_id.clone(),
         });
     }
@@ -2289,9 +2316,9 @@ pub async fn start_agent_server(
 
     let host = target.display();
     app.emit("agent-server-ready",
-        serde_json::json!({ "host": host, "workspace_id": &workspace_id })).ok();
+        serde_json::json!({ "host": host, "workspace_id": &workspace_id, "workspace_path": &workspace_path })).ok();
 
-    Ok(AgentServerInfo { host, workspace_id, client_id })
+    Ok(AgentServerInfo { host, workspace_id, workspace_path, client_id })
 }
 
 /// 连续建连失败达到该次数才通知前端（3s 一次 ≈ 15s），避免瞬时抖动就弹错。
@@ -2792,6 +2819,51 @@ pub fn kill_agent_session(state: &AppState) {
 
 // ===== 新增：多 workspace 管理命令 =====
 
+/// 在服务端创建/复用 workspace，返回 `(workspace_id, workspace_path)`。
+/// `path` 必须按服务端视角解释；非 2xx 直接返回错误，由调用方决定是否回退。
+async fn create_workspace_on_server(
+    target: &TcpTarget,
+    client_id: &str,
+    path: &str,
+) -> Result<(String, String), AppError> {
+    let client = build_client(target, Duration::from_secs(5))
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+
+    let (status, bytes) = tokio::time::timeout(
+        Duration::from_secs(10),
+        agent_http::send(
+            &client,
+            "POST",
+            "/v1/workspaces",
+            Some(serde_json::json!({ "path": path, "client_id": client_id })),
+        ),
+    )
+    .await
+    .map_err(|_| "创建工作区超时".to_string())?
+    .map_err(|e| format!("创建工作区失败: {}", e))?;
+    if !(200..300).contains(&status) {
+        return Err(AppError::msg(format!(
+            "创建工作区失败: HTTP {}（路径：{}）",
+            status, path
+        )));
+    }
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}));
+    let workspace_id = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| "default".to_string());
+    let workspace_path = body
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| path.to_string());
+    Ok((workspace_id, workspace_path))
+}
+
 /// 在已运行的 Agent server 上创建新 workspace 并启动独立 SSE 转发。
 /// 不影响已有 workspace 的运行。
 #[tauri::command]
@@ -2808,30 +2880,8 @@ pub async fn create_workspace(
     // 使用前端传入的 client_id（同 start_agent_server）
     let client_id = generate_client_id(client_id);
 
-    let client = build_client(&target, Duration::from_secs(5))
-        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
-
-    let (status, bytes) = tokio::time::timeout(
-        Duration::from_secs(10),
-        agent_http::send(
-            &client,
-            "POST",
-            "/v1/workspaces",
-            Some(serde_json::json!({ "path": path, "client_id": &client_id })),
-        ),
-    )
-    .await
-    .map_err(|_| "创建工作区超时".to_string())?
-    .map_err(|e| format!("创建工作区失败: {}", e))?;
-    if !(200..300).contains(&status) {
-        bail!("创建工作区失败: HTTP {}", status);
-    }
-    let body: serde_json::Value =
-        serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}));
-    let workspace_id = body.get("id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "default".to_string());
+    let (workspace_id, workspace_path) =
+        create_workspace_on_server(&target, &client_id, &path).await?;
 
     // 检查是否已有该 workspace 的活 SSE 转发任务。切回已存在的 path 时
     // Go 端按 path 去重返回同一 workspace_id，若这里无条件 spawn 新任务
@@ -2846,6 +2896,7 @@ pub async fn create_workspace(
                     return Ok(AgentServerInfo {
                         host: target.display(),
                         workspace_id: workspace_id.clone(),
+                        workspace_path: existing.workspace_path.clone(),
                         client_id: existing.client_id.clone(),
                     });
                 }
@@ -2872,12 +2923,13 @@ pub async fn create_workspace(
             sse_stop: sse_stop.clone(),
             sse_task: Some(sse_task),
             workspace_id: workspace_id.clone(),
+            workspace_path: workspace_path.clone(),
             client_id: client_id.clone(),
         });
     }
 
     let host = target.display();
-    Ok(AgentServerInfo { host, workspace_id, client_id })
+    Ok(AgentServerInfo { host, workspace_id, workspace_path, client_id })
 }
 
 /// 切换当前激活的 workspace（不停止旧 workspace 的 SSE）。
@@ -3055,6 +3107,33 @@ pub async fn read_clipboard_files() -> Result<Vec<String>, String> {
     Ok(paths)
 }
 
+/// `file:///Users/a%20b.txt` → `/Users/a b.txt`。
+///
+/// NSPasteboard 的 `public.file-url` 是百分号编码的 URL：Finder 复制的文件名含空格 /
+/// 中文时，直接剥掉 `file://` 前缀会留下 `%20` 一类的路径，后续按路径读文件必然失败。
+#[cfg(any(target_os = "macos", test))]
+fn decode_file_url(url: &str) -> String {
+    let raw = url.strip_prefix("file://").unwrap_or(url);
+    let raw = raw.strip_prefix("localhost").unwrap_or(raw);
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 #[cfg(target_os = "macos")]
 #[tauri::command]
 #[allow(deprecated)] // NSFilenamesPboardType 已废弃但仍是最权威的多文件来源
@@ -3087,8 +3166,7 @@ pub async fn read_clipboard_files() -> Result<Vec<String>, String> {
         if let Some(items) = pb.pasteboardItems() {
             for item in items.iter() {
                 if let Some(s) = item.stringForType(NSPasteboardTypeFileURL) {
-                    let url = s.to_string();
-                    let path = url.strip_prefix("file://").map(str::to_string).unwrap_or(url);
+                    let path = decode_file_url(&s.to_string());
                     if !path.is_empty() && !paths.contains(&path) {
                         paths.push(path);
                     }
@@ -3774,6 +3852,49 @@ mod sse_sub_agent_filter_tests {
     fn events_without_session_id_forwarded() {
         assert!(!is_sub_agent_event(&serde_json::json!({ "type": "config_changed" })));
         assert!(!is_sub_agent_event(&serde_json::json!({ "raw": "not-json" })));
+    }
+}
+
+#[cfg(test)]
+mod file_url_tests {
+    use super::*;
+
+    #[test]
+    fn decodes_percent_encoded_file_urls() {
+        assert_eq!(
+            decode_file_url("file:///Users/a%20b/%E4%B8%AD.txt"),
+            "/Users/a b/中.txt"
+        );
+        assert_eq!(decode_file_url("file://localhost/Users/x.txt"), "/Users/x.txt");
+        assert_eq!(decode_file_url("/plain/path.txt"), "/plain/path.txt");
+        assert_eq!(decode_file_url("file:///Users/100%.txt"), "/Users/100%.txt");
+    }
+}
+
+#[cfg(test)]
+mod server_workdir_tests {
+    use super::*;
+
+    #[test]
+    fn selects_default_then_first_and_ignores_empty() {
+        let view = serde_json::json!({
+            "work_directories": [
+                { "path": "/srv/a", "is_default": false },
+                { "path": "/srv/b", "is_default": true }
+            ]
+        });
+        assert_eq!(default_server_workdir(&view).as_deref(), Some("/srv/b"));
+
+        let view = serde_json::json!({
+            "work_directories": [{ "path": "/srv/a", "is_default": false }]
+        });
+        assert_eq!(default_server_workdir(&view).as_deref(), Some("/srv/a"));
+
+        let view = serde_json::json!({ "work_directories": [] });
+        assert_eq!(default_server_workdir(&view), None);
+
+        let view = serde_json::json!({ "work_directories": [{ "path": "  " }] });
+        assert_eq!(default_server_workdir(&view), None);
     }
 }
 

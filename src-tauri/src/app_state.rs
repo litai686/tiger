@@ -12,6 +12,9 @@ pub struct AgentServerSession {
     /// 工作区 ID（与 HashMap key 相同，保留用于调试/日志）
     #[allow(dead_code)]
     pub workspace_id: String,
+    /// 建链时实际使用的服务端 workspace 路径（"." 表示服务端 cwd）。
+    /// 前端据此沿用同一个 workspace，避免再拿客户端本机路径建出第二个工作区。
+    pub workspace_path: String,
     /// 客户端 ID（UUID）
     pub client_id: String,
 }

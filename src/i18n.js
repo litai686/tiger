@@ -622,6 +622,7 @@ const EN = {
   "项目记忆": "Project Memory",
   "默认": "default",
   "默认工作区": "Default Workspace",
+  "服务端当前目录": "Server working directory",
   "（用户发来附件，请查看并处理）": "(user sent attachments; please review and handle them)",
   "，建议新建会话继续）": ", consider starting a new session)",
   "📤 发送": "📤 Send",

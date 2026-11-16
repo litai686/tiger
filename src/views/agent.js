@@ -169,15 +169,22 @@ async function _doInit(seq, silent) {
   if (seq !== S.initSeq) return;
 
   // 工作目录以服务端为准：Phase A 拿到的 get_agent_workdir 是**本机**默认目录，远程部署
-  // 下服务端根本没有这个路径。服务端列表非空时改用它的默认项，避免用无效路径建工作区。
-  try {
-    var serverDirs = await invoke("get_workdirs");
-    if (Array.isArray(serverDirs) && serverDirs.length > 0) {
-      var defaultDir = serverDirs.find(function(d) { return d && d.is_default; }) || serverDirs[0];
-      if (defaultDir && defaultDir.path) workdir = defaultDir.path;
+  // 下服务端根本没有这个路径。start_agent_server 已按服务端 settings.work_directories
+  // 选好 workspace 并返回 workspace_path，这里必须沿用它（"." = 服务端 cwd）；
+  // 只有拿不到 workspace_path（旧返回值 / 字段缺失）时才退回服务端目录列表 / 本机缓存；
+  // 此时才需要多打一次 get_workdirs，否则纯属多一轮 IPC + HTTP（服务端慢时会拖住初始化）。
+  if (S.serverInfo && S.serverInfo.workspace_path) {
+    workdir = S.serverInfo.workspace_path;
+  } else {
+    try {
+      var serverDirs = await invoke("get_workdirs");
+      if (Array.isArray(serverDirs) && serverDirs.length > 0) {
+        var defaultDir = serverDirs.find(function(d) { return d && d.is_default; }) || serverDirs[0];
+        if (defaultDir && defaultDir.path) workdir = defaultDir.path;
+      }
+    } catch (e) {
+      console.warn("[agent] 读取服务端工作目录失败，沿用本机默认:", e);
     }
-  } catch (e) {
-    console.warn("[agent] 读取服务端工作目录失败，沿用本机默认:", e);
   }
   if (seq !== S.initSeq) return;
 
@@ -281,6 +288,13 @@ async function _doInit(seq, silent) {
   // 进度条由 init() 的 finally 统一收尾，这里无需手动 hide
 }
 
+// 工作区展示名：路径最后一段；"." = 服务端自身 cwd（服务端没配置 work_directories 时
+// 用它建工作区），翻译成可读名，别把 "." 原样显示给用户。
+function workspaceName(path) {
+  if (path === ".") return _t("服务端当前目录");
+  return String(path || "").split(/[\\/]/).pop();
+}
+
 // 工作区创建 / 拉取：根据 workdir 找到匹配的 workspace，若无则创建。
 // 仅依赖 S.serverInfo.host，调用前必须确保服务已启动（Phase B 之后）。
 // 单独拆出是为了让 Phase C 能与 refreshServerProviders 并行。
@@ -294,7 +308,7 @@ async function setupWorkspace(workdir) {
           // 查找匹配的工作区
           const matched = workspaces.find(function(w) { return w.path === workdir; });
           if (matched) {
-            S.workspaceInfo = { id: matched.id, path: matched.path, name: matched.path.split(/[\\/]/).pop() };
+            S.workspaceInfo = { id: matched.id, path: matched.path, name: workspaceName(matched.path) };
           }
         }
         // 如果没有匹配的工作区，创建新的
@@ -304,7 +318,7 @@ async function setupWorkspace(workdir) {
             yolo: true, // 审批模式已移除：权限请求直通
             client_id: S.clientId
           });
-          S.workspaceInfo = { id: newWs.id, path: newWs.path, name: newWs.path.split(/[\\/]/).pop() };
+          S.workspaceInfo = { id: newWs.id, path: newWs.path, name: workspaceName(newWs.path) };
         }
         // 更新 serverInfo 的 workspace_id
         if (S.workspaceInfo && S.workspaceInfo.id) {
@@ -316,7 +330,7 @@ async function setupWorkspace(workdir) {
           store.setActive(S.workspaceInfo.id);
         }
       } catch (_) {
-        S.workspaceInfo = { path: workdir, name: workdir.split(/[\\/]/).pop() };
+        S.workspaceInfo = { path: workdir, name: workspaceName(workdir) };
         // 兜底：workspace 列表/创建 API 失败时，激活 Rust 端默认 workspace，
         // 保证 store.activeWsId 非 null。否则 store 各 setter（setCurrentConvId 等）
         // 因 workspace 未注册而静默失败，loadConversations 会陷入无限创建会话的死循环
@@ -336,7 +350,7 @@ async function setupWorkspace(workdir) {
       S.wsIdByPath[S.workspaceInfo.path] = S.workspaceInfo.id;
     }
     updateWorkspaceSelector();
-    updateStatusBar("ready", workdir, 0);
+    updateStatusBar("ready", workdir === "." ? _t("服务端当前目录") : workdir, 0);
   } catch (_) {
     S.workspaceInfo = { path: "默认", name: _t("默认工作区") };
     if (S.serverInfo && S.serverInfo.workspace_id) {

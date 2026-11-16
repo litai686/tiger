@@ -5,6 +5,8 @@ use crate::common::config;
 use crate::common::utils::download::download_with_resume;
 use crate::bail;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use crate::common::utils::platform;
 use tauri::Emitter;
 
 // ===== 辅助函数 =====
