@@ -31,15 +31,16 @@ function resolveTargetTriple() {
 /** triple → 压缩包文件名匹配规则 + 二进制文件名 */
 function platformSpec(triple) {
   if (triple.includes("windows")) {
-    return { pattern: /^tigerAgent_(.+)_Windows_x86_64\.zip$/, binName: "tigerAgent.exe", ext: ".exe" };
+    // 新版包名带 _server 后缀（tigerAgent_<版本>_Windows_x86_64_server.zip），旧包名兜底
+    return { pattern: /^tigerAgent_(.+)_Windows_x86_64(?:_server)?\.zip$/, binName: "tigerAgent.exe", ext: ".exe" };
   }
   if (triple === "aarch64-apple-darwin") {
     // 包内二进制名以 Go 构建脚本为准（build.sh 产出 tigerAgent）；重命名只发生在 destPath
-    return { pattern: /^tigerAgent_(.+)_Darwin_arm64\.tar\.gz$/, binName: "tigerAgent", ext: "" };
+    return { pattern: /^tigerAgent_(.+)_Darwin_arm64(?:_server)?\.tar\.gz$/, binName: "tigerAgent", ext: "" };
   }
   // Linux 目前只发布 x86_64 包（adm-binaries 无 aarch64）
   if (triple === "x86_64-unknown-linux-gnu") {
-    return { pattern: /^tigerAgent_(.+)_Linux_x86_64\.tar\.gz$/, binName: "tigerAgent", ext: "" };
+    return { pattern: /^tigerAgent_(.+)_Linux_x86_64(?:_server)?\.tar\.gz$/, binName: "tigerAgent", ext: "" };
   }
   return null;
 }
