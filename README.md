@@ -46,9 +46,40 @@ tigerAgent 服务端（用户自行启动）
    - Windows 10 / 11 · x64（NSIS 安装包）
    - macOS · Apple Silicon（DMG）
    - Linux · x64（deb / AppImage，需 GTK3 桌面环境）
-2. **启动服务端**：在服务器侧解压并运行 `tigerAgent --host tcp://0.0.0.0:18471`，记录启动日志中的连接串。
+2. **启动服务端**：在服务器侧解压并运行 `tigerAgent --host tcp://0.0.0.0:18471`，记录启动日志中的连接串；也可以用下一节的一键脚本自动下载、安装并启动。
 3. **粘贴连接串**：打开桌面端，在「设置 → 服务端连接」粘贴并保存，连通后底部状态栏会显示服务端硬件信息。
 4. **配置模型**：在「模型管理」中添加 OpenAI 兼容 provider（云端 API 或本机 llama.cpp / Ollama / vLLM），选好模型即可开始对话。
+
+## 服务端安装（一键脚本）
+
+服务端 `tigerAgent` 与桌面端分开部署。Linux / macOS 服务器可直接用仓库内的 `desktop/install-server.sh` 安装并启动（只支持 bash 环境；Windows 请手动解压 Release 里的 `*_server.zip`）：
+
+```bash
+# 在仓库根目录执行
+bash desktop/install-server.sh
+```
+
+脚本会读取当前系统的 OS / 架构（Linux x86_64、macOS x86_64 / arm64），从 [Releases](https://github.com/litai686/tiger/releases) 取最近一次发布的 `*_server` 产物并：
+
+- 用 `checksums.txt` 校验 sha256 后安装到 `~/.local/bin/tigerAgent`，数据目录为 `~/.local/share/tigerAgent/data`
+- 已安装二进制的 `--version` 与 Release 版本一致时跳过下载，直接重启
+- 用 `nohup` 后台启动（不生成安装记录 / PID / nohup 日志等额外文件），启动后在终端回显二进制自己打印的管理界面地址、指纹、token 与连接串，并做 `/v1/health` 健康检查
+- 重复执行即升级；版本未变则只重启
+
+可用环境变量覆盖默认行为：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `TIGER_VERSION` | `latest` | 指定版本，如 `0.0.1` / `v0.0.1` |
+| `TIGER_HOST` | `tcp://0.0.0.0:18471` | 服务端监听地址 |
+| `TIGER_INSTALL_DIR` | `~/.local/bin` | 二进制安装目录 |
+| `TIGER_DATA_DIR` | `~/.local/share/tigerAgent/data` | 数据目录（配置、会话） |
+| `TIGER_NO_START` | `0` | `1` 只安装不启动 |
+| `TIGER_DEBUG` | `0` | `1` 以 `--debug` 启动 |
+| `TIGER_FORCE` | `0` | `1` 忽略已安装版本、强制重新下载 |
+
+服务端自身日志在 `~/.cache/tigerAgent/tigerAgent.log`；忘记连接串时可用
+`~/.local/bin/tigerAgent --print-connection --data-dir ~/.local/share/tigerAgent/data` 重新打印。
 
 ## 从源码构建
 
@@ -82,6 +113,7 @@ pnpm tauri:build:linux      # deb / AppImage
 | `doc/` | 桌面端开发文档（索引见下） |
 | `website/` | 产品官网（静态 HTML） |
 | `scripts/` | 构建、签名、图标与官网封面生成脚本 |
+| `install-server.sh` | 服务端一键部署脚本：按系统下载 Release 里的 `*_server` 产物、校验、安装并用 nohup 启动 |
 
 ## 文档
 

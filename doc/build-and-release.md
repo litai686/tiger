@@ -9,6 +9,7 @@
 - **默认不打包、也不启动**：`tauri.conf.json` 不声明 `bundle.externalBin`，也没有 `beforeDevCommand`/`beforeBuildCommand` 钩子；安装包里**没有** Agent 二进制，运行时也不会拉起任何服务端进程。桌面端只有一种连接方式（`docs/tcp-tls-ecdsa.md`）：TCP + TLS 1.3 连接用户在服务器侧自行启动的服务端，设置页只粘贴一条连接串（地址 + 服务端指纹 + token），客户端不生成设备身份，也不依赖任何外部二进制。
 - **可选“带服务端”构建**：如需回到内置 sidecar 方案，恢复 `bundle.externalBin = ["binaries/Agent"]` 并在 `build` 里加回 `beforeDevCommand`/`beforeBuildCommand = "node scripts/prepare-agent-binary.mjs"`；`scripts/prepare-agent-binary.mjs` 与 `pnpm agent:push` 仅在这个可选流程里仍有用。
 - **服务端发布**：Go 侧编译产物（`tigerAgent.exe` / `tigerAgent`）单独分发（GitHub Release / 包管理器），用户自行安装并在服务器侧启动（`tigerAgent --host tcp://0.0.0.0:<端口>`，启动时打印客户端连接串），桌面端只连不管进程。
+- **一键部署脚本**：`desktop/install-server.sh`（仓库根执行 `bash desktop/install-server.sh`）从公开镜像 `litai686/tiger` 的最近一次 Release 按当前 OS / 架构取 `tigerAgent_<版本>_<Os>_<arch>_server.tar.gz`（目前只有 Linux x86_64、macOS x86_64/arm64），校验 `checksums.txt` 后安装到 `~/.local/bin`（数据目录在 `~/.local/share/tigerAgent/data`），用 nohup 后台启动，并在终端回显二进制启动时打印的管理界面地址 / 指纹 / token / 连接串；已安装二进制的 `--version` 与 Release 版本一致时跳过下载、直接重启，`TIGER_VERSION` 可指定版本，`TIGER_FORCE=1` 强制重装。脚本不生成安装记录 / PID / nohup 日志等额外文件，重启时按进程命令行匹配旧实例。安装步骤也写在 `desktop/README.md`。
 
 ## Linux 打包与更新链路
 

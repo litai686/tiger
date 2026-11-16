@@ -14,6 +14,7 @@
 | `src-tauri/` | Rust 后端与 Tauri 配置（命令、自升级、下载链路），见 `doc/rust-backend.md` |
 | `doc/` | 桌面端 + 服务端对接文档（下文索引） |
 | `scripts/` | 构建、签名、`push-agent-binaries.mjs` 等 |
+| `install-server.sh` | 服务端一键部署脚本（仓库根执行 `bash desktop/install-server.sh`）：按 OS / 架构下载 Releases 里的 `*_server` 产物，校验后装到 `~/.local/bin` 并用 nohup 启动；已装同版本跳过下载，不落安装记录 / PID / nohup 日志等额外文件 |
 | `website/` | 营销网站 |
 
 ## 开发命令（始终使用 `pnpm`，不要用 `npm`/`yarn`）
