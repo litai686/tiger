@@ -1,14 +1,15 @@
 #!/bin/bash
 
 APP_NAME="Tiger"
-APP_PATH="src-tauri/target/release/bundle/macos/$APP_NAME.app"
 ENTITLEMENTS_PATH="src-tauri/entitlements.plist"
 
 echo "=== macOS 自签名脚本 (支持 macOS 15+) ==="
 
-if [ ! -d "$APP_PATH" ]; then
-    echo "错误: 找不到应用程序 $APP_PATH"
-    echo "请先运行: pnpm tauri build"
+# 打包目标带 --target 时产物在 target/<triple>/release 下，用 find 兼容两种布局
+APP_PATH="$(find src-tauri/target -type d -path '*/release/bundle/macos/*.app' 2>/dev/null | head -n 1 || true)"
+if [ -z "$APP_PATH" ]; then
+    echo "错误: 未找到 src-tauri/target/**/release/bundle/macos/$APP_NAME.app"
+    echo "请先运行: pnpm tauri:build:macos（须同时打 app 包，只打 dmg 时 Tauri 会删掉中间产物 .app）"
     exit 1
 fi
 

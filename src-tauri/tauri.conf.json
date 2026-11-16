@@ -44,7 +44,7 @@
       "minimumSystemVersion": "10.15",
       "exceptionDomain": "",
       "entitlements": "entitlements.plist",
-      "signingIdentity": null
+      "signingIdentity": "-"
     },
     "linux": {
       "deb": {
