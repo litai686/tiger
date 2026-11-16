@@ -209,10 +209,12 @@ fn tls_client_config(target: &TcpTarget) -> Result<Arc<ClientConfig>, io::Error>
 static ACTIVE_TARGET: std::sync::RwLock<Option<TcpTarget>> = std::sync::RwLock::new(None);
 
 /// 设置本进程使用的服务端目标（启动/保存配置时按配置解析）。
+/// 目标可能换了地址/指纹/token，旧的连接池不再可用，直接丢弃。
 pub fn set_active_target(target: TcpTarget) {
     if let Ok(mut guard) = ACTIVE_TARGET.write() {
         *guard = Some(target);
     }
+    reset_shared_client();
 }
 
 /// 当前生效的服务端目标；未配置（或配置不完整）时为 None。
@@ -299,6 +301,49 @@ pub fn build_client(
         inner: Client::builder(TokioExecutor::new()).build(connector),
         token: target.token.clone(),
     })
+}
+
+/// 进程级共享客户端：按 target 身份缓存，复用 hyper 的连接池。
+///
+/// 终端输入/轮询都是高频小请求；如果每次请求都 [`build_client`]，就会为每个
+/// 请求重新做 TCP + TLS 1.3 握手（还要重建 rustls ClientConfig），打字回显会被
+/// 每次握手的 1–2 个 RTT 拉长。缓存后同一 target 复用 keep-alive 连接。
+/// target 变化（地址/指纹/token）时下一次请求自动重建。
+static SHARED_CLIENT: std::sync::RwLock<Option<(String, AgentHttpClient)>> =
+    std::sync::RwLock::new(None);
+
+fn client_key(target: &TcpTarget) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        target.host, target.port, target.pin, target.token
+    )
+}
+
+/// 返回当前 target 的共享客户端（连接池复用）。
+pub fn shared_client(
+    target: &TcpTarget,
+    connect_timeout: Duration,
+) -> Result<AgentHttpClient, String> {
+    let key = client_key(target);
+    if let Ok(guard) = SHARED_CLIENT.read() {
+        if let Some((cached, client)) = guard.as_ref() {
+            if cached == &key {
+                return Ok(client.clone());
+            }
+        }
+    }
+    let client = build_client(target, connect_timeout)?;
+    if let Ok(mut guard) = SHARED_CLIENT.write() {
+        *guard = Some((key, client.clone()));
+    }
+    Ok(client)
+}
+
+/// 丢弃共享客户端（例如断开连接/切换 target 时主动释放空闲连接）。
+pub fn reset_shared_client() {
+    if let Ok(mut guard) = SHARED_CLIENT.write() {
+        *guard = None;
+    }
 }
 
 /// 生成请求 URI：authority 固定为 "agent"（连接器忽略主机，只用 path）

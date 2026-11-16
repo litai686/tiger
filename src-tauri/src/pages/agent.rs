@@ -624,10 +624,10 @@ pub(crate) fn active_workspace_id(app: &tauri::AppHandle) -> Option<String> {
     active.filter(|id| !id.is_empty())
 }
 
-/// 构建指向当前服务端目标的短连接超时 client（未配置服务端时返回 None）。
+/// 构建指向当前服务端目标的共享 client（复用连接池；未配置服务端时返回 None）。
 fn agent_local_client() -> Option<agent_http::AgentHttpClient> {
     let target = agent_http::active_target()?;
-    build_client(&target, Duration::from_secs(3)).ok()
+    agent_http::shared_client(&target, Duration::from_secs(5)).ok()
 }
 
 /// POST /config/set 写一个无害标量，触发服务端写盘并从磁盘全量重载配置
@@ -2156,6 +2156,8 @@ fn teardown_agent_sessions(state: &tauri::State<'_, AppState>) -> Result<(), App
         sessions.clear();
     }
     *state.active_workspace_id.lock().map_err(|e| e.to_string())? = None;
+    // 断开后服务端可能已重启：丢掉共享连接池，避免下次请求复用死连接。
+    agent_http::reset_shared_client();
     Ok(())
 }
 
@@ -2353,7 +2355,9 @@ async fn forward_sse_events(
             buffer.push_str(&String::from_utf8_lossy(&chunk));
             while let Some(pos) = buffer.find("\n\n") {
                 let event_text = buffer[..pos].to_string();
-                buffer = buffer[pos + 2..].to_string();
+                // 原地前移残留数据：旧写法每个事件都重建一次 String，一个 chunk 里
+                // 有 N 个事件就是 N 次全量复制（O(n²)），大块输出时拖慢事件转发。
+                buffer.drain(..pos + 2);
                 let mut event_type = String::new();
                 let mut event_data = String::new();
                 for line in event_text.lines() {
@@ -2373,7 +2377,13 @@ async fn forward_sse_events(
                             api_debug_log(|| summarize_sse_event(&payload).unwrap_or_default());
                         }
                     } else {
-                        api_debug_log(|| summarize_sse_event(&payload).unwrap_or_default());
+                        // 终端输出事件频率最高（每次按键回显、每 16ms 一块），
+                        // 直接转发给 agent-sse-event；不写调试日志，避免锁日志
+                        // 文件 + 文件 IO 拖慢回显（终端视图有独立监听器）。
+                        let is_terminal_event = payload.get("type").and_then(|v| v.as_str()) == Some("terminal_event");
+                        if !is_terminal_event {
+                            api_debug_log(|| summarize_sse_event(&payload).unwrap_or_default());
+                        }
                         // run_complete 的 payload 携带整轮文本（text 字段），会话上下文增长后
                         // 可能很大；Tauri IPC 对大 payload 偶发投递失败（表现：前端收不到
                         // run_complete → UI 卡"运行中"，需手动点停止），转发前截断防御。
@@ -2660,17 +2670,22 @@ pub async fn agent_http_request(
 ) -> Result<serde_json::Value, AppError> {
     let target = require_target()?;
     let started = std::time::Instant::now();
+    // 终端输入/尺寸/接管是每次按键级的高频控制请求：不写调试日志，避免
+    // 每敲一个键都做一次文件 IO，也避免把日志刷满。
+    let is_terminal_control = path.contains("/terminals/")
+        && (path.ends_with("/input") || path.ends_with("/resize") || path.ends_with("/attach"));
     // 只读 GET 多为高频轮询（每轮 run 后刷 /agent /sessions /messages），是主噪音：
     // 成功时不记，只在出错时留痕；改状态的操作（发消息/切模式/权限）才记请求行。
     let is_get = method.eq_ignore_ascii_case("GET");
-    if !is_get {
+    if !is_get && !is_terminal_control {
         api_debug_log(|| format!(
             "HTTP > {} {}{}",
             method.to_uppercase(), path,
             body.as_ref().map(|b| format!(" body={}", mask_sensitive_json(b))).unwrap_or_default()
         ));
     }
-    let client = build_client(&target, Duration::from_secs(5))
+    // 共享客户端复用 keep-alive 连接：否则每次输入都要重新做 TCP + TLS 握手。
+    let client = agent_http::shared_client(&target, Duration::from_secs(5))
         .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
     // 180s：与 Agent 服务端图片直调识别的整体超时（describeOverallTimeout）
     // 保持一致——识别在 HTTP 超时前返回或降级，避免“前端报错、后台继续跑”。
@@ -2686,21 +2701,19 @@ pub async fn agent_http_request(
         format!("HTTP 请求失败: {}", e)
     })?;
 
-    // 无响应体的状态码直接返回空 JSON 对象
-    // 202 Accepted: /agent 发送消息（fire-and-forget）
-    // 204 No Content: 删除等操作
-    if status == 202 || status == 204 {
-        api_debug_log(|| format!("HTTP < {} {} {} ({}ms)", status, method.to_uppercase(), path, started.elapsed().as_millis()));
-        return Ok(serde_json::json!({}));
-    }
-
-    // 对于 200 OK，尝试解析 JSON；如果解析失败（空 body），返回空对象
-    // 这适用于 /agent/update 等成功但无 body 的接口
-    if status == 200 {
+    // 2xx 一律视为成功：201 Created（POST /terminals 等带响应体）、
+    // 202 Accepted（/agent 发送消息，fire-and-forget）、204 No Content（删除等）。
+    // 之前只认 200/202/204，201 的成功响应体被当错误抛给前端（终端视图把
+    // 新建会话的 JSON 原样显示在红色提示条里）。
+    if (200..300).contains(&status) {
+        let result = if status == 202 || status == 204 {
+            serde_json::json!({})
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}))
+        };
         // 成功响应不 dump body（GET /messages 等会打一大坡）；只记非 GET 的一行状态+耗时。
-        let result = serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}));
-        if !is_get {
-            api_debug_log(|| format!("HTTP < 200 {} {} ({}ms)", method.to_uppercase(), path, started.elapsed().as_millis()));
+        if !is_get && !is_terminal_control {
+            api_debug_log(|| format!("HTTP < {} {} {} ({}ms)", status, method.to_uppercase(), path, started.elapsed().as_millis()));
         }
         return Ok(result);
     }

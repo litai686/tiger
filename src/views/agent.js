@@ -44,15 +44,54 @@ import { initServerLogsUI } from "./agent/server_logs.js";
 //   ① 任何 await 意外抛出（即便未被业务 catch 吞掉）也能保证 loading UI 不残留
 //   ② 早期 return 分支会先显式 hide 一次，finally 再 hide 一次也无副作用（idempotent）
 // - 异常分支必须先 hideInitProgress() 再 return，避免红色错误 + 进度条并存
-async function init() {
+
+// ===== 服务端未就绪时的自动重连 =====
+// 首次启动的典型时序：客户端先行启动（服务端没起 / 连接串还没粘），init 在 Phase B
+// 失败返回。Agent 视图是常驻层（index.html renderRoute 复用分支只调 show()，不重挂、
+// 不重跑 init），服务端随后启动后页面就永远停在「未连接」，只能靠用户切到别的页面
+// 再切回来也无济于事。这里每 3s 在后台重跑整条 init，服务端一就绪就自动完成
+// 连接 + 工作区 + 会话 + SSE 恢复，不需要用户任何操作。
+// 固定 3s 间隔重试（不退回）：断连期间每次尝试都很轻（一次 TLS 探活），
+// 服务端可能在任意时刻起来，固定短间隔比退避更早发现。
+var CONNECT_RETRY_INTERVAL_MS = 3000;
+var connectRetryTimer = null;
+
+function clearConnectRetry() {
+  if (connectRetryTimer) { clearTimeout(connectRetryTimer); connectRetryTimer = null; }
+}
+
+// seq 是排这次重试的那轮 init 的序号：定时器触发时若 S.initSeq 已变（视图卸载、
+// 新一轮 init 已经在跑），说明这次重试已经过期，直接丢弃即可，不能续排
+function scheduleConnectRetry(seq) {
+  if (connectRetryTimer) return;
+  if (seq !== S.initSeq) return;
+  console.log("[agent] 服务端未连接，" + CONNECT_RETRY_INTERVAL_MS + "ms 后自动重试");
+  connectRetryTimer = setTimeout(function() {
+    connectRetryTimer = null;
+    // 过期判定只认 initSeq：断线重连/手动 init 都会递增它，重试成功后也会在
+    // Phase B 里 clearConnectRetry()，因此这里不需要再看 serverInfo 等状态。
+    if (seq !== S.initSeq) return;
+    init({ silent: true }).catch(function(e) {
+      console.error("[agent] 自动重连 init 异常:", e);
+    });
+  }, CONNECT_RETRY_INTERVAL_MS);
+}
+
+// opts.silent = true：服务端未就绪时的后台自动重试（见 scheduleConnectRetry）。
+// 静默重试不弹进度条、不重复弹失败提示，避免服务端长时间未启动时反复打扰用户。
+async function init(opts) {
   var seq = ++S.initSeq;
-  console.log("[agent] init() 开始, seq:", seq);
+  var silent = !!(opts && opts.silent);
+  console.log("[agent] init() 开始, seq:", seq, silent ? "(silent)" : "");
   S.clientId = crypto.randomUUID ? crypto.randomUUID() : generateUUID();
 
-  showInitProgress(_t("正在加载配置..."));
+  // 任何一条 init 流水线启动都先取消挂起的重试：正常/手动 init 自己会重新决定后续，
+  // 重试定时器发起的那次 init 在定时器回调里已把句柄置空，这里也是空操作。
+  clearConnectRetry();
+  if (!silent) showInitProgress(_t("正在加载配置..."));
 
   try {
-    await _doInit(seq);
+    await _doInit(seq, silent);
   } catch (e) {
     // 通常情况下各阶段都自带防御（try/catch / .catch / 内部 allSettled），
     // 但仍不能排除意外抛出（例如 store.setActive 在 workspace 异常状态下的 nil 引用、
@@ -70,7 +109,9 @@ async function init() {
 }
 
 // init 的实际流水线，单独拆出来便于 try/finally 包裹
-async function _doInit(seq) {
+async function _doInit(seq, silent) {
+  // 静默重试不碰进度条：服务端没起来时每次重试闪一下进度条比不显示更糟
+  var progress = silent ? function() {} : showInitProgress;
 
   // ===== Phase A: 并行执行所有服务无关的初始化步骤 =====
   // 这些步骤不依赖服务端，全部并行触发，最大化与连接重叠时间
@@ -87,7 +128,8 @@ async function _doInit(seq) {
   S.settings = (settingsRes.status === "fulfilled" && settingsRes.value) ? settingsRes.value : {};
   if (settingsRes.status === "rejected") console.warn("[agent] load_settings 失败:", settingsRes.reason);
   setLogEnabled(!!S.settings.debug_logging);
-  updateStatusBar("ready", null, 0);
+  // 静默重试期间不能把状态栏刷回 ready：每 3s 在「未连接」与就绪间来回闪一下比不刷更糟
+  if (!silent) updateStatusBar("ready", null, 0);
 
   // 解析 workdir / 云端 provider（仅供 UI 使用，不阻塞连接）
   var workdir = (workdirRes.status === "fulfilled" && typeof workdirRes.value === "string") ? workdirRes.value : "";
@@ -98,20 +140,30 @@ async function _doInit(seq) {
 
   // ===== Phase B: 连接服务端（TCP + TLS，连接串来自设置页）=====
   // 服务端由用户自行启动：这里只做连接 + 建工作区会话，失败了直接提示去设置页检查配置。
-  showInitProgress(_t("正在连接服务端..."));
+  progress(_t("正在连接服务端..."));
   try {
     S.serverInfo = await invoke("start_agent_server", { clientId: S.clientId });
     // 复用已有 workspace 会话时后端返回的是原 client_id：必须同步，否则 remount 后
     // 新生成的 S.clientId 会与 SSE/current-session 上登记的不一致，导致 404 client not attached
     if (S.serverInfo && S.serverInfo.client_id) S.clientId = S.serverInfo.client_id;
+    // 连上了：停掉自动重试（下次真断线重新开始 3s 轮询）
+    clearConnectRetry();
+    // 静默重试成功时把「未连接」错误态立即换回就绪（Phase C 的 setupWorkspace 还会按工作目录再刷一次）
+    if (silent) updateStatusBar(S.isSending ? "busy" : "ready", null, S.contextUsage.used);
     console.log("[agent] 已连接服务端, host:", S.serverInfo?.host);
   } catch (e) {
     console.error("[agent] 连接服务端失败:", e);
     hideInitProgress();
     // 不走 reportError：后端错误文本含 tcp:// / tigerAgent 命令行等英文片段，
     // friendlyError 会在中文界面把细节整段丢掉，反而看不到"该去哪儿改"。
-    showError(_t("连接服务端失败：请在设置 → 服务端连接中粘贴服务端连接串（tigerAgent://…），并确保服务端已启动（tigerAgent --host tcp://0.0.0.0:<端口>）"));
+    if (!silent) {
+      showError(_t("连接服务端失败：请在设置 → 服务端连接中粘贴服务端连接串（tigerAgent://…），并确保服务端已启动（tigerAgent --host tcp://0.0.0.0:<端口>）；服务端就绪后会自动重连"));
+    }
     updateStatusBar("error", null, 0);
+    // 首次启动时服务端往往还没起来 / 连接串还没粘：Agent 常驻层不会重新挂载，
+    // 也就不会再跑 init（见 index.html renderRoute 的常驻视图复用分支），
+    // 不在这里重试的话页面会一直停在"未连接"
+    scheduleConnectRetry(seq);
     return;
   }
   if (seq !== S.initSeq) return;
@@ -130,7 +182,7 @@ async function _doInit(seq) {
   if (seq !== S.initSeq) return;
 
   // ===== Phase C: 工作区创建/拉取 + 服务端 provider 列表（并行）=====
-  showInitProgress(_t("正在加载工作区..."));
+  progress(_t("正在加载工作区..."));
   await Promise.all([
     setupWorkspace(workdir).catch(function(e) {
       console.warn("[agent] setupWorkspace 失败:", e);
@@ -143,7 +195,7 @@ async function _doInit(seq) {
 
   // ===== Phase D: Agent 初始化（依赖 workspace）=====
   if (S.serverInfo.workspace_id) {
-    showInitProgress(_t("正在初始化 Agent..."));
+    progress(_t("正在初始化 Agent..."));
     try {
       await api("POST", "/v1/workspaces/" + S.serverInfo.workspace_id + "/agent/init");
     } catch (e) {
@@ -177,7 +229,7 @@ async function _doInit(seq) {
   if (seq !== S.initSeq) return;
 
   // ===== Phase E: 订阅 SSE + 加载会话列表 + 加载工具列表 =====
-  showInitProgress(_t("正在加载会话与工具..."));
+  progress(_t("正在加载会话与工具..."));
   // 重新挂载时模板默认 Skill tab 高亮，同步重置状态
   S.toolsTab = "skill";
 
@@ -1007,6 +1059,9 @@ export default {
     cancelDiscardFallback();
     // 清除重连定时器
     if (S.sseReconnectTimer) { clearTimeout(S.sseReconnectTimer); S.sseReconnectTimer = null; }
+    // 停止服务端未就绪的自动重连（unmount 已使 initSeq 失效，定时器本身也不会再启动 init，
+    // 这里显式清掉避免长期占着一个待触发的 timer）
+    clearConnectRetry();
     // 注意：这里不调 agent_unsubscribe_events。它是异步 fire-and-forget，快速切回时可能在新页面
     // agent_subscribe_events 之后才在后端执行，把新订阅的 sse_stop 置 true → 新 SSE 静默失效。
     // setupSSEListener 订阅时后端会自动停止旧转发任务，因此无需在此主动退订；

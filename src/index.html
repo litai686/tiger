@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Tiger</title>
+  <link rel="stylesheet" href="./vendor/xterm/xterm.css">
   <style>
     /* ===== 主题变量：默认「暗夜紫」，其余主题通过 <html data-theme> 覆盖 =====
        全部前端视图内联在同一文档中，故 :root 变量对所有视图（含 agent）生效 */
@@ -133,6 +134,7 @@
     #models-btn,
     #projects-btn,
     #scm-btn,
+    #terminal-btn,
     #skills-btn {
       cursor: pointer;
       font-size: 13px;
@@ -188,6 +190,7 @@
     #models-btn:hover,
     #projects-btn:hover,
     #scm-btn:hover,
+    #terminal-btn:hover,
     #skills-btn:hover {
       color: var(--c-accent);
     }
@@ -197,6 +200,7 @@
     #models-btn.active,
     #projects-btn.active,
     #scm-btn.active,
+    #terminal-btn.active,
     #skills-btn.active {
       background: rgba(var(--c-accent-rgb), 0.20);
       color: var(--c-text-hi);
@@ -208,6 +212,7 @@
     #models-btn.active .btn-icon,
     #projects-btn.active .btn-icon,
     #scm-btn.active .btn-icon,
+    #terminal-btn.active .btn-icon,
     #skills-btn.active .btn-icon {
       color: var(--c-accent);
     }
@@ -467,6 +472,10 @@
         <span class="btn-icon">🌿</span>
         <span class="btn-text" data-i18n="源码管理">源码管理</span>
       </div>
+      <div id="terminal-btn" onclick="navigateTo('/terminal')">
+        <span class="btn-icon">⌨️</span>
+        <span class="btn-text" data-i18n="终端">终端</span>
+      </div>
       <div id="skills-btn" onclick="navigateTo('/skills')">
         <span class="btn-icon">🧩</span>
         <span class="btn-text" data-i18n="技能管理">技能管理</span>
@@ -559,7 +568,7 @@
 
     // ===== 导航激活态 =====
     function setActiveNav(id) {
-      ["agent-btn", "models-btn", "projects-btn", "scm-btn", "skills-btn", "settings-btn"].forEach(function (b) {
+      ["agent-btn", "models-btn", "projects-btn", "scm-btn", "terminal-btn", "skills-btn", "settings-btn"].forEach(function (b) {
         const el = document.getElementById(b);
         if (el) el.classList.toggle("active", b === id);
       });
@@ -1160,6 +1169,7 @@
       "/models":   { load: () => import("./views/models.js"),         nav: "models-btn" },
       "/projects": { load: () => import("./views/projects.js"),       nav: "projects-btn" },
       "/scm":      { load: () => import("./views/scm.js"),           nav: "scm-btn" },
+      "/terminal": { load: () => import("./views/terminal.js"),      nav: "terminal-btn" },
       "/skills":   { load: () => import("./views/skills.js"),         nav: "skills-btn" },
     };
 

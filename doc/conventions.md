@@ -45,6 +45,7 @@
   - `HTTP >` / `HTTP <` — HTTP 请求/响应
   - `SSE =` / `SSE !` — SSE 连接/断开
   - `< message created` / `< run_complete` / `< agent_event` — SSE 事件转发
+  - `[TERM]` — 终端输入延迟打点（`UI: [TERM][info] input_to_echo … queue … xterm_parse …`，每 20 样本或 5s 一行；另有会话初始化时的 `probe ready` 行用于确认前端含打点代码；含义与实测见 [`docs/terminal-management-plan.md`](../../docs/terminal-management-plan.md) §17）
   - `UpdateModels:` / `readyWg:` — Agent 服务端诊断日志
   日志格式：`{epoch_ms} {HH:MM:SS.mmm 本地时间} {类型标记} {内容}`，由 Rust 端统一格式化。调试模式开关：设置→调试模式（`config.json` 的 `debug_logging` 字段）。
 - **Agent 崩溃日志单独落盘**：服务端自身的 slog 写 `%LOCALAPPDATA%\tigerAgent\cache\tigerAgent.log`（每次启动截断），panic 栈写同目录的 `tigerAgent-panic.log`（只追加，超 8MB 轮转为 `.prev`；每进程启动写一行 `process start pid=`）：回合 goroutine 的 recover 走 `log.WritePanic("agent.run", …)`，recover 不到的 fatal（并发 map 写、栈溢出等）由 `debug.SetCrashOutput` 兜底。排查“对话突然中断/服务异常退出”先看这个文件，再看 `tigerAgent_debug.log` 的 `SSE !` 时间线。

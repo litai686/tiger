@@ -362,7 +362,7 @@ GET /v1/version
   "go_version": "Go版本",
   "platform": "操作系统/架构",
   "pid": 12345,
-  "capabilities": ["settings_v1", "fs_list", "workspace_files", "workspace_git", "workspace_git_exec"]
+  "capabilities": ["settings_v1", "fs_list", "workspace_files", "workspace_git", "workspace_git_exec", "terminal_v1", "terminal_ssh_v1"]
 }
 ```
 
@@ -374,7 +374,7 @@ GET /v1/version
 | `go_version` | string | 编译用的 Go 版本 |
 | `platform` | string | 运行平台 (如 `linux/amd64`) |
 | `pid` | int | 服务器进程 PID（用于升级时定位进程） |
-| `capabilities` | string[] | 可选能力列表；客户端据此对老服务端降级（`settings_v1`、`fs_list`、`workspace_files`、`workspace_git`、`workspace_git_exec` 等） |
+| `capabilities` | string[] | 可选能力列表；客户端据此对老服务端降级（`settings_v1`、`fs_list`、`workspace_files`、`workspace_git`、`workspace_git_exec`、`terminal_v1`、`terminal_ssh_v1` 等） |
 
 ---
 
@@ -2196,6 +2196,321 @@ Content-Type: application/json
 **提交历史命令**：`show_commit` 的 stdout 是 NUL 分隔的 `git show --name-status -z` 输出（`M\0path\0`；重命名/复制为 `R100\0old\0new\0`），路径相对 workspace（`--relative`）。`commit_file_diff` 返回指定提交中某个文件的 unified diff（二进制显示 `Binary files … differ`）；`path` 允许是工作区已删除的历史路径，服务端只做 workspace 包含性、`..`、`.git` 校验（`git_commands.go` 的 `NoStat` 参数），不做存在性检查。`commit_detail` 的 stdout 以 NUL 分隔 hash / author / email / ISO 日期 / subject / body 六个字段，随后是 `--numstat` 文本（`新增\t删除\t路径`，二进制文件为 `-\t-`）；桌面端用它渲染图表悬停卡片里的作者、时间、完整提交信息与增删统计。
 
 **作用域**：所有命令的 `cmd.Dir` 都是 workspace；`add_all` / `unstage_all` / `stash_push` / `clean` 用 `-- .` 限定在 workspace 子树（在仓库子目录直接 `git add -A` 会暂存整个仓库）。`commit` 提交整个索引；`fetch/pull/push/switch/merge/reset/branch` 是仓库级语义。
+
+---
+
+## 13. 终端与后台作业接口（桌面端「终端」）
+
+> capability：`terminal_v1`（终端与后台作业接口）与 `terminal_ssh_v1`（交互 PTY：内置本机 PTY、SSH 目标、输入/尺寸、`terminal_event`）；桌面端两者都要求。`options.terminal_enabled=false` 时所有终端/目标/作业端点返回 `403 [terminal:disabled]`，但 capability 仍返回，便于桌面端区分「版本过低」与「管理员关闭」。
+> 终端会话是**服务端进程内状态**（服务端重启即丢，不写数据库、不进对话历史）。终端只有**交互 PTY** 一种：目标 `transport=local`（内置目标 `local`，无需任何配置与凭据，直接在服务端主机开 shell）或 `transport=ssh`（服务端作为 SSH 客户端连 `terminal-targets.json` 中的目标机，在目标机 PTY 中运行交互 shell）。不是沙箱，且终端**不套用** agent bash 的 deny-list（`curl` / `apt` / `systemctl` 等可用）。
+
+### 13.1 通用约定
+
+- 全部为 workspace 作用域：`/v1/workspaces/{id}/terminals...` 与 `/v1/workspaces/{id}/shell-jobs...`；交互目标列表是全局的 `/v1/terminal-targets`。
+- 鉴权与其它端点一致（Bearer token）。
+- `kind` 只有 `pty`（交互 PTY）；状态为 `open` / `exited` / `disconnected`。关闭会话直接移除并返回 204，不存在 `closed` 状态。
+- 交互会话有**控制权租约**：创建时带 `client_id` 的客户端成为控制者；输入/尺寸/attach 续期 5 分钟，其他客户端只读。
+- 错误 message 以 `[terminal:*]` / `[shelljob:*]` 前缀开头。
+- 输出块 `seq` 单调递增；同一 stream 的连续写入会合并。`pty` 的 stdout/stderr 单块 ≤ 16384 字节、`encoding=base64`（PTY 字节流可能不是合法 UTF-8），`system` 块为 `utf8`。
+
+### 13.2 列出终端会话
+
+```
+GET /v1/workspaces/{id}/terminals?kind=pty|ssh|all
+```
+
+`kind` 缺省返回全部交互会话；`pty` / `ssh`（旧别名）/ `all` 等价，其它值返回 `400 [terminal:target_invalid]`。
+
+**响应** `200 OK`：
+
+```json
+{
+  "terminals": [
+    {
+      "id": "t-1",
+      "name": "prod-web-1",
+      "kind": "pty",
+      "target_id": "prod-web-1",
+      "target_label": "deploy@10.0.0.11:22",
+      "state": "open",
+      "last_exit_code": null,
+      "cols": 120,
+      "rows": 32,
+      "controller_client_id": "c-xxxx",
+      "connected_at": "2026-11-15T10:04:00Z",
+      "created_at": "2026-11-15T10:04:00Z",
+      "last_active_at": "2026-11-15T10:04:00Z",
+      "output_bytes": 1200
+    }
+  ],
+  "limits": { "max_sessions": 8, "scrollback_bytes": 1048576, "idle_timeout_seconds": 1800 }
+}
+```
+
+`last_exit_code` 为 `null` 表示远端 shell 尚未退出。
+
+### 13.3 新建终端会话
+
+```
+POST /v1/workspaces/{id}/terminals
+```
+
+**请求体（本机目标）**：
+
+```json
+{ "kind": "pty", "target_id": "local", "cols": 120, "rows": 32, "client_id": "c-xxxx" }
+```
+
+**请求体（SSH 目标）**：
+
+```json
+{
+  "kind": "pty",
+  "target_id": "prod-web-1",
+  "name": "prod-web-1",
+  "cols": 120,
+  "rows": 32,
+  "client_id": "c-xxxx"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `kind` | string | 是 | `pty`（`ssh` 为等价的旧别名）；非交互命令控制台已移除，其它值返回 400 |
+| `name` | string | 否 | 展示名；空则用目标名 |
+| `target_id` | string | 是 | `GET /v1/terminal-targets` 中的目标 id；内置 `local` 表示服务端主机；不允许请求里临时指定 host/凭据 |
+| `cols` / `rows` | int | 否 | 初始 PTY 尺寸，缺省 80×24 |
+| `client_id` | string | 否 | 创建者成为控制者；省略则首次 `attach` 决定 |
+
+**响应** `201 Created`：`{ "terminal": { …同 13.2 单项… } }`。创建同步完成 PTY 启动（本机）或拨号/认证/PTY（SSH）；失败直接返回 502（SSH）/ 500（本机 PTY），不产生“连接中”会话。
+
+### 13.4 读取输出
+
+```
+GET /v1/workspaces/{id}/terminals/{tid}/output?after={seq}&limit_bytes={n}
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `after` | 只返回 `seq > after` 的块；缺省 0（全量，受环形缓冲上限约束） |
+| `limit_bytes` | 单次返回上限，缺省 262144、最小 16384、最大 1048576；按整块装填，不切块 |
+
+**响应** `200 OK`：
+
+```json
+{
+  "terminal_id": "t-2",
+  "kind": "pty",
+  "state": "open",
+  "exit_code": null,
+  "chunks": [
+    { "seq": 43, "stream": "stdout", "encoding": "base64", "data": "PiBhcHAAMQ==" },
+    { "seq": 44, "stream": "system", "data": "\n[exit 0]\n" }
+  ],
+  "next_after": 44,
+  "first_seq": 1,
+  "output_bytes": 48213,
+  "truncated": false
+}
+```
+
+- `stream`：`stdout` / `stderr` / `system`；`data` 保留 ANSI 转义，桌面端 xterm 直接渲染。
+- `stdout` / `stderr` 块带 `"encoding": "base64"`，`data` 是 PTY 原始字节的 base64（PTY 字节流可能不是合法 UTF-8）；`system` 块为 `utf8`，`encoding` 缺省。客户端必须按 `encoding` 解码，不能假设所有块都是文本。
+- `system` 块只承载会话终态（`[exit N]` / `[connection lost: …]`）。
+- `truncated=true`：请求的 `after` 早于缓冲最旧块（`first_seq`），客户端应清屏后从 `first_seq` 重画。
+- `exit_code` 描述远端 shell 的退出码，未退出时为 `null`。
+
+### 13.5 关闭会话
+
+```
+DELETE /v1/workspaces/{id}/terminals/{tid}
+```
+
+关闭 PTY 后端并移除会话，最多等 5 秒，`204 No Content`；不存在也返回 204（幂等）。
+
+### 13.6 交互目标与输入
+
+#### 目标机列表
+
+```
+GET /v1/terminal-targets
+```
+
+响应 `200 OK`：
+
+```json
+{
+  "targets": [
+    {
+      "id": "local",
+      "name": "prod-server-1",
+      "transport": "local",
+      "host": "prod-server-1",
+      "port": 0,
+      "user": "deploy",
+      "disabled": false
+    },
+    {
+      "id": "prod-web-1",
+      "name": "prod-web-1",
+      "transport": "ssh",
+      "host": "10.0.0.11",
+      "port": 22,
+      "user": "deploy",
+      "auth": "key",
+      "host_key": "known_hosts",
+      "disabled": false
+    }
+  ],
+  "limits": { "max_targets": 64 }
+}
+```
+
+- **内置目标 `local` 永远存在且排在第一**：`transport=local` 表示在服务端主机（当前部署的系统）上直接开一个 PTY shell，无需 `terminal-targets.json`、无需 sshd、无需凭据；`host` 为服务端主机名，`user` 为服务端进程用户。该 id 为保留值，目标文件不能使用。
+- 其余目标来自服务端全局数据目录的 `terminal-targets.json`（与 `tigerAgent.json` 同目录，0600），**不通过 API 写入**；`transport` 为 `ssh`。文件不存在时只返回内置 `local` 目标。响应不包含密钥路径、密码、passphrase 或主机指纹。目标文件损坏返回 `500 [terminal:targets_invalid]`。
+
+#### 写入输入
+
+```
+POST /v1/workspaces/{id}/terminals/{tid}/input
+```
+
+```json
+{ "client_id": "c-xxxx", "encoding": "base64", "data": "G1sySiA=" }
+```
+
+- `encoding` 缺省 `utf8`，桌面端固定发 `base64`；Ctrl+C 等价输入字节 `\x03`。
+- 解码后单次 ≤ 65536 字节；超过返回 `413 [terminal:input_too_large]`。
+- 只入该会话的有界队列就返回 `202 {"accepted":true}`，不等待远端窗口；队列满返回 `429 [terminal:input_overflow]`。
+- 非控制者返回 `409 [terminal:readonly]`。
+
+#### 调整尺寸
+
+```
+POST /v1/workspaces/{id}/terminals/{tid}/resize
+```
+
+```json
+{ "client_id": "c-xxxx", "cols": 120, "rows": 32 }
+```
+
+`cols` / `rows` 必须在 1–1024；成功 `202 {"cols":120,"rows":32}`。仅控制者。
+
+#### 控制权
+
+```
+POST /v1/workspaces/{id}/terminals/{tid}/attach
+```
+
+```json
+{ "client_id": "c-xxxx", "force": false }
+```
+
+- 空闲或租约过期 → `200 { "terminal_id", "controller_client_id", "expires_at" }`。
+- 被他人持有且 `force=false` → `409 [terminal:readonly]`。
+- `force=true` 可立即接管。
+- 租约 5 分钟，由 `input` / `resize` / `attach` 续期；前端每 60s 心跳一次。
+- `DELETE .../attach?client_id=...` 释放控制权，`204`；非控制者调用也是 204（幂等，不影响当前控制者）。
+
+#### SSE 事件
+
+workspace 事件流（`GET /v1/workspaces/{id}/events`）新增：
+
+```json
+{
+  "type": "terminal_event",
+  "payload": {
+    "type": "updated",
+    "payload": {
+      "terminal_id": "t-2",
+      "event": "output",
+      "chunk": { "seq": 43, "stream": "stdout", "encoding": "base64", "data": "..." }
+    }
+  }
+}
+```
+
+```json
+{
+  "type": "terminal_event",
+  "payload": {
+    "type": "updated",
+    "payload": {
+      "terminal_id": "t-2",
+      "event": "state",
+      "state": "disconnected",
+      "exit_code": null,
+      "message": "connection reset by peer"
+    }
+  }
+}
+```
+
+- `data.type = "terminal_event"`，事件本体在 **`data.payload.payload`**（外层 `payload` 是通用 `pubsub.Event` 信封，与 `message` / `run_complete` 一致；少读一层会把 `terminal_id` 读成 `undefined` 并丢掉全部终端事件，客户端只能靠 1s 轮询，表现为打字明显延迟）。
+- `data.payload.payload.event = output | state`。
+- 输出事件按有损投递；客户端必须按 `seq` 去重、检测缺口并用 `GET .../output?after=` 补齐。
+- 状态事件同样有损，客户端用列表轮询兜底。
+
+### 13.7 后台作业（Agent 已启动的进程）
+
+> 数据源与 agent 的 `job_output` / `job_kill` 是同一份内存对象；作业管理器是进程级全局，接口只返回 `working_dir` 位于该 workspace 内的作业（归属归类，不是安全边界）。
+
+```
+GET /v1/workspaces/{id}/shell-jobs
+```
+
+**响应** `200 OK`：
+
+```json
+{
+  "jobs": [
+    {
+      "id": "1",
+      "command": "npm run dev",
+      "description": "启动开发服务器",
+      "working_dir": "/srv/app",
+      "state": "running",
+      "exit_code": null,
+      "output_bytes": 30412
+    }
+  ]
+}
+```
+
+```
+GET /v1/workspaces/{id}/shell-jobs/{jid}?tail_bytes={n}
+```
+
+`tail_bytes` 缺省 65536、最大 262144；返回 `{ "id", "state", "exit_code", "stdout", "stderr", "truncated" }`，只保留每个 stream 的尾部。
+
+```
+DELETE /v1/workspaces/{id}/shell-jobs/{jid}
+```
+
+终止并移除作业，`204 No Content`；不存在也 204（幂等）。
+
+### 13.8 错误码
+
+| HTTP | message 前缀 | 触发 |
+| --- | --- | --- |
+| 400 | `[terminal:target_invalid]` | 创建请求的 `kind` / `target_id` 组合非法（非交互控制台已移除） |
+| 400 | `[terminal:input_invalid]` | base64 / encoding 非法或空输入 |
+| 400 | `[terminal:resize_invalid]` | `cols` / `rows` 越界 |
+| 403 | `[terminal:disabled]` | `options.terminal_enabled=false` |
+| 403 | `[terminal:target_disabled]` | 目标机 `disabled=true` |
+| 404 | `[terminal:not_found]` | `tid` 不存在、已被回收或正在关闭 |
+| 404 | `[terminal:target_not_found]` | `target_id` 不存在 |
+| 404 | `[shelljob:not_found]` | 作业不存在或不属于该 workspace |
+| 409 | `[terminal:limit]` | 会话数达上限（8/工作区、32/进程） |
+| 409 | `[terminal:readonly]` | 非控制者输入 / resize / attach |
+| 409 | `[terminal:closed]` | 会话正在关闭 |
+| 413 | `[terminal:input_too_large]` | 单次输入超过 65536 字节 |
+| 429 | `[terminal:input_overflow]` | SSH 输入队列满 |
+| 500 | `[terminal:targets_invalid]` | `terminal-targets.json` 无法解析或字段非法 |
+| 502 | `[terminal:ssh_dial]` | 目标机 TCP / SSH 握手失败 |
+| 502 | `[terminal:ssh_auth]` | SSH 认证或本地私钥读取失败 |
+| 502 | `[terminal:ssh_hostkey]` | 目标机 host key 校验失败 |
+| 503 | `server is shutting down` | 服务端正在退出 |
 
 ---
 

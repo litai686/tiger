@@ -28,3 +28,22 @@ export function copyText(text, button) {
   } catch (_) {}
   document.body.removeChild(area);
 }
+
+/**
+ * 读取系统剪贴板：优先 Web Clipboard（需要用户手势/权限），失败回退到
+ * Tauri 的 clipboard_read_text（Linux WebKitGTK 上 Web Clipboard 不可用）。
+ * @returns {Promise<string>}
+ */
+export function readText() {
+  const native = function () {
+    const invoke = window.__agent_invoke;
+    if (typeof invoke !== "function") return Promise.resolve("");
+    return invoke("clipboard_read_text").then(function (text) {
+      return typeof text === "string" ? text : "";
+    });
+  };
+  if (navigator.clipboard && navigator.clipboard.readText) {
+    return navigator.clipboard.readText().catch(native);
+  }
+  return native();
+}
