@@ -204,6 +204,8 @@ tigerAgent --host tcp://0.0.0.0:18471 --tls=off --allow-plaintext-tcp
 
 `tigerAgent pair`、`clients`、`device` 命令已删除；`--tls-client-auth`、`--pinned-clients`、`--pair-window`、`--pair-auto-approve` 标志已删除。
 
+监听地址的 host 留空（`tcp://:18471`，等价于所有网卡）时，服务端分别绑定 `0.0.0.0`（IPv4）和 `[::]`（IPv6，`IPV6_V6ONLY=1`）两个 socket，`netstat` / `ss` 中显示为 `tcp` / `tcp6` 各一行；主机禁用 IPv6 时只绑 IPv4 并在日志中告警，IPv4 绑定失败（如端口被占用）则直接启动失败。显式写 host（`0.0.0.0` / `[::]` / 具体 IP）时只绑该地址。
+
 ### 5.4 配置（`options.server`）
 
 保留：`tls`、`cert_file`、`key_file`、`cert_validity_days`、`allow_plaintext_tcp`。
