@@ -2,13 +2,14 @@
 # 一键部署 tigerAgent 服务端（Linux / macOS，全部装在当前用户目录）：
 #   1. 按当前系统的 OS + 架构挑选 Release 中的 *_server 产物
 #      （官方只发布 Linux x86_64、macOS x86_64 / arm64，其余组合直接报错）
-#   2. 从 GitHub Release 解析最新（或指定）版本；已安装同一版本时跳过下载，直接启动
+#   2. 从 GitHub Release 解析最新（或指定）版本；已安装同一版本时跳过下载，直接重启
 #      （不落安装记录 / PID / nohup 日志等额外文件，重启时按进程命令行匹配旧实例）
-#   3. 否则下载并用 checksums.txt 校验 sha256，安装到 ~/.local/bin
-#   4. 准备数据目录，用 nohup 后台启动；启动后在终端回显服务端自己打印的管理界面地址 / 指纹 / token / 连接串，并做健康检查
+#   3. 否则下载并用 checksums.txt 校验 sha256、解压到临时目录
+#   4. 再次安装：先停掉正在运行的服务端（SIGTERM → 超时 SIGKILL），再覆盖 ~/.local/bin 下的二进制
+#   5. 准备数据目录，用 nohup 后台启动；启动后在终端回显服务端自己打印的管理界面地址 / 指纹 / token / 连接串，并做健康检查
 #
 # 用法：在仓库根执行 bash desktop/install-server.sh（或在 desktop/ 下执行 bash install-server.sh）
-#      重复执行即为升级：版本变化时下载新版本、替换二进制并重启；版本未变则只重启。
+#      重复执行即为升级：先停旧实例、覆盖二进制，再启动新实例；版本未变也照样重启。
 #
 # 环境变量（括号内为默认值）：
 #   TIGER_REPO          GitHub 仓库（litai686/tiger）
@@ -170,6 +171,96 @@ elif [ -x "$BIN_PATH" ]; then
   fi
 fi
 
+# ---------- 停止旧实例（再次安装 = 停旧进程 → 覆盖二进制 → 重启） ----------
+# 不落 PID 文件：用 ps 的命令行匹配上次启动的服务端进程，覆盖二进制前先停掉它。
+APP_LOG="$HOME/.cache/tigerAgent/tigerAgent.log"
+
+show_log_tail() {
+  if [ -f "$APP_LOG" ]; then
+    tail -n 30 "$APP_LOG" >&2 2>&1 || true
+  fi
+}
+
+find_running_pids() {
+  # 只认本服务端的实例，避免误伤别的程序：命令行以 $BIN_PATH 开头（本脚本启动 /
+  # 手动绝对路径启动，安装路径含空格也能认），或 basename 是 tigerAgent（通过 PATH /
+  # 相对路径 / 软链启动）；再看参数：--host / --data-dir 与本脚本一致，或完全没带
+  # 这两项（默认实例）。同一二进制的其他实例（不同端口 / 数据目录）不动；任意位置
+  # 出现子命令（dirs / stats / session / eval 等，持久 flag 可写在子命令前）或
+  # --version / --rotate-token 等立即退出的调用，也不动。
+  ps -A -o pid=,args= 2>/dev/null |
+    awk -v bin="$BIN_PATH" \
+        -v host_arg="--host $TIGER_HOST" -v host_eq="--host=$TIGER_HOST" \
+        -v short_host_arg="-H $TIGER_HOST" -v short_host_eq="-H=$TIGER_HOST" \
+        -v data_arg="--data-dir $TIGER_DATA_DIR" -v data_eq="--data-dir=$TIGER_DATA_DIR" \
+        -v short_data_arg="-D $TIGER_DATA_DIR" -v short_data_eq="-D=$TIGER_DATA_DIR" '
+      {
+        pid = $1
+        sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", $0)
+        sub(/[[:space:]]+$/, "", $0)
+        if ($0 == "") next
+        n = split($0, tok, /[[:space:]]+/)
+        # 持久 flag 可以写在子命令前（tigerAgent -c DIR eval），任意位置的子命令都要跳过。
+        for (i = 2; i <= n; i++)
+          if (tok[i] ~ /^(dirs|projects|logs|schema|stats|session|sessions|s|eval)$/) next
+        # 打印 / 轮换后立即退出的命令不是常驻服务端，不杀（避免打断并发的 rotate-token 等操作）。
+        if ($0 ~ / --version( |$)| --help( |$)| --print-connection( |$)| --print-fingerprint( |$)| --rotate-token( |$)/) next
+        # ps 不转义空格：先按完整路径前缀判断，兼容安装路径含空格。
+        if (index($0, bin) != 1) {
+          base = tok[1]
+          sub(/^.*\//, "", base)
+          if (base != "tigerAgent") next
+        }
+        if (index($0, host_arg) > 0 || index($0, host_eq) > 0 ||
+            index($0, short_host_arg) > 0 || index($0, short_host_eq) > 0 ||
+            index($0, data_arg) > 0 || index($0, data_eq) > 0 ||
+            index($0, short_data_arg) > 0 || index($0, short_data_eq) > 0) { print pid; next }
+        # 显式指定了其他 host / 数据目录 = 另一个实例，保留。
+        if ($0 ~ / -H | -H=| --host| -D | -D=| --data-dir/) next
+        print pid
+      }'
+}
+
+stop_running() {
+  PIDS="$(find_running_pids || true)"
+  [ -n "$PIDS" ] || return 0
+  log "停止正在运行的服务端进程：$(printf '%s ' $PIDS)"
+  for p in $PIDS; do
+    kill "$p" 2>/dev/null || true
+  done
+  WAIT=0
+  while [ "$WAIT" -lt 40 ]; do
+    STILL=""
+    for p in $PIDS; do
+      if kill -0 "$p" 2>/dev/null; then
+        STILL=1
+        break
+      fi
+    done
+    [ -z "$STILL" ] && return 0
+    sleep 0.5
+    WAIT=$((WAIT + 1))
+  done
+  warn "旧进程 20 秒内未退出，强制终止"
+  for p in $PIDS; do
+    kill -9 "$p" 2>/dev/null || true
+  done
+  WAIT=0
+  while [ "$WAIT" -lt 4 ]; do
+    STILL=""
+    for p in $PIDS; do
+      if kill -0 "$p" 2>/dev/null; then
+        STILL=1
+        break
+      fi
+    done
+    [ -z "$STILL" ] && return 0
+    sleep 0.5
+    WAIT=$((WAIT + 1))
+  done
+  warn "仍有旧进程在运行（可能属于其他用户），如端口被占用请手动结束后重试"
+}
+
 # ---------- 下载、校验与安装 ----------
 TMPDIR_INSTALL="$(mktemp -d 2>/dev/null || mktemp -d -t tigerAgent)"
 cleanup() { rm -rf "$TMPDIR_INSTALL"; }
@@ -199,6 +290,10 @@ if [ "$NEED_INSTALL" = "1" ]; then
   # 先写临时文件再 rename：服务正在运行时也能安全替换（避免 ETXTBSY）。
   cp "$SRC_BIN" "$TIGER_INSTALL_DIR/.tigerAgent.new.$$"
   chmod 0755 "$TIGER_INSTALL_DIR/.tigerAgent.new.$$"
+  # 再次安装 / 升级：覆盖二进制前先停掉旧实例（TIGER_NO_START=1 只装不启动，不动已运行的进程）。
+  if [ "$NO_START" != "1" ]; then
+    stop_running
+  fi
   mv -f "$TIGER_INSTALL_DIR/.tigerAgent.new.$$" "$BIN_PATH"
   log "已安装 $BIN_PATH"
 fi
@@ -249,54 +344,9 @@ esac
 
 # ---------- nohup 后台启动 ----------
 # 不落 nohup 日志（服务端自己写 $HOME/.cache/tigerAgent/tigerAgent.log），也不落 PID 文件：
-# 重启时按完整命令行匹配本脚本启动的进程。
-APP_LOG="$HOME/.cache/tigerAgent/tigerAgent.log"
-
-show_log_tail() {
-  if [ -f "$APP_LOG" ]; then
-    tail -n 30 "$APP_LOG" >&2 2>&1 || true
-  fi
-}
-
-find_running_pids() {
-  # 只认命令行以「二进制 + 本脚本的 --host/--data-dir」开头的进程，避免误伤别的 tigerAgent。
-  ps -A -o pid=,args= 2>/dev/null |
-    awk -v pat="$BIN_PATH --host $TIGER_HOST --data-dir $TIGER_DATA_DIR" '
-      {
-        pid = $1
-        sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", $0)
-        if (index($0, pat) == 1) print pid
-      }'
-}
-
-stop_running() {
-  PIDS="$(find_running_pids)"
-  [ -n "$PIDS" ] || return 0
-  log "停止旧进程 $(printf '%s ' $PIDS)"
-  for p in $PIDS; do
-    kill "$p" 2>/dev/null || true
-  done
-  WAIT=0
-  while [ "$WAIT" -lt 40 ]; do
-    STILL=""
-    for p in $PIDS; do
-      if kill -0 "$p" 2>/dev/null; then
-        STILL=1
-        break
-      fi
-    done
-    [ -z "$STILL" ] && break
-    sleep 0.5
-    WAIT=$((WAIT + 1))
-  done
-  for p in $PIDS; do
-    if kill -0 "$p" 2>/dev/null; then
-      kill -9 "$p" 2>/dev/null || true
-    fi
-  done
-}
-
+# 重启时按命令行匹配本脚本启动的进程（见上面的 find_running_pids / stop_running）。
 start_nohup() {
+  # 旧实例已在覆盖二进制前停掉；这里兜底再停一次（同版本重装或极端情况下残留的实例）。
   stop_running
   # 捕获启动时写到 stderr 的连接串 / 管理地址 / 指纹 / token，健康检查后回显到终端；
   # 文件在临时目录内，脚本退出即删除（不落持久日志）。

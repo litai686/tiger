@@ -64,7 +64,7 @@ bash desktop/install-server.sh
 - 用 `checksums.txt` 校验 sha256 后安装到 `~/.local/bin/tigerAgent`，数据目录为 `~/.local/share/tigerAgent/data`
 - 已安装二进制的 `--version` 与 Release 版本一致时跳过下载，直接重启
 - 用 `nohup` 后台启动（不生成安装记录 / PID / nohup 日志等额外文件），启动后在终端回显二进制自己打印的管理界面地址、指纹、token 与连接串，并做 `/v1/health` 健康检查
-- 重复执行即升级；版本未变则只重启
+- 重复执行即升级：先停止运行中的旧实例（SIGTERM，20 秒未退出则 SIGKILL），再覆盖二进制并重新启动；版本未变也照样重启，`TIGER_NO_START=1` 只装不启动
 
 可用环境变量覆盖默认行为：
 
