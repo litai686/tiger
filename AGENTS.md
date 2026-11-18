@@ -36,6 +36,7 @@ Go 服务端（仓库根执行）：`go build ./...`、`go test ./internal/... -
 4. **代码改动必须同步更新对应文档**：同一次改动里改完，映射表见 [`doc/conventions.md`](doc/conventions.md#文档同步更新强制)；行为/契约变了而文档没跟，视为改动未完成。
 5. 服务端接口/行为变化时，同步更新 [`doc/server-api.md`](doc/server-api.md)（与仓库根 `docs/server-api.md` 保持一致）。
 6. 复杂问题排查需要日志时，按 `doc/conventions.md` 的类型标记写 `tigerAgent_debug.log`。
+7. **本目录是独立 git 仓库（`desktop/.git`），提交必须两边都做**：桌面端改动在本仓库 `git commit` 一笔，同时在仓库根镜像提交同一批文件；主项目 tigerAgent 与 desktop 有对应改动时，不允许只提交其中一个仓库。提交说明只描述本区域内容，跨端改动互相点出对方对应的文件。
 
 ## 文档索引
 
