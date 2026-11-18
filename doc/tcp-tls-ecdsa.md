@@ -154,7 +154,7 @@ tigerAgent://<host>:<port>?fp=<sha256:…>&token=<…>
 
 - 由服务端生成：启动时打印到 **stderr**（不写入日志文件），或 `tigerAgent --print-connection` 重新打印。
 - 值为 `host:port`、`sha256:`+base64url、base64url，均为安全字符，**不做百分号编码**；Go 与 Rust 用同一格式手工拼接/解析。
-- 监听 `0.0.0.0` / `::` 时，打印的 host 取本机第一个非环回 IPv4（没有则 `127.0.0.1`），需要公网/域名时手动替换 host 部分。
+- 监听 host 留空 / `0.0.0.0` / `::` 时，打印的 host 取本机第一个非环回 IPv4（没有则 `127.0.0.1`），需要公网/域名时手动替换 host 部分。
 - 连接串含 token，**不要**做二维码、贴到公开渠道或写进日志。
 
 ---
@@ -183,7 +183,7 @@ tigerAgent://<host>:<port>?fp=<sha256:…>&token=<…>
 ```bash
 # 启动服务（TCP 自动启用 TLS + token）
 # 启动后打印：客户端连接串、管理页面地址、登录用指纹与 token
-tigerAgent --host tcp://0.0.0.0:18471
+tigerAgent --host tcp://:18471
 
 # 只打印连接串（会创建证书/token，适合首次部署或忘记保存时）
 tigerAgent --print-connection
@@ -199,7 +199,7 @@ tigerAgent --tls-regenerate         # 换密钥（指纹变化）
 tigerAgent --tls-regenerate-cert    # 只重签（指纹不变）
 
 # 显式明文 TCP（token 会被明文传输，启动时告警）
-tigerAgent --host tcp://0.0.0.0:18471 --tls=off --allow-plaintext-tcp
+tigerAgent --host tcp://:18471 --tls=off --allow-plaintext-tcp
 ```
 
 `tigerAgent pair`、`clients`、`device` 命令已删除；`--tls-client-auth`、`--pinned-clients`、`--pair-window`、`--pair-auto-approve` 标志已删除。

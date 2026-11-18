@@ -14,7 +14,7 @@
 # 环境变量（括号内为默认值）：
 #   TIGER_REPO          GitHub 仓库（litai686/tiger）
 #   TIGER_VERSION       latest 或指定版本 / 标签，如 0.0.1、v0.0.1（latest）
-#   TIGER_HOST          监听地址（tcp://0.0.0.0:18471）
+#   TIGER_HOST          监听地址（tcp://:18471，host 留空 = IPv4 + IPv6 双栈）
 #   TIGER_INSTALL_DIR   二进制安装目录（$HOME/.local/bin）
 #   TIGER_DATA_DIR      数据目录（${XDG_DATA_HOME:-$HOME/.local/share}/tigerAgent/data）
 #   TIGER_NO_START=1    只安装、不启动
@@ -25,7 +25,7 @@ set -euo pipefail
 
 REPO="${TIGER_REPO:-litai686/tiger}"
 WANT_VERSION="${TIGER_VERSION:-latest}"
-TIGER_HOST="${TIGER_HOST:-tcp://0.0.0.0:18471}"
+TIGER_HOST="${TIGER_HOST:-tcp://:18471}"
 NO_START="${TIGER_NO_START:-0}"
 DEBUG_FLAG="${TIGER_DEBUG:-0}"
 FORCE_INSTALL="${TIGER_FORCE:-0}"

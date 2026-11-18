@@ -30,7 +30,7 @@ tigerAgent 服务端（用户自行启动）
 模型（云端 OpenAI 兼容 API 或本机推理服务）
 ```
 
-- 服务端启动 `tigerAgent --host tcp://0.0.0.0:18471` 时会打印一条客户端连接串：
+- 服务端启动 `tigerAgent --host tcp://:18471` 时会打印一条客户端连接串：
 
   ```
   tigerAgent://192.168.1.20:18471?fp=sha256:…&token=…
@@ -46,7 +46,7 @@ tigerAgent 服务端（用户自行启动）
    - Windows 10 / 11 · x64（NSIS 安装包）
    - macOS · Apple Silicon（DMG）
    - Linux · x64（deb / AppImage，需 GTK3 桌面环境）
-2. **启动服务端**：在服务器侧解压并运行 `tigerAgent --host tcp://0.0.0.0:18471`，记录启动日志中的连接串；也可以用下一节的一键脚本自动下载、安装并启动。
+2. **启动服务端**：在服务器侧解压并运行 `tigerAgent --host tcp://:18471`，记录启动日志中的连接串；也可以用下一节的一键脚本自动下载、安装并启动。
 3. **粘贴连接串**：打开桌面端，在「设置 → 服务端连接」粘贴并保存，连通后底部状态栏会显示服务端硬件信息。
 4. **配置模型**：在「模型管理」中添加 OpenAI 兼容 provider（云端 API 或本机 llama.cpp / Ollama / vLLM），选好模型即可开始对话。
 
@@ -71,7 +71,7 @@ bash desktop/install-server.sh
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `TIGER_VERSION` | `latest` | 指定版本，如 `0.0.1` / `v0.0.1` |
-| `TIGER_HOST` | `tcp://0.0.0.0:18471` | 服务端监听地址 |
+| `TIGER_HOST` | `tcp://:18471` | 服务端监听地址（host 留空 = IPv4 + IPv6 双栈） |
 | `TIGER_INSTALL_DIR` | `~/.local/bin` | 二进制安装目录 |
 | `TIGER_DATA_DIR` | `~/.local/share/tigerAgent/data` | 数据目录（配置、会话） |
 | `TIGER_NO_START` | `0` | `1` 只安装不启动 |
