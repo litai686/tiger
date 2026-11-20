@@ -174,11 +174,6 @@ function onSSEEventReceived(event) {
   var eventWsId = payload && payload.workspace_id;
   var rawData0 = payload.data || payload;
   var evType0 = rawData0.type || payload.type || "";
-  // 终端输出事件频率最高（每次按键回显、每 16ms 一块），且有独立的
-  // agent-sse-event 监听器（views/terminal/pty.js）负责渲染。这里必须在
-  // 任何日志/分发之前返回：debug 模式开启时，每条事件都会 console + IPC
-  // 写调试日志，成百上千条/秒会把打字回显拖到几百毫秒。
-  if (evType0 === "terminal_event") return;
   var isDelta = evType0 === "message" && rawData0.payload && rawData0.payload.type === "updated";
   var skipLog = false;
   if (isDelta) {

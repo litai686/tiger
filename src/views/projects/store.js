@@ -3,8 +3,6 @@ import * as api from "./api.js";
 import { basename, buildDirIndex } from "./git.js";
 import { normalizePath, wsIdByPath } from "../shared/paths.js";
 
-const ACTIVE_KEY = "projects.activePath";
-
 /**
  * @typedef {{name:string,path:string,source:"workdir"|"workspace",isDefault:boolean,wsId:string|null,loadState:string,error:string}} Project
  * @typedef {{name:string,path:string,is_dir:boolean,size:number,mtime:number,symlink:boolean,external?:boolean,hidden:boolean,deleted?:boolean}} DirEntry
@@ -164,16 +162,12 @@ export async function loadProjects() {
   }
 }
 
+// 进入页面默认展示当前工作目录：服务端 work_directories 的默认项就是代理
+// 当前使用的工作目录（Agent 页切换目录会同步改默认项），不恢复上次浏览的项目。
 export async function selectInitialProject() {
-  const remembered = localStorage.getItem(ACTIVE_KEY) || "";
   let target = state.projects.find(function (p) {
-    return p.path === remembered;
+    return p.isDefault;
   });
-  if (!target) {
-    target = state.projects.find(function (p) {
-      return p.isDefault;
-    });
-  }
   if (!target) target = state.projects[0];
   if (target) await selectProject(target);
 }
@@ -210,7 +204,6 @@ export async function selectProject(project) {
     state.wsId = info.workspace_id;
     project.wsId = info.workspace_id;
     project.loadState = "idle";
-    localStorage.setItem(ACTIVE_KEY, project.path);
     notify();
     const tasks = [loadDir("", true)];
     if (state.caps.git) tasks.push(loadStatus());

@@ -60,6 +60,5 @@ export async function probeCapabilities() {
   return {
     files: set.has("workspace_files"),
     git: set.has("workspace_git"),
-    gitExec: set.has("workspace_git_exec"),
   };
 }

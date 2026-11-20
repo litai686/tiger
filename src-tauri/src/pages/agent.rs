@@ -2405,13 +2405,7 @@ async fn forward_sse_events(
                             api_debug_log(|| summarize_sse_event(&payload).unwrap_or_default());
                         }
                     } else {
-                        // 终端输出事件频率最高（每次按键回显、每 16ms 一块），
-                        // 直接转发给 agent-sse-event；不写调试日志，避免锁日志
-                        // 文件 + 文件 IO 拖慢回显（终端视图有独立监听器）。
-                        let is_terminal_event = payload.get("type").and_then(|v| v.as_str()) == Some("terminal_event");
-                        if !is_terminal_event {
-                            api_debug_log(|| summarize_sse_event(&payload).unwrap_or_default());
-                        }
+                        api_debug_log(|| summarize_sse_event(&payload).unwrap_or_default());
                         // run_complete 的 payload 携带整轮文本（text 字段），会话上下文增长后
                         // 可能很大；Tauri IPC 对大 payload 偶发投递失败（表现：前端收不到
                         // run_complete → UI 卡"运行中"，需手动点停止），转发前截断防御。
@@ -2698,14 +2692,10 @@ pub async fn agent_http_request(
 ) -> Result<serde_json::Value, AppError> {
     let target = require_target()?;
     let started = std::time::Instant::now();
-    // 终端输入/尺寸/接管是每次按键级的高频控制请求：不写调试日志，避免
-    // 每敲一个键都做一次文件 IO，也避免把日志刷满。
-    let is_terminal_control = path.contains("/terminals/")
-        && (path.ends_with("/input") || path.ends_with("/resize") || path.ends_with("/attach"));
     // 只读 GET 多为高频轮询（每轮 run 后刷 /agent /sessions /messages），是主噪音：
     // 成功时不记，只在出错时留痕；改状态的操作（发消息/切模式/权限）才记请求行。
     let is_get = method.eq_ignore_ascii_case("GET");
-    if !is_get && !is_terminal_control {
+    if !is_get {
         api_debug_log(|| format!(
             "HTTP > {} {}{}",
             method.to_uppercase(), path,
@@ -2729,13 +2719,11 @@ pub async fn agent_http_request(
         format!("HTTP 请求失败: {}", e)
     })?;
 
-    // 2xx 一律视为成功：201 Created（POST /terminals 等带响应体）、
-    // 202 Accepted（/agent 发送消息无 body；异步 job 接口带 job JSON，
-    // 前端要靠 job_id 轮询进度）、204 No Content（删除等）。
-    // 之前只认 200/202/204，201 的成功响应体被当错误抛给前端（终端视图把
-    // 新建会话的 JSON 原样显示在红色提示条里）；202 曾一律丢成 `{}`，异步
-    // 安装等调用永远报 "missing job_id"。现在除 204 外都解析 body，空 body /
-    // 解析失败回落空对象，兼容 fire-and-forget 调用方。
+    // 2xx 一律视为成功：201 Created、202 Accepted（/agent 发送消息无 body；
+    // 异步 job 接口带 job JSON，前端要靠 job_id 轮询进度）、204 No Content（删除等）。
+    // 之前只认 200/202/204，201 的成功响应体被当错误抛给前端；202 曾一律丢成
+    // `{}`，异步安装等调用永远报 "missing job_id"。现在除 204 外都解析 body，
+    // 空 body / 解析失败回落空对象，兼容 fire-and-forget 调用方。
     if (200..300).contains(&status) {
         let result = if status == 204 {
             serde_json::json!({})
@@ -2743,7 +2731,7 @@ pub async fn agent_http_request(
             serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}))
         };
         // 成功响应不 dump body（GET /messages 等会打一大坡）；只记非 GET 的一行状态+耗时。
-        if !is_get && !is_terminal_control {
+        if !is_get {
             api_debug_log(|| format!("HTTP < {} {} {} ({}ms)", status, method.to_uppercase(), path, started.elapsed().as_millis()));
         }
         return Ok(result);

@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Tiger Agent — 服务端 / 桌面端分离的本地 AI 编码助手 | 独立升级 · 多设备接入</title>
-    <meta name="description" content="Tiger Agent 把 Agent 运行时与操作界面拆成两个独立程序：Go 服务端驱动 20 个内置工具、MCP、Skills、上下文压缩与每轮撤销，Tauri 桌面端只负责 Agent 对话、项目管理、源码管理、终端与设置。两端独立构建、独立升级，一个服务端可被多台设备通过 TLS 1.3 + token 一条连接串接入。Windows / macOS / Linux 免费下载。">
-    <meta name="keywords" content="Tiger Agent, tigerAgent, 服务端桌面端分离, 客户端服务端架构, 独立升级, 多设备接入, AI 编码助手, AI coding agent, 本地 AI agent, 代码助手, MCP, Skills, 上下文压缩, 每轮撤销, 交互终端, SSH 终端, 源码管理, Git 提交图, 项目管理, 模型管理, Bearer token, Tauri, Go, 本地大模型, OpenAI 兼容">
+    <meta name="description" content="Tiger Agent 把 Agent 运行时与操作界面拆成两个独立程序：Go 服务端驱动 20 个内置工具、MCP、Skills、上下文压缩与每轮撤销，Tauri 桌面端只负责 Agent 对话、项目管理与设置。两端独立构建、独立升级，一个服务端可被多台设备通过 TLS 1.3 + token 一条连接串接入。Windows / macOS / Linux 免费下载。">
+    <meta name="keywords" content="Tiger Agent, tigerAgent, 服务端桌面端分离, 客户端服务端架构, 独立升级, 多设备接入, AI 编码助手, AI coding agent, 本地 AI agent, 代码助手, MCP, Skills, 上下文压缩, 每轮撤销, 项目管理, 模型管理, Bearer token, Tauri, Go, 本地大模型, OpenAI 兼容">
     <meta name="author" content="Tiger Agent">
     <meta name="robots" content="index, follow, max-image-preview:large">
     <meta name="theme-color" content="#07080d">
@@ -25,7 +25,7 @@
     <meta property="og:locale" content="zh_CN">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="Tiger Agent — 服务端跑 Agent，界面留在桌面端">
-    <meta name="twitter:description" content="Agent 跑在服务端，界面留在桌面端：服务端与桌面端独立构建、独立升级，一个服务端多设备接入；27 个内置工具、交互终端与 Git 工作流。">
+    <meta name="twitter:description" content="Agent 跑在服务端，界面留在桌面端：服务端与桌面端独立构建、独立升级，一个服务端多设备接入；27 个内置工具与 Git 工作流。">
     <meta name="twitter:image" content="https://tiger.kuda520.com/images/og-cover.png">
     <meta name="twitter:image:alt" content="Tiger Agent — 服务端跑 Agent，界面留在桌面端">
 
@@ -35,7 +35,7 @@
         "@type": ["SoftwareApplication", "Product"],
         "name": "Tiger Agent",
         "alternateName": ["tigerAgent", "Tiger"],
-        "description": "Tiger Agent 把 Agent 运行时与操作界面拆成两个独立程序。Go 服务端驱动 Agent 回合循环与工具调用（bash、文件编辑、grep/glob、MCP、Skills、子代理），负责权限、上下文压缩、每轮撤销与会话持久化；Tauri 桌面端只做操作台，提供 Agent、模型管理、项目管理、源码管理、终端、技能与设置 7 个视图。两端独立构建、独立升级，通过 TLS 1.3 + ECDSA P-256 指纹钉扎与 Bearer token 连接。",
+        "description": "Tiger Agent 把 Agent 运行时与操作界面拆成两个独立程序。Go 服务端驱动 Agent 回合循环与工具调用（bash、文件编辑、grep/glob、MCP、Skills、子代理），负责权限、上下文压缩、每轮撤销与会话持久化；Tauri 桌面端只做操作台，提供 Agent、模型管理、项目管理、技能与设置 5 个视图。两端独立构建、独立升级，通过 TLS 1.3 + ECDSA P-256 指纹钉扎与 Bearer token 连接。",
         "applicationCategory": "DeveloperApplication",
         "operatingSystem": "Windows 10+, macOS (Apple Silicon), Linux",
         "url": "https://tiger.kuda520.com/",
@@ -64,9 +64,8 @@
             "每轮 git 快照撤销",
             "同目录多会话并行与文件写锁",
             "任意 OpenAI 兼容模型（云端 / 本地）",
-            "7 个桌面视图：Agent / 模型 / 项目 / 源码管理 / 终端 / 技能 / 设置",
-            "服务端交互终端（本机 PTY / SSH 目标）与后台作业",
-            "项目管理与源码管理（文件树 / 差异 / 暂存提交 / 提交图）",
+            "5 个桌面视图：Agent / 模型 / 项目 / 技能 / 设置",
+            "项目管理（文件树 / 预览 / 差异）",
             "TLS 1.3 + ECDSA P-256 指纹钉扎 + Bearer token 多 token 管理"
         ],
         "screenshot": "https://tiger.kuda520.com/images/og-cover.png",
@@ -83,7 +82,7 @@
                 "name": "Tiger Agent 是什么？",
                 "acceptedAnswer": {
                     "@type": "Answer",
-                    "text": "Tiger Agent 是一个服务端 / 桌面端分离的本地 AI 编码助手。Go 服务端是 Agent 运行时，负责回合循环、工具执行、权限与会话持久化；Tauri 桌面端是纯操作台，提供对话、项目、源码、终端与设置界面。它能读代码、改文件、运行命令、跑测试、按符号修复，并把每一步都留在你自己的机器上。"
+                    "text": "Tiger Agent 是一个服务端 / 桌面端分离的本地 AI 编码助手。Go 服务端是 Agent 运行时，负责回合循环、工具执行、权限与会话持久化；Tauri 桌面端是纯操作台，提供对话、项目、源码与设置界面。它能读代码、改文件、运行命令、跑测试、按符号修复，并把每一步都留在你自己的机器上。"
                 }
             },
             {
@@ -91,7 +90,7 @@
                 "name": "为什么要把服务端和桌面端分开？",
                 "acceptedAnswer": {
                     "@type": "Answer",
-                    "text": "因为 Agent 运行时与操作界面是两件不同的事：回合循环、工具执行、权限与持久化需要长期驻留并独立升级，适合放在服务端；对话、项目、源码与终端更适合桌面交互。拆开后，服务端可以放在算力更强的机器或远端服务器，桌面端保持轻量；两端各自发布、互不拖累，同一个服务端还能被多台设备通过各自 token 接入。"
+                    "text": "因为 Agent 运行时与操作界面是两件不同的事：回合循环、工具执行、权限与持久化需要长期驻留并独立升级，适合放在服务端；对话、项目与源码更适合桌面交互。拆开后，服务端可以放在算力更强的机器或远端服务器，桌面端保持轻量；两端各自发布、互不拖累，同一个服务端还能被多台设备通过各自 token 接入。"
                 }
             },
             {
@@ -112,10 +111,10 @@
             },
             {
                 "@type": "Question",
-                "name": "「终端」和「源码管理」能做什么？",
+                "name": "「项目管理」能做什么？",
                 "acceptedAnswer": {
                     "@type": "Answer",
-                    "text": "终端是服务端上的交互 PTY（xterm.js），默认在服务端主机执行，也可在 terminal-targets.json 里配置 SSH 目标；同一页还能查看与终止 Agent 的后台作业。项目管理用于浏览文件与查看差异，源码管理提供暂存、提交信息、提交图和 split / unified 差异，二者都走服务端 Git 接口。"
+                    "text": "项目管理用于浏览服务端工作区文件、预览源码与查看 Git 差异，数据全部走服务端文件/Git 接口。"
                 }
             },
             {
@@ -856,98 +855,6 @@
         .mock-tabs span { padding: 4px 9px; border-radius: 6px; }
         .mock-tabs .active { background: rgba(124, 108, 255, 0.18); color: var(--text); }
 
-        /* 源码管理预览 */
-        .scm-mock { padding: 14px 16px 16px; font-size: 12px; min-height: 348px; }
-        .scm-head {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-bottom: 10px;
-            font-family: var(--mono);
-            font-size: 11.5px;
-            color: var(--text-2);
-        }
-        .scm-head .repo {
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        .scm-branch {
-            margin-left: auto;
-            padding: 1px 9px;
-            border-radius: 999px;
-            border: 1px solid var(--border-strong);
-            color: var(--text-3);
-            font-size: 10.5px;
-            white-space: nowrap;
-        }
-        .scm-input {
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 9px 11px;
-            margin-bottom: 12px;
-            color: var(--text-3);
-            font-size: 11.5px;
-            background: rgba(255, 255, 255, 0.02);
-        }
-        .scm-sec {
-            display: flex;
-            justify-content: space-between;
-            margin: 10px 0 5px;
-            font-size: 10.5px;
-            color: var(--text-3);
-            letter-spacing: 0.06em;
-        }
-        .chg-row {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 3px 0;
-            font-family: var(--mono);
-            font-size: 11.5px;
-            color: var(--text-2);
-        }
-        .chg-row .chg-badge { width: 12px; text-align: center; font-weight: 700; }
-        .badge-m { color: var(--amber); }
-        .badge-a { color: var(--green); }
-        .badge-d { color: var(--red); }
-        .graph-row {
-            display: flex;
-            gap: 8px;
-            padding: 2px 0;
-            font-family: var(--mono);
-            font-size: 11px;
-            color: var(--text-3);
-        }
-        .graph-row .graph-dot { color: var(--accent-2); }
-        .graph-row .graph-line { color: rgba(124, 108, 255, 0.4); }
-
-        /* 终端预览 */
-        .term-mock {
-            padding: 14px 16px 16px;
-            font-family: var(--mono);
-            font-size: 11.6px;
-            line-height: 1.95;
-            color: var(--text-2);
-            min-height: 348px;
-        }
-        .term-mock .term-bar {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-bottom: 10px;
-            font-size: 10.8px;
-            color: var(--text-3);
-        }
-        .term-mock .term-pill {
-            padding: 1px 9px;
-            border-radius: 999px;
-            border: 1px solid var(--border-strong);
-            white-space: nowrap;
-        }
-        .term-mock .term-pill.ok { color: var(--green); border-color: rgba(52, 211, 153, 0.4); }
-        .term-mock .row { display: block; }
-
         .skills-mock { padding: 18px 18px 16px; }
         .skills-mock .skills-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
         .skills-mock .skills-head strong { font-size: 13.5px; }
@@ -1232,7 +1139,7 @@
                         <h1>Agent 跑在<span class="grad">服务端</span><br>界面留在桌面端</h1>
                         <p class="hero-sub">
                             Tiger Agent 把「Agent 运行时」和「操作界面」拆成两个独立程序：Go 服务端负责回合循环、
-                            工具、权限与持久化，Tauri 桌面端只做对话、项目、源码、终端与设置。
+                            工具、权限与持久化，Tauri 桌面端只做对话、项目、源码与设置。
                             算力放在哪由你决定，两端各自升级。
                         </p>
                         <div class="hero-actions">
@@ -1272,14 +1179,14 @@
 <span class="row"><span class="t-dim">Client connection string (paste into the app):</span></span>
 <span class="row"><span class="t-tool">tigerAgent://127.0.0.1:18471?fp=sha256:9F2C…&amp;token=…</span></span>
 <span class="row">&nbsp;</span>
-<span class="row"><span class="t-you">you ›</span> 给终端加 SSH 目标，并把源码管理里的改动提交掉</span>
-<span class="row"><span class="t-agent">tiger ›</span> <span class="t-dim">先看终端与 Git 接口，再分两步实现。</span></span>
-<span class="row indent"><span class="t-tool">⚙ grep</span> terminal_targets: internal/ <span class="t-ok">✓ 6 files</span></span>
-<span class="row indent"><span class="t-tool">⚙ view</span> src/views/terminal/pty.js <span class="t-dim">:668</span></span>
-<span class="row indent"><span class="t-tool">⚙ edit</span> src/views/terminal/pty.js <span class="t-add">+38</span> <span class="t-del">−6</span></span>
+<span class="row"><span class="t-you">you ›</span> 给项目管理加目录树折叠，并把改动提交掉</span>
+<span class="row"><span class="t-agent">tiger ›</span> <span class="t-dim">先看目录树与 Git 接口，再分两步实现。</span></span>
+<span class="row indent"><span class="t-tool">⚙ grep</span> project_tree: internal/ <span class="t-ok">✓ 6 files</span></span>
+<span class="row indent"><span class="t-tool">⚙ view</span> src/views/projects/tree.js <span class="t-dim">:668</span></span>
+<span class="row indent"><span class="t-tool">⚙ edit</span> src/views/projects/tree.js <span class="t-add">+38</span> <span class="t-del">−6</span></span>
 <span class="row indent"><span class="t-tool">⚙ bash</span> go test ./internal/server <span class="t-ok">✓ passed</span></span>
 <span class="row indent"><span class="t-tool">⚙ bash</span> pnpm typecheck <span class="t-ok">✓ passed</span></span>
-<span class="row"><span class="t-ok">✓ 完成</span> <span class="t-dim">SSH 目标已生效，改动已暂存并提交</span></span>
+<span class="row"><span class="t-ok">✓ 完成</span> <span class="t-dim">目录折叠已生效，改动已暂存并提交</span></span>
 <span class="row"><span class="t-agent">tiger ›</span> <span class="cursor" aria-hidden="true"></span></span>
                         </div>
                     </div>
@@ -1296,7 +1203,7 @@
                     </div>
                     <div class="stat">
                         <div class="stat-num">7</div>
-                        <div class="stat-label">桌面视图：Agent / 模型 / 项目 / 源码 / 终端 / 技能 / 设置</div>
+                        <div class="stat-label">桌面视图：Agent / 模型 / 项目 / 源码 / 技能 / 设置</div>
                     </div>
                     <div class="stat">
                         <div class="stat-num">1</div>
@@ -1383,20 +1290,6 @@
                     </div>
                     <div class="feature" data-reveal>
                         <div class="feature-icon" aria-hidden="true">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8.5v7M8.5 6H14a4 4 0 0 1 4 4v.5"/></svg>
-                        </div>
-                        <h3>源码管理视图</h3>
-                        <p>VSCode 风格的「源代码管理」：分支、提交信息、更改 / 已暂存与提交图一屏完成；split / unified 差异、子目录仓库与 SSE 自动刷新。</p>
-                    </div>
-                    <div class="feature" data-reveal>
-                        <div class="feature-icon" aria-hidden="true">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></svg>
-                        </div>
-                        <h3>交互终端</h3>
-                        <p>「终端」TAB 内嵌 xterm.js：服务端本机 PTY 或 <code>terminal-targets.json</code> 里的 SSH 目标，支持接管控制与只读模式，也能查看 Agent 后台作业输出。</p>
-                    </div>
-                    <div class="feature" data-reveal>
-                        <div class="feature-icon" aria-hidden="true">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4v6a4 4 0 0 0 8 0V4"/><path d="M6 4h4M14 4h4"/></svg>
                         </div>
                         <h3>可控与可扩展</h3>
@@ -1461,8 +1354,7 @@
                             <h4>纯 UI 操作台</h4>
                             <ul>
                                 <li>Agent 对话、工具调用与差异可视化</li>
-                                <li>模型管理、项目管理、源码管理</li>
-                                <li>交互终端（本机 PTY / SSH 目标）</li>
+                                <li>模型管理、项目管理</li>
                                 <li>技能、设置、硬件与连接状态</li>
                             </ul>
                             <p class="sep-boundary">不打包、不启动服务端，不执行 Agent 工具，不持久化会话。</p>
@@ -1493,7 +1385,7 @@
                         <div class="benefit">
                             <div class="b-no">05</div>
                             <h4>安全边界集中在服务端</h4>
-                            <p>Agent 工具只在服务端执行；权限请求、bash 只读白名单、hooks、工作区包含性校验由服务端统一执行；交互终端同样运行在服务端，TCP 强制 TLS 1.3 + 指纹 pin + Bearer token。</p>
+                            <p>Agent 工具只在服务端执行；权限请求、bash 只读白名单、hooks、工作区包含性校验由服务端统一执行；TCP 强制 TLS 1.3 + 指纹 pin + Bearer token。</p>
                         </div>
                         <div class="benefit">
                             <div class="b-no">06</div>
@@ -1524,7 +1416,7 @@
                             <h4>Tiger 桌面端</h4>
                             <ul>
                                 <li>纯 UI 客户端：不打包、不启动服务端，不执行工具</li>
-                                <li>7 个视图：Agent、模型管理、项目管理、源码管理、终端、技能、设置</li>
+                                <li>5 个视图：Agent、模型管理、项目管理、技能、设置</li>
                                 <li>底部常驻的是服务端硬件与连接状态</li>
                             </ul>
                         </div>
@@ -1591,7 +1483,7 @@
                     <span class="section-tag">界面预览</span>
                     <h2 class="section-title">看得见的每一步</h2>
                     <p class="section-desc">
-                        7 个视图随时切换，Agent 在服务端继续跑：对话与工具调用、Git 差异、交互终端、技能管理都在同一窗口，
+                        5 个视图随时切换，Agent 在服务端继续跑：对话与工具调用、Git 差异、技能管理都在同一窗口，
                         底部常驻连接与硬件状态。
                     </p>
                 </div>
@@ -1607,7 +1499,7 @@
                         <div class="mock-body">
                             <aside class="mock-side">
                                 <div class="side-title">会话</div>
-                                <div class="side-item active">终端 SSH 目标</div>
+                                <div class="side-item active">项目管理目录树</div>
                                 <div class="side-item">修复失败用例</div>
                                 <div class="side-item">压缩后继续重构</div>
                                 <div class="side-item">补充单元测试</div>
@@ -1616,15 +1508,15 @@
                                 <div class="side-item">F:/trae/tigerAgent/desktop</div>
                             </aside>
                             <div class="mock-main">
-                                <div class="msg-user">给终端加 SSH 目标，然后把这批改动提交掉。</div>
-                                <div class="msg-agent">先看终端与 Git 接口，再分两步实现。</div>
-                                <div class="tool-row"><span class="tool-name">⚙ grep</span><span>terminal_targets</span><span class="tool-ok">✓ 6 files</span></div>
-                                <div class="tool-row"><span class="tool-name">⚙ edit</span><span>pty.js</span><span class="tool-ok">✓ +38 −6</span></div>
+                                <div class="msg-user">给项目管理目录树加折叠，然后把这批改动提交掉。</div>
+                                <div class="msg-agent">先看目录树与 Git 接口，再分两步实现。</div>
+                                <div class="tool-row"><span class="tool-name">⚙ grep</span><span>project_tree</span><span class="tool-ok">✓ 6 files</span></div>
+                                <div class="tool-row"><span class="tool-name">⚙ edit</span><span>tree.js</span><span class="tool-ok">✓ +38 −6</span></div>
                                 <div class="tool-row"><span class="tool-name">⚙ bash</span><span>go test ./internal/server</span><span class="tool-ok">✓ passed</span></div>
                                 <div class="todo-card">
                                     <div class="todo-head"><span>任务清单</span><span>3/4</span></div>
-                                    <div class="todo-line"><span class="done">✔</span><span>梳理终端与 Git 接口</span></div>
-                                    <div class="todo-line"><span class="done">✔</span><span>实现 SSH 目标与会话列表</span></div>
+                                    <div class="todo-line"><span class="done">✔</span><span>梳理目录树与 Git 接口</span></div>
+                                    <div class="todo-line"><span class="done">✔</span><span>实现目录折叠与差异视图</span></div>
                                     <div class="todo-line"><span class="done">✔</span><span>暂存并提交本次改动</span></div>
                                     <div class="todo-line"><span class="doing">◐</span><span>等待 CI 验证</span></div>
                                 </div>
@@ -1634,8 +1526,6 @@
                             <span class="active">Agent</span>
                             <span>模型管理</span>
                             <span>项目管理</span>
-                            <span>源码管理</span>
-                            <span>终端</span>
                             <span>技能管理</span>
                             <span>设置</span>
                         </div>
@@ -1644,64 +1534,6 @@
                             <span>内存 63.9 GB</span>
                             <span>GPU 10.8 GB</span>
                             <span>CPU 6C/12T</span>
-                        </div>
-                    </div>
-
-                    <div class="mock" data-reveal>
-                        <div class="window-bar">
-                            <span class="window-dot r"></span>
-                            <span class="window-dot y"></span>
-                            <span class="window-dot g"></span>
-                            <span class="window-title">Tiger — 源码管理</span>
-                        </div>
-                        <div class="scm-mock">
-                            <div class="scm-head">
-                                <span class="repo">F:/trae/tigerAgent</span>
-                                <span class="scm-branch">main</span>
-                            </div>
-                            <div class="scm-input">提交信息（Ctrl+Enter 提交）</div>
-                            <div class="scm-sec"><span>更改</span><span>3</span></div>
-                            <div class="chg-row"><span class="chg-badge badge-m">M</span><span>src/views/terminal/pty.js</span></div>
-                            <div class="chg-row"><span class="chg-badge badge-a">A</span><span>desktop/website/index.html</span></div>
-                            <div class="chg-row"><span class="chg-badge badge-d">D</span><span>docs/old-plan.md</span></div>
-                            <div class="scm-sec"><span>已暂存的更改</span><span>1</span></div>
-                            <div class="chg-row"><span class="chg-badge badge-m">M</span><span>internal/server/terminal.go</span></div>
-                            <div class="scm-sec"><span>提交图 · 自动</span><span>main</span></div>
-                            <div class="graph-row"><span class="graph-dot">●</span><span>94de746</span><span>feat: 终端标签页</span></div>
-                            <div class="graph-row"><span class="graph-line">│</span><span class="graph-dot">●</span><span>2fea9cd</span><span>feat: 模型管理 TAB</span></div>
-                            <div class="graph-row"><span class="graph-line">│</span><span>f94a79c</span><span>feat: 项目与源码管理</span></div>
-                        </div>
-                    </div>
-
-                    <div class="mock" data-reveal>
-                        <div class="window-bar">
-                            <span class="window-dot r"></span>
-                            <span class="window-dot y"></span>
-                            <span class="window-dot g"></span>
-                            <span class="window-title">Tiger — 终端 · local</span>
-                        </div>
-                        <div class="term-mock">
-                            <div class="term-bar">
-                                <span class="term-pill ok">● 控制中</span>
-                                <span class="term-pill">local PTY</span>
-                                <span class="term-pill">SSH: build@devbox</span>
-                                <span class="term-pill">后台作业 2</span>
-                            </div>
-<span class="row"><span class="t-dim">$</span> <span class="t-cmd">git status --short</span></span>
-<span class="row"><span class="t-del"> M</span> src/views/terminal/pty.js</span>
-<span class="row"><span class="t-add">??</span> desktop/website/index.html</span>
-<span class="row"><span class="t-dim">$</span> <span class="t-cmd">pnpm typecheck</span></span>
-<span class="row"><span class="t-ok">✓ typecheck passed</span></span>
-<span class="row"><span class="t-dim">$</span> <span class="t-cmd">ssh build@devbox</span> <span class="t-dim"># 切换 SSH 目标</span></span>
-<span class="row"><span class="t-tool">build@devbox</span>:~/app$ <span class="t-cmd">go test ./...</span></span>
-<span class="row"><span class="t-ok">ok</span> tigerAgent/internal/server <span class="t-dim">1.84s</span></span>
-<span class="row"><span class="t-tool">job_output</span> <span class="t-dim">后台作业 go test ./... 已完成 ✓</span></span>
-<span class="row"><span class="cursor" aria-hidden="true"></span></span>
-                        </div>
-                        <div class="mock-status">
-                            <span class="dot-ok">● 输入回显 42 ms</span>
-                            <span>seq 1024</span>
-                            <span>WebGL</span>
                         </div>
                     </div>
 
@@ -1831,11 +1663,11 @@
                 <div class="faq" data-reveal>
                     <details open>
                         <summary>Tiger Agent 是什么？</summary>
-                        <div class="faq-a">服务端 / 桌面端分离的 AI 编码助手。Go 服务端是 Agent 运行时，负责回合循环、工具执行、权限与会话持久化；Tauri 桌面端是纯操作台，提供 Agent、模型管理、项目管理、源码管理、终端、技能与设置 7 个视图。它能读代码、改文件、运行命令、跑测试、按符号修复，并把每一步都留在你自己的机器上。</div>
+                        <div class="faq-a">服务端 / 桌面端分离的 AI 编码助手。Go 服务端是 Agent 运行时，负责回合循环、工具执行、权限与会话持久化；Tauri 桌面端是纯操作台，提供 Agent、模型管理、项目管理、技能与设置 5 个视图。它能读代码、改文件、运行命令、跑测试、按符号修复，并把每一步都留在你自己的机器上。</div>
                     </details>
                     <details>
                         <summary>为什么要把服务端和桌面端分开？</summary>
-                        <div class="faq-a">因为 Agent 运行时与操作界面是两件不同的事：回合循环、工具执行、权限与持久化需要长期驻留并独立升级，适合放在服务端；对话、项目、源码与终端更适合桌面交互。拆开后，服务端可以放在算力更强的机器或远端服务器，桌面端保持轻量；两端各自发布、互不拖累，同一个服务端还能被多台设备通过各自 token 接入。</div>
+                        <div class="faq-a">因为 Agent 运行时与操作界面是两件不同的事：回合循环、工具执行、权限与持久化需要长期驻留并独立升级，适合放在服务端；对话、项目与源码更适合桌面交互。拆开后，服务端可以放在算力更强的机器或远端服务器，桌面端保持轻量；两端各自发布、互不拖累，同一个服务端还能被多台设备通过各自 token 接入。</div>
                     </details>
                     <details>
                         <summary>必须使用本地模型或独立显卡吗？</summary>
@@ -1846,8 +1678,8 @@
                         <div class="faq-a">服务端、工具与文件读写都在本机执行，只有模型请求会发给你自己配置的模型服务。桌面端连接服务端使用 TLS 1.3，并用 ECDSA P-256 指纹钉住服务端身份，请求还需携带 Bearer token；token 可在 <code>/admin/</code> 管理界面生成与删除。</div>
                     </details>
                     <details>
-                        <summary>「终端」和「源码管理」能做什么？</summary>
-                        <div class="faq-a">终端是服务端上的交互 PTY（xterm.js），默认在服务端主机执行，也可在 <code>terminal-targets.json</code> 里配置 SSH 目标；同一页还能查看与终止 Agent 的后台作业。项目管理用于浏览文件与查看差异，源码管理提供暂存、提交信息、提交图和 split / unified 差异，二者都走服务端 Git 接口。</div>
+                        <summary>「项目管理」能做什么？</summary>
+                        <div class="faq-a">项目管理用于浏览服务端工作区文件、预览源码与查看 Git 差异，数据全部走服务端文件/Git 接口。</div>
                     </details>
                     <details>
                         <summary>可以把服务端放在另一台机器或服务器上吗？</summary>
