@@ -29,7 +29,7 @@
 1. TCP 传输的机密性与完整性（TLS 1.3，AEAD + 前向保密）。
 2. **服务端身份可验证**：ECDSA P-256 自签证书 + 客户端 SPKI pin，不需要 CA、域名、公网；浏览器也能直连 `/admin/`。
 3. **客户端身份可验证**：服务端生成 256-bit 随机 token，客户端以 `Authorization: Bearer` 出示；服务端常量时间比较。
-4. 客户端零配置负担：**一条连接串**（`tigerAgent://host:port?fp=…&token=…`）完成全部参数。
+4. 客户端零配置负担：**一条连接串**（`tigerAgent://[host][:port]?fp=…&token=…`，省略端口时默认 443）完成全部参数。
 5. 零外部依赖（仅 Go 标准库），不改变 REST/SSE 协议语义。
 6. 桌面端（`desktop/`，Tauri v2 + Rust）为第一目标客户端：`send` / `stream_get` 调用方零改动，token 在统一的请求包装层注入。
 
@@ -88,7 +88,7 @@
 ### 3.2 连接建立时序
 
 1. 服务端启动：加载/生成 `server.key`、`server.crt`、`token`，打印连接串。
-2. 客户端解析连接串，按 `fp` 建立 TLS 1.3 连接（SNI 固定 `tigerAgent.local`，实际身份由 pin 判定）。
+2. 客户端解析连接串，按 `fp` 建立 TLS 1.3 连接（实际身份由 pin 判定，与证书 SAN / SNI 无关；Go 客户端 SNI 固定 `tigerAgent.local`，桌面端 SNI 取连接串 host、IP 字面量不发 SNI，便于域名 + 反向代理按 SNI 路由）。
 3. 握手成功后，客户端在每个请求带 `Authorization: Bearer <token>`。
 4. 服务端中间件校验 token：通过则进入路由，否则 401 + `WWW-Authenticate: Bearer`。
 5. SSE 长连接使用同一条头部（桌面端 Rust hyper 可设头，不依赖浏览器 EventSource）。
@@ -149,11 +149,12 @@ sha256:<base64url_nopad(sha256(cert.RawSubjectPublicKeyInfo))>
 ### 4.4 连接串
 
 ```
-tigerAgent://<host>:<port>?fp=<sha256:…>&token=<…>
+tigerAgent://[host][:port]?fp=<sha256:…>&token=<…>
 ```
 
 - 由服务端生成：启动时打印到 **stderr**（不写入日志文件），或 `tigerAgent --print-connection` 重新打印。
 - 值为 `host:port`、`sha256:`+base64url、base64url，均为安全字符，**不做百分号编码**；Go 与 Rust 用同一格式手工拼接/解析。
+- **端口可省略**：省略时默认 443，适用于域名 / 反向代理 / 隧道预览域名部署（如 `tigerAgent://8000-xxx.preview.example.com?fp=…&token=…`）；此时客户端直连 443，要求代理**透传 TCP/TLS**（代理终止 TLS 会使 pin 校验失败），由代理转发到服务端实际监听端口。
 - 监听 host 留空 / `0.0.0.0` / `::` 时，打印的 host 取本机第一个非环回 IPv4（没有则 `127.0.0.1`），需要公网/域名时手动替换 host 部分。
 - 连接串含 token，**不要**做二维码、贴到公开渠道或写进日志。
 
@@ -250,9 +251,9 @@ tigerAgent --host tcp://:18471 --tls=off --allow-plaintext-tcp
 
 ### 6.2 桌面端（`desktop/src-tauri`）
 
-- 设置页只有一个输入框：连接串。保存前用 `server_mode::parse_connection` 校验（缺 `fp` / 缺 `token` / 缺 `?` 都给出具体错误）。
+- 设置页只有一个输入框：连接串。保存前用 `server_mode::parse_connection` 校验（缺 `fp` / 缺 `token` / 缺 `?` 都给出具体错误）；**端口可省略，默认 443**（域名 / 反向代理部署，如 `tigerAgent://8000-xxx.preview.example.com?fp=…&token=…`），IPv6 需写 `[::1]:port`。
 - `TcpTarget { host, port, pin, token }`；`agent_http::AgentHttpClient` 包装 hyper 客户端，在 `request()` 里统一加 `Authorization: Bearer`，`send` / `stream_get` / `health_check` 调用方无需感知 token。
-- TLS 配置：`with_no_client_auth()` + 自定义 `SpkiPinVerifier`；不出示客户端证书。
+- TLS 配置：`with_no_client_auth()` + 自定义 `SpkiPinVerifier`；不出示客户端证书。SNI 取 `TcpTarget.host`（`ServerName::try_from`，IP 字面量走 `IpAddress` 不发 SNI），身份仍只由 pin 判定——域名 + 反向代理可按 SNI 路由到服务端。
 - 「检测服务端」= 解析连接串 → `/v1/health`（匿名，判断可达）→ `/v1/workspaces`（认证，区分 token 错误）。
 - 设备身份目录 `<app_data>/device/`、`prepare_device_identity` 命令、`rcgen` 依赖均已删除；旧配置里的 `server.mode` / `server.remote.addr` / `server.remote.fingerprint` 会被忽略，需要重新粘贴连接串。
 
@@ -290,7 +291,7 @@ tigerAgent --host tcp://:18471 --tls=off --allow-plaintext-tcp
 - `internal/server/admin_test.go`：管理界面登录（TLS/指纹/token 三要素）、会话 cookie、token 增删、最后 token 保护、CSRF、删除 token 后会话失效、静态资源。
 - `internal/server/e2e_tls_test.go`：无客户端证书的 TLS 握手、pin 不匹配、明文请求被拒、TLS 1.2 被拒、`/v1/tls/info` 字段、受保护端点无 token 返回 401。
 - `internal/client/tls_test.go`：pin-only 连接、Bearer token 注入、无 token 被拒、pin 不匹配、`SetToken`。
-- 桌面端：`server_mode` 连接串解析单测；前端 `pnpm typecheck`。
+- 桌面端：`server_mode` 连接串解析单测（`host:port`、域名无端口默认 443、`[::1]` / `[::1]:port`、非法 host 拒绝）；前端 `pnpm typecheck`。
 
 ---
 

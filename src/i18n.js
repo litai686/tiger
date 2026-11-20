@@ -481,6 +481,7 @@ const EN = {
   "暂无工具": "No tools",
   "暂无项目记忆（进行上下文压缩后会自动沉淀约束与决策）": "No project memory yet (constraints and decisions are accumulated automatically after context compaction)",
   "服务端异常，请检查配置": "Server error, please check the configuration",
+  "服务端启动时打印的完整连接串：地址、服务端指纹（防中间人）与 token（身份凭据）三部分都在这一条串里；端口可省略，默认 443（域名 / 反向代理部署）": "The full connection string printed by the server: address, server fingerprint (anti-MITM) and token (credential) all live in this one string. The port can be omitted and defaults to 443 (domain / reverse-proxy deployments)",
   "服务端连接未配置：请在设置 → 服务端连接中粘贴服务端连接串（tigerAgent://…）": "Server connection is not configured: paste the server connection string (tigerAgent://…) in Settings → Server Connection",
   "正在连接服务端...": "Connecting to the server...",
   "连接服务端失败：请在设置 → 服务端连接中粘贴服务端连接串（tigerAgent://…），并确保服务端已启动（tigerAgent --host tcp://0.0.0.0:<端口>）；服务端就绪后会自动重连": "Failed to connect to the server: paste the server connection string (tigerAgent://…) in Settings → Server Connection, and make sure the server is running (tigerAgent --host tcp://0.0.0.0:<port>). It reconnects automatically once the server is ready",

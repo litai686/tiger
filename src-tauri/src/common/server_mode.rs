@@ -4,7 +4,7 @@
 //! 保存**一条连接串**，服务端启动时打印、客户端整条粘贴：
 //!
 //! ```text
-//! tigerAgent://host:port?fp=sha256:…&token=…
+//! tigerAgent://[host][:port]?fp=sha256:…&token=…
 //! ```
 //!
 //! `fp` 固定服务端身份（自签证书不在系统信任库，只能靠 pin 防中间人），
@@ -22,6 +22,11 @@ use crate::common::error::AppError;
 use crate::common::types::Settings;
 
 const CONNECTION_PREFIX: &str = "tigerAgent://";
+
+/// 连接串省略端口时的默认端口。域名部署（反向代理 / 隧道预览域名，如
+/// `tigerAgent://<子域>.preview.example.com?fp=…&token=…`）只给出主机名，
+/// 对外统一走 443，由代理转发到服务端实际监听的端口。
+pub const DEFAULT_PORT: u16 = 443;
 
 /// 读取 `<app_data>/config.json`（与 `settings::load_settings` 同路径）。
 /// 缺失或解析失败时返回默认值，绝不因为配置坏掉而阻断启动。
@@ -48,20 +53,25 @@ pub fn resolve(app: &tauri::AppHandle) -> Result<TcpTarget, AppError> {
     parse_connection(raw)
 }
 
-/// 解析连接串：`tigerAgent://host:port?fp=sha256:…&token=…`。
+/// 解析连接串：`tigerAgent://[host][:port]?fp=sha256:…&token=…`。
+/// 省略端口时用 [`DEFAULT_PORT`]（域名部署由反向代理转发），IPv6 需写成 `[::1]:port`。
 /// 值不做百分号编码（host:port、sha256:+base64url、base64url 都是安全字符），
 /// 与 Go 侧 `server.ConnectionString` 保持一致。
 pub fn parse_connection(raw: &str) -> Result<TcpTarget, AppError> {
     let rest = raw.trim().strip_prefix(CONNECTION_PREFIX).ok_or_else(|| {
         AppError::msg(
-            "连接串格式应为 tigerAgent://<host>:<port>?fp=sha256:…&token=…（在服务端启动日志或 `tigerAgent --print-connection` 中获取）",
+            "连接串格式应为 tigerAgent://<host>[:<port>]?fp=sha256:…&token=…（在服务端启动日志或 `tigerAgent --print-connection` 中获取）",
         )
     })?;
     let (authority, query) = rest.split_once('?').ok_or_else(|| {
         AppError::msg("连接串缺少 ?fp=…&token=… 部分（请复制服务端打印的完整连接串）")
     })?;
-    let (host, port) = split_addr(authority)
-        .ok_or_else(|| AppError::msg(format!("连接串地址无效: {}（应为 host:port）", authority)))?;
+    let (host, port) = split_addr(authority).ok_or_else(|| {
+        AppError::msg(format!(
+            "连接串地址无效: {}（应为 host 或 host:port，省略端口时默认 {}）",
+            authority, DEFAULT_PORT
+        ))
+    })?;
 
     let mut pin: Option<String> = None;
     let mut token: Option<String> = None;
@@ -99,18 +109,35 @@ pub fn apply(app: &tauri::AppHandle) -> Result<TcpTarget, AppError> {
     Ok(target)
 }
 
-/// `host:port` / `[::1]:port` → (host, port)
+/// `host` / `host:port` / `[::1]` / `[::1]:port` → (host, port)。
+/// 省略端口时用 [`DEFAULT_PORT`]。
 fn split_addr(addr: &str) -> Option<(String, u16)> {
     if let Some(rest) = addr.strip_prefix('[') {
         let (host, tail) = rest.split_once(']')?;
-        let port = tail.strip_prefix(':')?;
-        return Some((host.to_string(), port.parse().ok()?));
+        if host.is_empty() {
+            return None;
+        }
+        if tail.is_empty() {
+            return Some((host.to_string(), DEFAULT_PORT));
+        }
+        let port = tail.strip_prefix(':')?.parse().ok()?;
+        return Some((host.to_string(), port));
     }
-    let (host, port) = addr.rsplit_once(':')?;
-    if host.is_empty() {
+    let (host, port) = match addr.rsplit_once(':') {
+        Some((host, port)) => (host, port.parse().ok()?),
+        None => (addr, DEFAULT_PORT),
+    };
+    if host.is_empty() || !is_plain_host(host) {
         return None;
     }
-    Some((host.to_string(), port.parse().ok()?))
+    Some((host.to_string(), port))
+}
+
+/// 非方括号形式的主机名：不能含空白、路径、认证信息或裸 `:`（IPv6 必须加方括号）。
+fn is_plain_host(host: &str) -> bool {
+    !host
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '/' | '\\' | '@' | '#' | '?' | ':'))
 }
 
 /// 地址是否是环回地址：仅用于提示（`127.0.0.1` 也是合法 TCP 目标）。
@@ -129,8 +156,30 @@ mod tests {
     fn parses_host_port() {
         assert_eq!(split_addr("192.168.1.20:18471"), Some(("192.168.1.20".into(), 18471)));
         assert_eq!(split_addr("[::1]:18471"), Some(("::1".into(), 18471)));
-        assert_eq!(split_addr("nope"), None);
+        assert_eq!(split_addr("[::1]"), Some(("::1".into(), DEFAULT_PORT)));
+        assert_eq!(split_addr("nope"), Some(("nope".into(), DEFAULT_PORT)));
         assert_eq!(split_addr(":18471"), None);
+        assert_eq!(split_addr("::1"), None);
+    }
+
+    #[test]
+    fn parses_domain_without_port() {
+        let target = parse_connection(
+            "tigerAgent://8000-01m779avzhpa3yjqcy7pfm76jh.preview.renrencodex.com?fp=sha256:abcDEF_123&token=tok_en-1",
+        )
+        .expect("parse");
+        assert_eq!(target.host, "8000-01m779avzhpa3yjqcy7pfm76jh.preview.renrencodex.com");
+        assert_eq!(target.port, DEFAULT_PORT);
+        assert_eq!(target.pin, "sha256:abcDEF_123");
+        assert_eq!(target.token, "tok_en-1");
+    }
+
+    #[test]
+    fn rejects_invalid_hosts() {
+        assert_eq!(split_addr("example.com/path"), None);
+        assert_eq!(split_addr("user@example.com"), None);
+        assert_eq!(split_addr("example .com"), None);
+        assert!(parse_connection("tigerAgent://example.com/?fp=sha256:a&token=b").is_err());
     }
 
     #[test]

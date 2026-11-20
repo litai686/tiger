@@ -111,7 +111,7 @@ pub async fn set_server_connection(
     let raw = connection.trim();
     if raw.is_empty() {
         return Err(AppError::msg(
-            "必须粘贴服务端连接串（tigerAgent://host:port?fp=…&token=…）",
+            "必须粘贴服务端连接串（tigerAgent://<host>[:<port>]?fp=…&token=…）",
         ));
     }
     // 保存前先解析：把「格式不对 / 缺 token」这类问题立刻告诉用户

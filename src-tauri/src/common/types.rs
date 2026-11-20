@@ -104,7 +104,7 @@ pub struct ServerSettings {
 /// 远程服务端配置：只保存一条连接串（地址 + SPKI pin + token）。
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct RemoteServerConfig {
-    /// 服务端连接串 `tigerAgent://host:port?fp=sha256:…&token=…`，
+    /// 服务端连接串 `tigerAgent://[host][:port]?fp=sha256:…&token=…`（省略端口时默认 443），
     /// 由服务端启动时打印或 `tigerAgent --print-connection` 生成
     #[serde(default)]
     pub connection: String,

@@ -25,11 +25,14 @@ use tokio_rustls::TlsConnector;
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
-/// 客户端 TLS 握手中发送的 SNI。
-///
-/// 固定值，与服务端自签证书的 SAN 一致（`docs/tcp-tls-ecdsa.md` §11）。
-/// 服务端身份由 pin 校验收口，SNI 不参与判定，因此不做成设置项。
-pub const SERVER_SNI: &str = "tigerAgent.local";
+// 客户端 TLS 握手中发送的 SNI 取连接串里的 host（`docs/tcp-tls-ecdsa.md` §11）。
+// 服务端自签证书的 SAN 固定为 `tigerAgent.local`，但身份由 SPKI pin 校验收口，
+// 不依赖主机名；SNI 用真实 host 是为了让「域名 + 反向代理 / 隧道预览域名」的
+// 部署能按 SNI 路由到服务端。IP 字面量走 `ServerName::IpAddress`，不发 SNI。
+
+/// 连接串 host 不是合法 DNS 名（如含下划线）时回退到服务端证书 SAN，
+/// 保证这类内网主机名仍能完成握手（身份仍由 pin 判定）。
+const FALLBACK_SNI: &str = "tigerAgent.local";
 
 /// 服务端目标（`docs/tcp-tls-ecdsa.md` §11.3）。
 #[derive(Clone)]
@@ -178,7 +181,8 @@ impl AgentConnector {
         let tcp = tokio::net::TcpStream::connect((t.host.as_str(), t.port)).await?;
         tcp.set_nodelay(true)?;
         let cfg = tls_client_config(&t)?;
-        let sni = ServerName::try_from(SERVER_SNI)
+        let sni = ServerName::try_from(t.host.clone())
+            .or_else(|_| ServerName::try_from(FALLBACK_SNI.to_string()))
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("invalid SNI: {}", e)))?;
         let stream = TlsConnector::from(cfg)
             .connect(sni, tcp)

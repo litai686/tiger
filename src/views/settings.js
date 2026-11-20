@@ -301,8 +301,8 @@ const template = `
           <div class="param-row">
             <div class="param-label">${_t("连接串")}<div class="param-key">server.remote.connection</div></div>
             <div class="param-input" style="max-width:none;">
-              <textarea id="server-connection" rows="3" style="width:100%;max-width:680px;font-family:monospace;font-size:12px;" placeholder="tigerAgent://192.168.1.20:18471?fp=sha256:...&amp;token=..."></textarea>
-              <div class="param-desc">${_t("服务端启动时打印的完整连接串：地址、服务端指纹（防中间人）与 token（身份凭据）三部分都在这一条串里")}</div>
+              <textarea id="server-connection" rows="3" style="width:100%;max-width:680px;font-family:monospace;font-size:12px;" placeholder="tigerAgent://192.168.1.20:18471?fp=sha256:...&amp;token=...&#10;tigerAgent://8000-xxx.preview.example.com?fp=sha256:...&amp;token=..."></textarea>
+              <div class="param-desc">${_t("服务端启动时打印的完整连接串：地址、服务端指纹（防中间人）与 token（身份凭据）三部分都在这一条串里；端口可省略，默认 443（域名 / 反向代理部署）")}</div>
             </div>
           </div>
           <div class="param-row">
