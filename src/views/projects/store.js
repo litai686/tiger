@@ -36,6 +36,8 @@ export const state = {
   selection: { path: "", mode: "preview", staged: false },
   file: { path: "", loading: false, error: "", data: null },
   diff: { path: "", staged: false, loading: false, error: "", data: null },
+  /** 下载到本机的进度（workspace-download-progress 事件驱动；按 path 匹配当前选中文件） */
+  download: { path: "", received: 0, total: 0, active: false },
   pageError: "",
   seq: 0,
   destroyed: false,
@@ -90,6 +92,7 @@ export function reset() {
   state.selection = { path: "", mode: "preview", staged: false };
   state.file = { path: "", loading: false, error: "", data: null };
   state.diff = { path: "", staged: false, loading: false, error: "", data: null };
+  state.download = { path: "", received: 0, total: 0, active: false };
   for (const timer of state.timers) clearTimeout(timer);
   state.timers = [];
   if (state.unlisten) {
@@ -195,6 +198,7 @@ export async function selectProject(project) {
   state.selection = { path: "", mode: "preview", staged: false };
   state.file = { path: "", loading: false, error: "", data: null };
   state.diff = { path: "", staged: false, loading: false, error: "", data: null };
+  state.download = { path: "", received: 0, total: 0, active: false };
   state.projectsMenuOpen = false;
   project.loadState = "loading";
   project.error = "";

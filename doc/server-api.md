@@ -2032,7 +2032,7 @@ POST /v1/workspaces/{id}/mcp/docker/disable
 
 | capability | 含义 |
 | --- | --- |
-| `workspace_files` | 目录列表与文件内容 |
+| `workspace_files` | 目录列表、文件内容与原始下载 |
 | `workspace_git` | Git 状态与差异 |
 | `workspace_git_exec` | Git 命令目录与受控执行 |
 
@@ -2104,6 +2104,25 @@ GET /v1/workspaces/{id}/files/content?path=README.md&max_bytes=1048576
 - `truncated:true` 表示还有剩余字节未读；截断点若落在多字节字符中间，服务端回退到上一个合法 UTF-8 边界。
 - 目录 → `400`；文件不存在 → `404`；`.git/` → `403`。
 - 内容不做日志输出。
+
+### 12.2.1 下载文件（原始字节）
+
+```
+GET /v1/workspaces/{id}/files/raw?path=assets%2Flogo.png
+```
+
+| 参数 | 位置 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | path | 是 | Workspace ID |
+| `path` | query | 是 | 相对文件路径 |
+
+**响应** `200 OK`：`application/octet-stream` 原始字节流，带 `Content-Disposition: attachment; filename="<basename>"` 与 `Content-Length`。
+
+语义：
+
+- 与 `files/content`（1 MiB 文本预览）互补：无大小上限、不做 UTF-8/二进制判定，字节原样到达，供桌面端「下载到本地」使用。
+- 路径校验与 `files/content` 一致：目录 → `400`；文件不存在 → `404`；`..`/`.git/`/绝对路径/盘符相对路径 → `403`。
+- 文件名取逻辑路径 basename，剔除 `"`、`\` 与控制字符以保证头字段合法。
 
 ### 12.3 Git 状态
 

@@ -2950,6 +2950,146 @@ pub async fn switch_workspace(
     Ok(())
 }
 
+/// query 参数百分号编码：非 URL 保留字符（含 `/`）一律 %XX，
+/// 服务端 r.URL.Query() 解码后得到原始相对路径。
+fn percent_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", byte)),
+        }
+    }
+    out
+}
+
+/// 下载工作区文件到本机（项目管理视图「下载」按钮与文件树右键「下载到本地」）：
+/// 经服务端 GET /v1/workspaces/{id}/files/raw 流式取原始字节（二进制安全、
+/// 无大小上限，与 files/content 的 1MB 文本预览互补），先弹保存对话框再传输，
+/// 期间按整百分比（无 Content-Length 时每 256KB）发 `workspace-download-progress`
+/// 事件供按钮显示进度。返回保存后的本地路径，便于 UI 提示。
+#[tauri::command]
+pub async fn download_workspace_file(
+    app: tauri::AppHandle,
+    workspace_id: String,
+    path: String,
+) -> Result<String, AppError> {
+    use http_body_util::BodyExt;
+    use tauri_plugin_dialog::DialogExt;
+
+    if workspace_id.is_empty() || path.trim().is_empty() {
+        bail!("缺少 workspace 或文件路径");
+    }
+    let target = require_target()?;
+    let client = build_client(&target, Duration::from_secs(5))
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+    let url = format!(
+        "/v1/workspaces/{}/files/raw?path={}",
+        workspace_id,
+        percent_encode(&path)
+    );
+
+    // 先弹保存对话框再开始传输：用户取消时不必白白下载整个文件。
+    let default_name = path.rsplit('/').next().unwrap_or("file").to_string();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(&default_name)
+        .save_file(move |picked| {
+            let _ = tx.send(picked);
+        });
+    let picked = rx
+        .await
+        .map_err(|_| AppError::msg("保存对话框失败"))?
+        .ok_or_else(|| AppError::msg("用户取消了保存"))?;
+    let save_path = picked
+        .into_path()
+        .map_err(|e| AppError::msg(format!("无法获取保存路径: {}", e)))?;
+
+    // 300s：远程链路 + 大文件留足余量（与服务端日志下载同量级）。
+    let (status, headers, mut body) = tokio::time::timeout(
+        Duration::from_secs(300),
+        agent_http::stream_get_with_headers(&client, &url),
+    )
+    .await
+    .map_err(|_| "下载文件超时".to_string())?
+    .map_err(|e| format!("请求服务端失败: {}", e))?;
+    if !(200..300).contains(&status) {
+        let bytes = body
+            .collect()
+            .await
+            .map_err(|e| format!("读取响应失败: {}", e))?
+            .to_bytes()
+            .to_vec();
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        let message = value
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("请求失败 (HTTP {})", status));
+        api_debug_log(|| format!("Projects ! 下载工作区文件 {} 失败: {}", path, message));
+        bail!("{}", message);
+    }
+    let total: u64 = headers
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    let app2 = app.clone();
+    let ws_id = workspace_id.clone();
+    let path2 = path.clone();
+    let read = async {
+        let mut data: Vec<u8> = Vec::new();
+        let mut received: u64 = 0;
+        let mut last_pct: u64 = 0;
+        let mut last_emit: u64 = 0;
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(|e| format!("读取响应失败: {}", e))?;
+            if let Ok(chunk) = frame.into_data() {
+                received += chunk.len() as u64;
+                data.extend_from_slice(&chunk);
+                let pct = if total > 0 { received * 100 / total } else { 0 };
+                if (total > 0 && pct != last_pct)
+                    || (total == 0 && received - last_emit >= 262_144)
+                {
+                    last_pct = pct;
+                    last_emit = received;
+                    let _ = app2.emit(
+                        "workspace-download-progress",
+                        serde_json::json!({
+                            "workspace_id": ws_id,
+                            "path": path2,
+                            "received": received,
+                            "total": total,
+                        }),
+                    );
+                }
+            }
+        }
+        Ok::<Vec<u8>, String>(data)
+    };
+    let bytes = tokio::time::timeout(Duration::from_secs(300), read)
+        .await
+        .map_err(|_| "下载文件超时".to_string())?
+        .map_err(|e| format!("下载文件失败: {}", e))?;
+
+    std::fs::write(&save_path, &bytes).map_err(|e| format!("写入文件失败: {}", e))?;
+
+    api_debug_log(|| {
+        format!(
+            "Projects: 已下载工作区文件 {} ({} bytes) -> {}",
+            path,
+            bytes.len(),
+            save_path.display()
+        )
+    });
+    Ok(save_path.to_string_lossy().to_string())
+}
+
 // ===== 日志管理 =====
 
 /// 启动时根据持久化设置恢复调试日志开关（config.json 的 debug_logging）。

@@ -3,6 +3,7 @@ import { t as _t } from "../../i18n.js";
 import { copyText } from "../shared/clipboard.js";
 import { state } from "./store.js";
 import * as store from "./store.js";
+import * as api from "./api.js";
 import { badgeOf } from "./git.js";
 import { renderProjectsList } from "./projects_list.js";
 import { renderTree } from "./tree.js";
@@ -276,6 +277,9 @@ async function onClick(event) {
     case "copy-path":
       if (state.selection.path) copyText(state.selection.path, target);
       break;
+    case "download-file":
+      await downloadFileToLocal(state.selection.path);
+      break;
     case "reload-project":
     case "refresh-all":
       await reloadProject();
@@ -309,6 +313,104 @@ function onDblClick(event) {
   if (!target) return;
   const path = target.getAttribute("data-path") || "";
   if (path && store.statusOf(path)) store.selectFile(path, "diff");
+}
+
+// ===== 右键菜单：文件树文件行 → 下载到本地；空白区一律屏蔽浏览器默认菜单 =====
+
+function hideCtxMenu() {
+  const old = document.getElementById("projects-ctx-menu");
+  if (old) old.remove();
+}
+
+function showToast(text) {
+  if (/** @type {any} */ (window).showGlobalToast) /** @type {any} */ (window).showGlobalToast(text);
+}
+
+async function downloadFileToLocal(path) {
+  if (!state.wsId || !path) return;
+  // 立即进入下载态：事件未到前按钮先显示「下载中...」
+  state.download = { path, received: 0, total: 0, active: true };
+  store.notify();
+  try {
+    const saved = await api.invokeCmd("download_workspace_file", { workspaceId: state.wsId, path });
+    state.download = { path: "", received: 0, total: 0, active: false };
+    store.notify();
+    if (saved) showToast(_t("已下载到: ") + saved);
+  } catch (e) {
+    state.download = { path: "", received: 0, total: 0, active: false };
+    store.notify();
+    const message = api.errorMessage(e);
+    // 用户在保存对话框点取消不是错误，不弹提示
+    if (message.indexOf("取消") !== -1) return;
+    showToast(_t("下载文件失败: ") + message);
+  }
+}
+
+function onContextMenu(event) {
+  // 空白区（非文件行）也一律屏蔽 WebView 默认右键菜单
+  event.preventDefault();
+  hideCtxMenu();
+  const target = /** @type {HTMLElement|null} */ (event.target && event.target.closest ? event.target.closest('[data-action="select-file"]') : null);
+  if (!target) return;
+  const path = target.getAttribute("data-path") || "";
+  if (!path || !state.wsId) return;
+
+  const menu = document.createElement("div");
+  menu.id = "projects-ctx-menu";
+  menu.style.cssText = "position:fixed;background:var(--c-raise);border:1px solid var(--c-border);border-radius:8px;padding:4px 0;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,0.4);min-width:120px;";
+  // 靠近窗口右/下边缘时回退，避免菜单溢出屏幕
+  menu.style.left = Math.min(event.clientX, window.innerWidth - 140) + "px";
+  menu.style.top = Math.min(event.clientY, window.innerHeight - 60) + "px";
+
+  const item = document.createElement("div");
+  item.textContent = _t("下载到本地");
+  item.style.cssText = "padding:6px 16px;font-size:12px;cursor:pointer;color:var(--c-text-2);";
+  item.addEventListener("mouseenter", function() { item.style.background = "var(--c-raise-2)"; });
+  item.addEventListener("mouseleave", function() { item.style.background = "transparent"; });
+  item.addEventListener("click", function() {
+    menu.remove();
+    downloadFileToLocal(path);
+  });
+  menu.appendChild(item);
+
+  document.body.appendChild(menu);
+  setTimeout(function() {
+    document.addEventListener("mousedown", function closeHandler(ev) {
+      if (!menu.contains(/** @type {Node} */ (ev.target))) {
+        menu.remove();
+        document.removeEventListener("mousedown", closeHandler);
+      }
+    });
+  }, 0);
+}
+
+// ===== 下载进度事件（Rust download_workspace_file 流式读取时按百分比发射） =====
+
+/** @type {null|(() => void)} */
+let unlistenProgress = null;
+
+async function bindProgress() {
+  if (!window.__agent_listen) return;
+  try {
+    const unlisten = await window.__agent_listen("workspace-download-progress", function (event) {
+      const payload = event && event.payload;
+      if (!payload || payload.workspace_id !== state.wsId) return;
+      state.download = {
+        path: String(payload.path || ""),
+        received: Number(payload.received) || 0,
+        total: Number(payload.total) || 0,
+        active: true,
+      };
+      store.notify();
+    });
+    if (state.destroyed) {
+      try {
+        unlisten();
+      } catch (_) {}
+      return;
+    }
+    unlistenProgress = unlisten;
+  } catch (_) {}
 }
 
 // ===== 左右分栏宽度 =====
@@ -416,23 +518,28 @@ export function bind(root) {
   boundRoot = root;
   root.addEventListener("click", onClick);
   root.addEventListener("dblclick", onDblClick);
+  root.addEventListener("contextmenu", onContextMenu);
   document.addEventListener("click", onDocumentClick);
   const splitter = root.querySelector("#projects-splitter");
   if (splitter) splitter.addEventListener("mousedown", onSplitterDown);
   document.addEventListener("visibilitychange", onVisibilityChange);
   pollTimer = setTimeout(pollLoop, POLL_INTERVAL_MS);
   bindSSE();
+  bindProgress();
 }
 
 export function unbind() {
   if (boundRoot) {
     boundRoot.removeEventListener("click", onClick);
     boundRoot.removeEventListener("dblclick", onDblClick);
+    boundRoot.removeEventListener("contextmenu", onContextMenu);
     document.removeEventListener("click", onDocumentClick);
     const splitter = boundRoot.querySelector("#projects-splitter");
     if (splitter) splitter.removeEventListener("mousedown", onSplitterDown);
     boundRoot = null;
   }
+  // 清理 body 级右键菜单浮层：视图卸载后残留的 fixed 菜单会挡住新视图交互
+  hideCtxMenu();
   document.removeEventListener("visibilitychange", onVisibilityChange);
   if (pollTimer) clearTimeout(pollTimer);
   pollTimer = null;
@@ -443,6 +550,12 @@ export function unbind() {
       state.unlisten();
     } catch (_) {}
     state.unlisten = null;
+  }
+  if (unlistenProgress) {
+    try {
+      unlistenProgress();
+    } catch (_) {}
+    unlistenProgress = null;
   }
 }
 

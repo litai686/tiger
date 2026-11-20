@@ -412,6 +412,29 @@ pub async fn stream_get(
     Ok((resp.status().as_u16(), resp.into_body()))
 }
 
+/// 同 [`stream_get`]，但保留响应头（下载进度需要 Content-Length）。
+pub async fn stream_get_with_headers(
+    client: &AgentHttpClient,
+    path: &str,
+) -> Result<(u16, hyper::HeaderMap, Incoming), String> {
+    use http_body_util::Full;
+    use hyper::body::Bytes;
+
+    let uri = uri_for(path)?;
+    let req = hyper::Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Full::new(Bytes::new()))
+        .map_err(|e| format!("构建请求失败: {}", e))?;
+    let resp = client
+        .request(req)
+        .await
+        .map_err(|e| format!("HTTP 请求失败: {}", e))?;
+    let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
+    Ok((status, headers, resp.into_body()))
+}
+
 /// GET /v1/health 探活：能连上且返回 2xx 视为 server 就绪。
 pub async fn health_check(client: &AgentHttpClient) -> bool {
     match tokio::time::timeout(

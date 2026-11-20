@@ -1,5 +1,5 @@
 // 项目管理视图：右侧内容区（默认预览源文件，有变更时可切到差异）
-import { t as _t } from "../../i18n.js";
+import { t as _t, tV } from "../../i18n.js";
 import { state, statusOf } from "./store.js";
 import { badgeOf, BADGE_LABEL, hasStaged } from "./git.js";
 import { fullAddRows, parseUnifiedDiff, renderDiffPlaceholder, renderDiffRows } from "./diff.js";
@@ -78,6 +78,21 @@ function buildHeader(hasFile) {
     tabs.appendChild(diffTab);
   }
   row.appendChild(tabs);
+  // 「预览」旁的下载按钮：下载中按 workspace-download-progress 事件显示百分比进度
+  if (hasFile) {
+    const dl = state.download;
+    const active = !!(dl && dl.active && dl.path === state.selection.path);
+    let label = _t("下载");
+    if (active) {
+      label = dl.total > 0
+        ? tV("下载中 {p}%", { p: Math.min(100, Math.floor((dl.received / dl.total) * 100)) })
+        : _t("下载中...");
+    }
+    const download = el("button", "projects-btn", label);
+    download.setAttribute("data-action", "download-file");
+    if (active) download.disabled = true;
+    row.appendChild(download);
+  }
   row.appendChild(el("span", "projects-tab-spacer"));
 
   const tools = el("div", "projects-toolbar");
