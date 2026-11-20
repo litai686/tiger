@@ -37,6 +37,8 @@ reqwest = { version = "0.12", default-features = false, features = ["stream", "r
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging"] }
 rustls-pki-types = "1"
+# 反向代理终止 TLS 时按公共根证书校验（reqwest 已传递依赖，此处显式声明直接用）
+webpki-roots = "1"
 # 计算服务端 SPKI 指纹 sha256(base64url-nopad) 需要解析 X.509
 x509-parser = "0.16"
 sha2 = "0.10"

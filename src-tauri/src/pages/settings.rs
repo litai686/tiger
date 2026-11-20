@@ -158,10 +158,11 @@ pub async fn test_server_connection(app: tauri::AppHandle) -> Result<String, App
     let target = crate::common::server_mode::apply(&app)?;
     let client = build_client(&target, std::time::Duration::from_secs(5))
         .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
-    if !health_check(&client).await {
+    if let Err(e) = health_check(&client).await {
         return Err(AppError::msg(format!(
-            "无法连接 {}：请确认服务端已启动（tigerAgent --host tcp://0.0.0.0:<端口>）、地址可达、指纹与服务端一致",
-            target.display()
+            "无法连接 {}：{}；请确认服务端已启动（tigerAgent --host tcp://0.0.0.0:<端口>）、地址可达；直连需指纹与服务端一致，经反向代理需代理证书由公共根证书签发且转发到服务端",
+            target.display(),
+            e
         )));
     }
     let (status, _) = send(&client, "GET", "/v1/workspaces", None)
@@ -181,7 +182,12 @@ pub async fn test_server_connection(app: tauri::AppHandle) -> Result<String, App
     } else {
         ""
     };
-    Ok(format!("连接成功：{}{}", target.display(), mode_hint))
+    let tls_hint = if crate::common::agent_http::proxy_tls_active() {
+        "（TLS 由反向代理终止，已按公共根证书校验）"
+    } else {
+        ""
+    };
+    Ok(format!("连接成功：{}{}{}", target.display(), tls_hint, mode_hint))
 }
 
 /// 把当前保存的连接串解析进全局 active target，不发起任何网络请求。

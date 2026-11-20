@@ -8,6 +8,7 @@
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -59,7 +60,24 @@ impl std::fmt::Debug for TcpTarget {
 
 impl TcpTarget {
     pub fn display(&self) -> String {
-        format!("tcp://{}:{}", self.host, self.port)
+        format!("tcp://{}", self.authority())
+    }
+
+    /// HTTP `Host` 头（IPv6 加方括号，443 省略端口）。
+    ///
+    /// 域名反向代理按 Host 做虚拟主机路由时必须与连接串一致；直连时服务端
+    /// 不校验 Host，保持真实值也便于服务端日志排查。
+    pub fn authority(&self) -> String {
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        if self.port == 443 {
+            host
+        } else {
+            format!("{}:{}", host, self.port)
+        }
     }
 }
 
@@ -178,18 +196,64 @@ pub struct AgentConnector {
 impl AgentConnector {
     async fn connect(self) -> io::Result<AgentStream> {
         let t = self.target;
-        let tcp = tokio::net::TcpStream::connect((t.host.as_str(), t.port)).await?;
-        tcp.set_nodelay(true)?;
-        let cfg = tls_client_config(&t)?;
         let sni = ServerName::try_from(t.host.clone())
             .or_else(|_| ServerName::try_from(FALLBACK_SNI.to_string()))
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("invalid SNI: {}", e)))?;
-        let stream = TlsConnector::from(cfg)
-            .connect(sni, tcp)
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, format!("TLS 握手失败: {}", e)))?;
-        Ok(AgentStream(Box::new(stream)))
+        // 已确认该目标由反向代理终止 TLS：后续连接直接走公共根证书，省掉一次
+        // 必然失败的 pin 握手（终端输入/SSE 重连对建链延迟敏感）。
+        if proxy_tls_active() {
+            let stream = tls_connect(&t, sni, proxy_tls_client_config()?).await?;
+            return Ok(AgentStream(Box::new(stream)));
+        }
+        let pin_cfg = tls_client_config(&t)?;
+        match tls_connect(&t, sni.clone(), pin_cfg).await {
+            Ok(stream) => Ok(AgentStream(Box::new(stream))),
+            Err(err) if is_pin_mismatch(&err) => {
+                // 域名反向代理 / 隧道预览域名终止 TLS 时，客户端看到的是代理证书，
+                // pin 永远对不上。此时退回标准 HTTPS 信任模型：公共根证书 + 主机名
+                // 校验，再由 token 认证。只有代理证书确实被公共根证书信任才会成功，
+                // 直连自签服务端时错误 pin 仍然硬失败。
+                let proxy_cfg = proxy_tls_client_config()?;
+                match tls_connect(&t, sni, proxy_cfg).await {
+                    Ok(stream) => {
+                        PROXY_TLS.store(true, Ordering::Relaxed);
+                        eprintln!(
+                            "[server] {} 的 TLS 由反向代理终止：改用公共根证书校验（pin 只用于直连场景）",
+                            t.display()
+                        );
+                        Ok(AgentStream(Box::new(stream)))
+                    }
+                    Err(proxy_err) => Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "{}；反向代理证书校验失败: {}（直连请核对连接串指纹；经反向代理时代理证书必须由公共根证书签发且域名匹配）",
+                            err, proxy_err
+                        ),
+                    )),
+                }
+            }
+            Err(err) => Err(err),
+        }
     }
+}
+
+/// 建一条 TCP + TLS 连接。pin 校验失败时由调用方决定是否按反向代理重试；
+/// 每次调用都新建 TCP 连接（失败的 TLS 流不能复用）。
+async fn tls_connect(
+    target: &TcpTarget,
+    sni: ServerName<'static>,
+    cfg: Arc<ClientConfig>,
+) -> io::Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>> {
+    let tcp = tokio::net::TcpStream::connect((target.host.as_str(), target.port)).await?;
+    tcp.set_nodelay(true)?;
+    TlsConnector::from(cfg)
+        .connect(sni, tcp)
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, format!("TLS 握手失败: {}", e)))
+}
+
+fn is_pin_mismatch(err: &io::Error) -> bool {
+    err.to_string().contains("server fingerprint mismatch")
 }
 
 /// 构建 TLS 客户端配置：
@@ -208,9 +272,34 @@ fn tls_client_config(target: &TcpTarget) -> Result<Arc<ClientConfig>, io::Error>
     Ok(Arc::new(cfg))
 }
 
+/// 反向代理终止 TLS 时的客户端配置：公共根证书 + 主机名校验（标准 HTTPS 信任模型）。
+///
+/// 端到端 pin 要求服务端自己出示证书；域名反代由代理出示公共证书，pin 在该拓扑下
+/// 不可能命中，因此只在 pin 校验失败后作为回退使用，身份最终由 Bearer token 证明。
+fn proxy_tls_client_config() -> Result<Arc<ClientConfig>, io::Error> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    let cfg = ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("TLS 配置失败: {}", e)))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Arc::new(cfg))
+}
+
 /// 当前生效的服务端目标。用 RwLock 而不是 OnceLock：设置页保存新配置后可以立即
 /// 重新解析并覆盖，不必等应用重启（旧目标已建立的连接池由 hyper 自身回收）。
 static ACTIVE_TARGET: std::sync::RwLock<Option<TcpTarget>> = std::sync::RwLock::new(None);
+
+/// 最近一次成功建链是否走了「反向代理终止 TLS」的回退（设置页/日志提示用）。
+static PROXY_TLS: AtomicBool = AtomicBool::new(false);
+
+/// 是否经反向代理（公共根证书）建链：pin 在该拓扑下不参与校验。
+pub fn proxy_tls_active() -> bool {
+    PROXY_TLS.load(Ordering::Relaxed)
+}
 
 /// 设置本进程使用的服务端目标（启动/保存配置时按配置解析）。
 /// 目标可能换了地址/指纹/token，旧的连接池不再可用，直接丢弃。
@@ -218,6 +307,7 @@ pub fn set_active_target(target: TcpTarget) {
     if let Ok(mut guard) = ACTIVE_TARGET.write() {
         *guard = Some(target);
     }
+    PROXY_TLS.store(false, Ordering::Relaxed);
     reset_shared_client();
 }
 
@@ -274,6 +364,9 @@ pub fn spki_fingerprint(cert_der: &[u8]) -> Result<String, String> {
 pub struct AgentHttpClient {
     inner: Client<AgentConnector, Full<Bytes>>,
     token: String,
+    /// 真实主机的 `Host` 头：URI 里用的是内部占位 authority，反向代理按域名
+    /// 路由时不能把占位值发出去。
+    authority: String,
 }
 
 impl AgentHttpClient {
@@ -285,6 +378,9 @@ impl AgentHttpClient {
             if let Ok(value) = hyper::http::HeaderValue::from_str(&format!("Bearer {}", self.token)) {
                 req.headers_mut().insert(hyper::header::AUTHORIZATION, value);
             }
+        }
+        if let Ok(value) = hyper::http::HeaderValue::from_str(&self.authority) {
+            req.headers_mut().insert(hyper::header::HOST, value);
         }
         self.inner.request(req).await
     }
@@ -304,6 +400,7 @@ pub fn build_client(
     Ok(AgentHttpClient {
         inner: Client::builder(TokioExecutor::new()).build(connector),
         token: target.token.clone(),
+        authority: target.authority(),
     })
 }
 
@@ -440,14 +537,51 @@ pub async fn stream_get_with_headers(
 }
 
 /// GET /v1/health 探活：能连上且返回 2xx 视为 server 就绪。
-pub async fn health_check(client: &AgentHttpClient) -> bool {
+/// 失败时返回具体原因（DNS / 连接拒绝 / TLS 握手 / 指纹 / HTTP 状态），
+/// 调用方直接展示，避免所有失败都变成「无法连接」。
+pub async fn health_check(client: &AgentHttpClient) -> Result<(), String> {
     match tokio::time::timeout(
         Duration::from_secs(3),
         send(client, "GET", "/v1/health", None),
     )
     .await
     {
-        Ok(Ok((status, _))) => (200..300).contains(&status),
-        _ => false,
+        Ok(Ok((status, _))) if (200..300).contains(&status) => Ok(()),
+        Ok(Ok((status, _))) => Err(format!("GET /v1/health 返回 HTTP {}", status)),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("GET /v1/health 超时（3s）".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(host: &str, port: u16) -> TcpTarget {
+        TcpTarget {
+            host: host.to_string(),
+            port,
+            pin: "sha256:x".to_string(),
+            token: "tk".to_string(),
+        }
+    }
+
+    #[test]
+    fn authority_matches_connection_string() {
+        assert_eq!(target("example.com", 443).authority(), "example.com");
+        assert_eq!(target("example.com", 8000).authority(), "example.com:8000");
+        assert_eq!(target("::1", 443).authority(), "[::1]");
+        assert_eq!(target("::1", 8000).authority(), "[::1]:8000");
+    }
+
+    #[test]
+    fn detects_pin_mismatch_only() {
+        let pin = io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "TLS 握手失败: invalid peer certificate: server fingerprint mismatch: got a want b",
+        );
+        assert!(is_pin_mismatch(&pin));
+        let refused = io::Error::new(io::ErrorKind::ConnectionRefused, "connection refused");
+        assert!(!is_pin_mismatch(&refused));
     }
 }

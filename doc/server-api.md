@@ -65,7 +65,7 @@ GUI 客户端需根据运行平台选择合适的传输方式连接 server。
 
 ## 认证与加密
 
-`tcp://` 监听默认启用 TLS 1.3：服务端使用自签 ECDSA P-256 证书，客户端通过 SPKI 指纹 pin 住服务端身份；客户端身份由服务端生成的随机 token 证明（服务端启动时打印的连接串 `tigerAgent://[host][:port]?fp=…&token=…` 含全部参数，省略端口时客户端默认连 443，适用于域名 / 反向代理部署）。除匿名端点 `GET /v1/health`、`GET /v1/version`、`GET /v1/tls/info` 外，所有请求需带：
+`tcp://` 监听默认启用 TLS 1.3：服务端使用自签 ECDSA P-256 证书，客户端通过 SPKI 指纹 pin 住服务端身份；客户端身份由服务端生成的随机 token 证明（服务端启动时打印的连接串 `tigerAgent://[host][:port]?fp=…&token=…` 含全部参数，省略端口时客户端默认连 443）。域名反向代理可透传 TCP/TLS（pin 生效）或终止 TLS（桌面端改用公共根证书校验代理证书，pin 只用于直连，身份由 token 证明）。除匿名端点 `GET /v1/health`、`GET /v1/version`、`GET /v1/tls/info` 外，所有请求需带：
 
 ```
 Authorization: Bearer <token>

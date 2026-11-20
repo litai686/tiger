@@ -2233,10 +2233,11 @@ pub async fn start_agent_server(
     // 不再像本地模式那样尝试拉起进程。
     let probe = build_client(&target, Duration::from_secs(5))
         .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
-    if !health_check(&probe).await {
+    if let Err(e) = health_check(&probe).await {
         bail!(
-            "无法连接服务端（{}）：请确认服务端已启动（tigerAgent --host tcp://0.0.0.0:<端口>）、地址可达、连接串里的指纹与 token 与当前服务端一致",
-            target.display()
+            "无法连接服务端（{}）：{}；请确认服务端已启动（tigerAgent --host tcp://0.0.0.0:<端口>）、地址可达、连接串里的指纹与 token 与当前服务端一致",
+            target.display(),
+            e
         );
     }
     eprintln!("[Agent] 已连接服务端 {}", target.display());

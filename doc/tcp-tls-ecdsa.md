@@ -154,7 +154,7 @@ tigerAgent://[host][:port]?fp=<sha256:…>&token=<…>
 
 - 由服务端生成：启动时打印到 **stderr**（不写入日志文件），或 `tigerAgent --print-connection` 重新打印。
 - 值为 `host:port`、`sha256:`+base64url、base64url，均为安全字符，**不做百分号编码**；Go 与 Rust 用同一格式手工拼接/解析。
-- **端口可省略**：省略时默认 443，适用于域名 / 反向代理 / 隧道预览域名部署（如 `tigerAgent://8000-xxx.preview.example.com?fp=…&token=…`）；此时客户端直连 443，要求代理**透传 TCP/TLS**（代理终止 TLS 会使 pin 校验失败），由代理转发到服务端实际监听端口。
+- **端口可省略**：省略时默认 443，适用于域名 / 反向代理 / 隧道预览域名部署（如 `tigerAgent://8000-xxx.preview.example.com?fp=…&token=…`）。代理可**透传 TCP/TLS**（端到端 pin 生效），也可**终止 TLS**：此时客户端看到的是代理证书，客户端会改用公共根证书 + 主机名校验代理证书，pin 只用于直连场景，身份最终由 Bearer token 证明（见 §7.6）。
 - 监听 host 留空 / `0.0.0.0` / `::` 时，打印的 host 取本机第一个非环回 IPv4（没有则 `127.0.0.1`），需要公网/域名时手动替换 host 部分。
 - 连接串含 token，**不要**做二维码、贴到公开渠道或写进日志。
 
@@ -252,8 +252,9 @@ tigerAgent --host tcp://:18471 --tls=off --allow-plaintext-tcp
 ### 6.2 桌面端（`desktop/src-tauri`）
 
 - 设置页只有一个输入框：连接串。保存前用 `server_mode::parse_connection` 校验（缺 `fp` / 缺 `token` / 缺 `?` 都给出具体错误）；**端口可省略，默认 443**（域名 / 反向代理部署，如 `tigerAgent://8000-xxx.preview.example.com?fp=…&token=…`），IPv6 需写 `[::1]:port`。
-- `TcpTarget { host, port, pin, token }`；`agent_http::AgentHttpClient` 包装 hyper 客户端，在 `request()` 里统一加 `Authorization: Bearer`，`send` / `stream_get` / `health_check` 调用方无需感知 token。
+- `TcpTarget { host, port, pin, token }`；`agent_http::AgentHttpClient` 包装 hyper 客户端，在 `request()` 里统一加 `Authorization: Bearer` 与真实 `Host` 头（反向代理按域名路由；直连时服务端不校验 Host）。
 - TLS 配置：`with_no_client_auth()` + 自定义 `SpkiPinVerifier`；不出示客户端证书。SNI 取 `TcpTarget.host`（`ServerName::try_from`，IP 字面量走 `IpAddress` 不发 SNI），身份仍只由 pin 判定——域名 + 反向代理可按 SNI 路由到服务端。
+- **反向代理终止 TLS 的回退**：pin 校验失败且代理证书能被公共根证书（`webpki-roots`）验过域名时，自动改用标准 HTTPS 信任模型建链并置位 `proxy_tls_active()`，设置页提示「TLS 由反向代理终止」；后续连接直接走该模式。直连自签服务端的错误 pin 仍硬失败（公共根证书不信任自签证书）。
 - 「检测服务端」= 解析连接串 → `/v1/health`（匿名，判断可达）→ `/v1/workspaces`（认证，区分 token 错误）。
 - 设备身份目录 `<app_data>/device/`、`prepare_device_identity` 命令、`rcgen` 依赖均已删除；旧配置里的 `server.mode` / `server.remote.addr` / `server.remote.fingerprint` 会被忽略，需要重新粘贴连接串。
 
@@ -282,6 +283,15 @@ tigerAgent --host tcp://:18471 --tls=off --allow-plaintext-tcp
 ### 7.5 本地传输
 
 `unix` / `npipe` 依赖 OS 权限，不启用 TLS 与 token（`AuthMode()` 返回 `none`）。
+
+### 7.6 反向代理终止 TLS
+
+域名 / 隧道预览域名（如 `tigerAgent://8000-xxx.preview.example.com?fp=…&token=…`）由代理在边缘终止 TLS 时，客户端看到的是代理证书，端到端 pin 不可能命中。桌面端的处理：
+
+- 先按 `fp` 做 pin 握手；失败且代理证书能被**公共根证书**验过主机名时，改用标准 HTTPS 信任模型重连（TLS 1.3 + `webpki-roots` + 主机名校验），`fp` 在该拓扑下不参与校验，身份由 Bearer token 证明。
+- 直连自签服务端的错误 `fp` 仍然硬失败：自签证书不在公共根信任库，回退必然失败，错误信息会同时给出 pin 与代理校验两段原因。
+- 该模式等价于普通 HTTPS：代理运营商（或其证书被盗用时）可见明文并可能篡改流量；需要端到端 pin 时请让代理**透传 TCP/TLS**（如 frp / nginx stream），不要把 `tcp://` 服务端直接暴露在终止 TLS 的应用层代理后。
+- 客户端会带真实 `Host`（连接串 host[:port]），代理按域名做虚拟主机路由时依赖它。
 
 ---
 

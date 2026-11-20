@@ -302,7 +302,7 @@ const template = `
             <div class="param-label">${_t("连接串")}<div class="param-key">server.remote.connection</div></div>
             <div class="param-input" style="max-width:none;">
               <textarea id="server-connection" rows="3" style="width:100%;max-width:680px;font-family:monospace;font-size:12px;" placeholder="tigerAgent://192.168.1.20:18471?fp=sha256:...&amp;token=...&#10;tigerAgent://8000-xxx.preview.example.com?fp=sha256:...&amp;token=..."></textarea>
-              <div class="param-desc">${_t("服务端启动时打印的完整连接串：地址、服务端指纹（防中间人）与 token（身份凭据）三部分都在这一条串里；端口可省略，默认 443（域名 / 反向代理部署）")}</div>
+              <div class="param-desc">${_t("服务端启动时打印的完整连接串：地址、服务端指纹（防中间人）与 token（身份凭据）三部分都在这一条串里；端口可省略，默认 443（域名 / 反向代理部署）。反向代理终止 TLS 时按公共根证书校验代理证书，指纹只用于直连")}</div>
             </div>
           </div>
           <div class="param-row">
@@ -514,7 +514,7 @@ async function runServerCheck() {
       push(true, _t("健康检查通过：") + msg);
     } catch (e) {
       push(false, _t("健康检查失败：") + errText(e));
-      push(false, _t("请确认服务端已启动（tigerAgent --host tcp://0.0.0.0:<端口>）、地址/端口可达、连接串里的指纹与 token 与当前服务端一致"));
+      push(false, _t("请确认服务端已启动（tigerAgent --host tcp://0.0.0.0:<端口>）、地址/端口可达；直连需指纹与 token 与当前服务端一致，经反向代理需代理证书受公共根证书信任"));
     }
   }
 
