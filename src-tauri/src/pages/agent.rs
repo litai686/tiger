@@ -2729,11 +2729,14 @@ pub async fn agent_http_request(
     })?;
 
     // 2xx 一律视为成功：201 Created（POST /terminals 等带响应体）、
-    // 202 Accepted（/agent 发送消息，fire-and-forget）、204 No Content（删除等）。
+    // 202 Accepted（/agent 发送消息无 body；/v1/lsp/fix 等异步 job 接口带
+    // job JSON，前端要靠 job_id 轮询进度）、204 No Content（删除等）。
     // 之前只认 200/202/204，201 的成功响应体被当错误抛给前端（终端视图把
-    // 新建会话的 JSON 原样显示在红色提示条里）。
+    // 新建会话的 JSON 原样显示在红色提示条里）；202 曾一律丢成 `{}`，LSP
+    // 安装永远报 "missing job_id"。现在除 204 外都解析 body，空 body /
+    // 解析失败回落空对象，兼容 fire-and-forget 调用方。
     if (200..300).contains(&status) {
-        let result = if status == 202 || status == 204 {
+        let result = if status == 204 {
             serde_json::json!({})
         } else {
             serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}))

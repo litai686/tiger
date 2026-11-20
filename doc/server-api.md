@@ -1388,6 +1388,11 @@ LSP `state` 取值（`lsp.ServerState`，序列化为整数）：
 | `4` | `StateStopped` | 已停止 |
 | `5` | `StateDisabled` | 已禁用 |
 
+`LSPClientInfo` 还可携带托管 LSP 字段（见 6.7）：`reason`（未安装/启动失败等原因）、
+`fix`（建议修复动作）、`guide`（指引）、`runtime`（运行时信息）、`server_version`、
+`managed`（是否由托管目录提供）。未安装的托管 server 也会以 `state: 0`（未启动）合并进
+本列表，便于面板直接触发安装。
+
 ---
 
 ### 6.2 获取 LSP 诊断
@@ -1513,6 +1518,103 @@ HTTP 超时，所以 `POST` **只调度并立即返回**（`running: true`），
 
 **失败**：`lsp` 不在安装表内 → `500`；工作区不存在 → `404`。安装命令非 0 退出、二进制
 不在 PATH、包管理器缺失都体现在作业的 `error`（不是 HTTP 错误）。
+
+---
+
+### 6.7 托管 LSP（安装 / 修复 / 运行时）
+
+服务端内置一份随二进制分发的托管 LSP 目录（`internal/lsp/managed/catalog.json`），
+按 server/版本隔离安装到 `<全局缓存目录>/lsp`（可用 `lsp_install_dir` 覆盖），并以跨
+进程锁写状态。以下接口全部在**服务端主机**上执行；安装只接受目录内固定版本并以参数
+数组执行，日志与下载不写代理凭据。
+
+运行时下载策略由 `options.lsp_managed_runtime`（`ask` 默认 / `auto` / `off`）与
+`options.lsp_runtime_preference`（`system` / `managed`）控制。
+
+#### 6.7.1 目录
+
+```
+GET /v1/lsp/catalog?workspace_id={id}
+```
+
+**响应** `200 OK`：`{"servers": []managed.CatalogEntry}`，每条含 `name`、
+`display_name`、`runtime`、`version`、`license`、`source`、`platforms`、`auto_install`、
+`large`、`experimental`、`active_version`、`available_on_host`、可选 `fix` / `guide`。
+
+`fix` 只在托管目录没有 active 版本**且**系统 PATH 也解析不到 manifest 入口时下发
+（`exec.LookPath` 命中即视为可用，托管安装只是可选并行安装）。系统安装的服务器
+（如 `~/go/bin/gopls`）因此不再被判成 `missing_package`，已连接的客户端旁边不会
+出现「安装」按钮。
+
+#### 6.7.2 环境体检
+
+```
+POST /v1/lsp/doctor
+```
+
+**请求体**（可选）：`{"workspace_id": "..."}`
+
+**响应** `200 OK`（`managed.DoctorReport`）：`runtime`（各运行时兼容性）、`path`、
+`install_dir`（路径/可写/剩余空间）、`proxy`（凭据已脱敏）、`problems[]`（每条带
+`reason` / `message` / 可选 `fix`）。
+
+#### 6.7.3 安装 / 修复 / 卸载
+
+```
+POST /v1/lsp/install
+POST /v1/lsp/fix
+POST /v1/lsp/uninstall
+```
+
+**请求体**分别为 `managed.InstallRequest` / `FixRequest` / `UninstallRequest`
+（均含 `workspace_id`、`name`、`confirm`、可选 `plan_id`；install 另有 `target`
+（`server` 或 `runtime`）、`runtime`、`version`、`install_runtime`；fix 另有 `action`）。
+
+`confirm=false` 时不执行，返回 `200` + `managed.Plan`（含 `plan_id`、`steps`、
+`requires_confirm`、`expires_at`，供客户端预览）；`confirm=true`（或动作无需确认）
+返回 `202 Accepted` + `managed.JobInfo`，客户端轮询 6.7.4。
+
+作业上下文脱离请求：安装/修复/回滚/卸载 job 一律用独立 ctx
+（`context.WithCancel(context.Background())`）在后台运行，202 响应后请求上下文
+（`r.Context()`）取消不会连带中断安装；取消只走 6.7.4 的
+`POST /v1/lsp/jobs/{job_id}/cancel`。
+
+**镜像回退**：npm / pip 首次安装使用用户自身配置（`.npmrc` / `pip.conf` / 环境变量），
+失败且作业未被取消时用公共镜像重试一次（npm `--registry https://registry.npmmirror.com`，
+pip `-i https://pypi.tuna.tsinghua.edu.cn/simple`），重试阶段 `phase=retry`；两次都失败
+返回首次（用户配置环境的）错误，避免镜像域名噪音掩盖真实报错。托管 Node 运行时发行包
+与 `SHASUMS256.txt` 按 `nodejs.org/dist` → `npmmirror.com/mirrors/node` 顺序回退，
+校验和仍按官方值比对。
+
+**失败**：未知 server → `404`；已有同 server 作业在跑 → `409`（响应头 `X-Existing-Job`
+带旧 job id）；`plan_id` 过期 → `409`；运行时策略禁止（`off`）或不支持 → `422`；
+版本非法 → `400`。
+
+#### 6.7.4 作业查询 / 取消
+
+```
+GET  /v1/lsp/jobs?workspace_id={id}
+GET  /v1/lsp/jobs/{job_id}?workspace_id={id}
+POST /v1/lsp/jobs/{job_id}/cancel?workspace_id={id}
+```
+
+**响应**：列表 `{"jobs": []managed.JobInfo}`；单个为 `managed.JobInfo`（`job_id`、
+`status`：`queued`/`running`/`succeeded`/`failed`/`canceled`、`phase`、`percent`、
+`message`、`error`、`log_tail` 等）。取消成功返回 `200`；作业不存在或已结束 → `404`。
+
+作业进度同时通过 SSE `lsp_event` 推送：内层 `type` 为 `install_progress`，终态
+（succeeded/failed/canceled）为 `job_finished`，payload 带 `job`（`managed.JobInfo`）。
+
+#### 6.7.5 按名称启动 / 重启
+
+```
+POST /v1/workspaces/{id}/lsps/{lsp}/start
+POST /v1/workspaces/{id}/lsps/{lsp}/restart
+```
+
+绕过文件类型检测与自动启动门禁（`auto_lsp`、根标记、未安装冷却），直接启动/重启指定
+名称的 server（含托管 server）。未知名称 → `404`。与 6.6 的修复流程互补：6.6 面向
+`fix.go` 安装表内的系统包安装，本组接口面向托管目录。
 
 ---
 
@@ -2964,3 +3066,13 @@ GUI 准备退出或升级：
 | 67 | GET | `/v1/workspaces/{id}/project-memory` | 读取项目记忆 |
 | 68 | POST | `/v1/workspaces/{id}/project-memory` | 覆盖项目记忆 |
 | 69 | GET | `/v1/docs/` | Swagger 文档 |
+| 70 | GET | `/v1/lsp/catalog` | 托管 LSP 目录 |
+| 71 | POST | `/v1/lsp/doctor` | 托管 LSP 环境体检 |
+| 72 | POST | `/v1/lsp/install` | 托管 LSP 安装 |
+| 73 | POST | `/v1/lsp/fix` | 托管 LSP 修复 |
+| 74 | POST | `/v1/lsp/uninstall` | 托管 LSP 卸载 |
+| 75 | GET | `/v1/lsp/jobs` | 托管 LSP 作业列表 |
+| 76 | GET | `/v1/lsp/jobs/{job_id}` | 托管 LSP 作业状态 |
+| 77 | POST | `/v1/lsp/jobs/{job_id}/cancel` | 取消托管 LSP 作业 |
+| 78 | POST | `/v1/workspaces/{id}/lsps/{lsp}/start` | 按名称启动 LSP |
+| 79 | POST | `/v1/workspaces/{id}/lsps/{lsp}/restart` | 按名称重启 LSP |
