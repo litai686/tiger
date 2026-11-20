@@ -147,14 +147,16 @@ async function refreshProvidersOnSwitch(wsId) {
 
   // 目标 workspace 的 ConfigStore 可能未加载最新的全局配置（cloud providers 在
   // 其他 workspace 通过 config/set scope:0 写入全局文件时只触发了那个 workspace 的
-  // autoReload）。用第一个 provider 的 api_key 做一次幂等 config/set 来触发 reload。
+  // autoReload）。用一次幂等 config/set 写回 provider 自身的 name 来触发 reload；
+  // 不能写 api_key：list_cloud_providers 不回传密钥（恒为空串），写空串会把
+  // 服务端已保存的 API Key 清空。
   if (S.providers.length > 0 && S.serverInfo) {
     var trigger = S.providers[0];
     try {
       await api("POST", "/v1/workspaces/" + wsId + "/config/set", {
         scope: 0,
-        key: "providers." + trigger.key + ".api_key",
-        value: trigger.api_key || ""
+        key: "providers." + trigger.key + ".name",
+        value: trigger.name || trigger.key
       });
     } catch (_) {}
   }

@@ -40,7 +40,8 @@ function getModelReadiness() {
   if (!p.base_url) {
     return _t("云端模型「") + (p.name || p.key) + _t("」缺少接口地址（Base URL），请到设置中修改。");
   }
-  if (!p.api_key) {
+  // list_cloud_providers 出于安全不回传 api_key（恒为空串），以 has_key 判断服务端是否已保存密钥
+  if (!p.api_key && !p.has_key) {
     return _t("云端模型「") + (p.name || p.key) + _t("」缺少 API Key，请到设置中填写。");
   }
   return null;
