@@ -39,6 +39,19 @@ pub struct ServerLogList {
     pub files: Vec<ServerLogFile>,
 }
 
+/// DELETE /v1/logs 的响应体（字段与 proto.LogClearResult 对齐）。
+#[derive(Serialize, Deserialize)]
+pub struct ServerLogClearResult {
+    /// 服务端日志目录（仅用于展示）
+    pub dir: String,
+    /// 被原地截断的文件（服务端仍在写入的 tigerAgent.log）
+    #[serde(default)]
+    pub truncated: Vec<String>,
+    /// 被删除的文件（panic 转储、.prev、轮转文件）
+    #[serde(default)]
+    pub removed: Vec<String>,
+}
+
 /// 文件名校验：服务端已限制为裸文件名，这里再挡一次，避免前端传入 `../` 拼出
 /// 越界路径（服务端 400 兜底，但错误信息对用户更直观）。
 fn reject_unsafe_name(name: &str) -> Result<(), AppError> {
@@ -59,14 +72,14 @@ fn server_error_message(bytes: &[u8], status: u16) -> String {
 }
 
 /// 请求服务端日志接口，返回 (状态码, 原始字节)。非 2xx 的语义由调用方处理。
-async fn request_log(path: &str, timeout_secs: u64) -> Result<(u16, Vec<u8>), AppError> {
+async fn request_log(method: &str, path: &str, timeout_secs: u64) -> Result<(u16, Vec<u8>), AppError> {
     let target = agent_http::active_target().ok_or_else(|| {
         AppError::msg("尚未连接服务端：请先在设置 → 服务端连接中完成配对")
     })?;
     let client = agent_http::build_client(&target, Duration::from_secs(5)).map_err(AppError::msg)?;
     tokio::time::timeout(
         Duration::from_secs(timeout_secs),
-        agent_http::send(&client, "GET", path, None),
+        agent_http::send(&client, method, path, None),
     )
     .await
     .map_err(|_| AppError::msg("请求服务端超时"))?
@@ -76,7 +89,7 @@ async fn request_log(path: &str, timeout_secs: u64) -> Result<(u16, Vec<u8>), Ap
 /// 列出服务端日志文件（tigerAgent.log / tigerAgent-panic.log[.prev]）。
 #[tauri::command]
 pub async fn fetch_server_logs() -> Result<ServerLogList, AppError> {
-    let (status, bytes) = request_log("/v1/logs", READ_TIMEOUT_SECS).await?;
+    let (status, bytes) = request_log("GET", "/v1/logs", READ_TIMEOUT_SECS).await?;
     if !(200..300).contains(&status) {
         let message = server_error_message(&bytes, status);
         api_debug_log(|| format!("Logs ! 拉取服务端日志列表失败: {}", message));
@@ -90,7 +103,7 @@ pub async fn fetch_server_logs() -> Result<ServerLogList, AppError> {
 pub async fn fetch_server_log_text(name: String, tail: u32) -> Result<String, AppError> {
     reject_unsafe_name(&name)?;
     let (status, bytes) =
-        request_log(&format!("/v1/logs/{}?tail={}", name, tail), READ_TIMEOUT_SECS).await?;
+        request_log("GET", &format!("/v1/logs/{}?tail={}", name, tail), READ_TIMEOUT_SECS).await?;
     if !(200..300).contains(&status) {
         let message = server_error_message(&bytes, status);
         api_debug_log(|| format!("Logs ! 读取服务端日志 {} 失败: {}", name, message));
@@ -107,7 +120,7 @@ pub async fn download_server_log(app: tauri::AppHandle, name: String) -> Result<
 
     reject_unsafe_name(&name)?;
     let (status, bytes) =
-        request_log(&format!("/v1/logs/{}?download=1", name), DOWNLOAD_TIMEOUT_SECS).await?;
+        request_log("GET", &format!("/v1/logs/{}?download=1", name), DOWNLOAD_TIMEOUT_SECS).await?;
     if !(200..300).contains(&status) {
         let message = server_error_message(&bytes, status);
         api_debug_log(|| format!("Logs ! 下载服务端日志 {} 失败: {}", name, message));
@@ -140,4 +153,17 @@ pub async fn download_server_log(app: tauri::AppHandle, name: String) -> Result<
         )
     });
     Ok(path.to_string_lossy().to_string())
+}
+
+/// 清空服务端日志：服务端原地截断正在写入的 tigerAgent.log，并删除 panic
+/// 转储、`.prev` 与轮转文件；日志写入不需要重启。
+#[tauri::command]
+pub async fn clear_server_logs() -> Result<ServerLogClearResult, AppError> {
+    let (status, bytes) = request_log("DELETE", "/v1/logs", READ_TIMEOUT_SECS).await?;
+    if !(200..300).contains(&status) {
+        let message = server_error_message(&bytes, status);
+        api_debug_log(|| format!("Logs ! 清空服务端日志失败: {}", message));
+        bail!("{}", message);
+    }
+    serde_json::from_slice(&bytes).map_err(|e| AppError::msg(format!("解析清空结果失败: {}", e)))
 }

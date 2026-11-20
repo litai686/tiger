@@ -1,15 +1,16 @@
-// 服务端日志查看 / 下载
+// 服务端日志查看 / 下载 / 清空
 //
 // 服务端可能运行在另一台机器（TCP + TLS 远程部署），客户端本机没有
 // tigerAgent.log：列表与内容都从服务端 API 取回（GET /v1/logs、
 // GET /v1/logs/{name}，见 docs/server-api.md §1.11），下载由 Rust 端
-// download_server_log 弹保存对话框落盘。
+// download_server_log 弹保存对话框落盘；「清空」走 DELETE /v1/logs
+// （服务端截断正在写入的主日志、删除其它日志文件）。
 //
 // 与客户端自己的 tigerAgent_debug.log 区分：那个是本机 Rust/前端调试日志，
 // 这里看的是服务端进程的 slog 输出与 panic 转储。
 import { t as _t } from "../../i18n.js";
 import { invoke } from "./store.js";
-import { reportError } from "./ui.js";
+import { reportError, showConfirm } from "./ui.js";
 import { getErrorMessage } from "./error.js";
 import { $input } from "./utils.js";
 
@@ -29,6 +30,9 @@ export function initServerLogsUI() {
     refreshServerLogFiles();
   });
   document.getElementById("server-log-download").addEventListener("click", downloadServerLog);
+  document.getElementById("server-log-clear").addEventListener("click", function() {
+    showConfirm(_t("确定清空服务端日志吗？将清空所有日志内容（含 panic 转储与轮转文件），不可恢复。"), clearServerLogs);
+  });
   // 换文件 / 换行数立即重新拉取，避免"看起来切了但内容没变"
   document.getElementById("server-log-file").addEventListener("change", loadServerLog);
   document.getElementById("server-log-tail").addEventListener("change", loadServerLog);
@@ -129,5 +133,19 @@ async function downloadServerLog() {
     }
     setStatus("");
     reportError(e, { prefix: _t("下载服务端日志失败: ") });
+  }
+}
+
+// 清空服务端全部日志（DELETE /v1/logs）：成功后重新拉列表，保持下拉与内容一致。
+async function clearServerLogs() {
+  setStatus(_t("清空中…"));
+  try {
+    var result = await invoke("clear_server_logs");
+    var count = ((result && result.truncated) || []).length + ((result && result.removed) || []).length;
+    await refreshServerLogFiles();
+    setStatus(_t("已清空服务端日志") + " (" + count + ")");
+  } catch (e) {
+    setStatus("");
+    reportError(e, { prefix: _t("清空服务端日志失败: ") });
   }
 }

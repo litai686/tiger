@@ -71,7 +71,7 @@ bash desktop/install-server.sh
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `TIGER_VERSION` | `latest` | 指定版本，如 `0.0.1` / `v0.0.1` |
-| `TIGER_HOST` | `tcp://:18471` | 服务端监听地址（host 留空 = IPv4 + IPv6 双栈） |
+| `TIGER_HOST` | `tcp://:6464` | 服务端监听地址（host 留空 = IPv4 + IPv6 双栈） |
 | `TIGER_INSTALL_DIR` | `~/.local/bin` | 二进制安装目录 |
 | `TIGER_DATA_DIR` | `~/.local/share/tigerAgent/data` | 数据目录（配置、会话） |
 | `TIGER_NO_START` | `0` | `1` 只安装不启动 |

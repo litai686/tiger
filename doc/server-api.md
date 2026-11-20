@@ -500,6 +500,21 @@ POST /v1/fs/validate
 
 **安全边界**：只允许访问服务端用户主目录、服务端工作目录与已配置的工作目录（先 `EvalSymlinks` 再判前缀），越界返回 `403`；不提供读取文件内容的接口。
 
+### 1.11 服务端日志
+
+（与仓库根 `docs/server-api.md` §1.11 同步）
+
+```
+GET /v1/logs                        # 列出日志文件
+GET /v1/logs/{name}?tail=1000       # 读取文本（tail=0 = 整个文件）
+GET /v1/logs/{name}?download=1      # 原样下载（附件）
+DELETE /v1/logs                     # 清空全部日志
+```
+
+桌面端入口：设置 → 服务端日志（`src/views/agent/server_logs.js` + Rust `src-tauri/src/pages/logs.rs`）；远程部署时客户端本机没有 `tigerAgent.log`，只能经这些接口查看 / 下载 / 清空。
+
+`DELETE /v1/logs` 返回 `{ "dir", "truncated", "removed" }`：正在写入的 `tigerAgent.log` 原地截断（服务端进程持有写句柄，删除在 Windows 上会失败），panic 转储、`.prev` 与轮转文件直接删除；服务端不需要重启。`name` 白名单与 `GET /v1/logs/{name}` 相同（`tigerAgent` 开头、`.log` / `.log.prev` 结尾的裸文件名）。
+
 ---
 
 ## 2. 工作区接口

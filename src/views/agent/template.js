@@ -2112,7 +2112,7 @@ export const template = `
           <div class="param-label">${_t("服务端日志")}</div>
           <div class="param-input">
             <button type="button" class="browse-btn" id="settings-open-server-logs">${_t("查看/下载服务端日志")}</button>
-            <div class="param-desc">${_t("服务端日志（tigerAgent.log / tigerAgent-panic.log）在服务端主机上，本机可能没有该文件：通过 HTTP API 按行数查看，也可整文件下载")}</div>
+            <div class="param-desc">${_t("服务端日志（tigerAgent.log / tigerAgent-panic.log）在服务端主机上，本机可能没有该文件：通过 HTTP API 按行数查看、整文件下载，也可直接清空")}</div>
           </div>
         </div>
         <div class="param-row">
@@ -2296,6 +2296,7 @@ export const template = `
         </select>
         <button class="settings-btn settings-btn-secondary" id="server-log-refresh">${_t("刷新")}</button>
         <button class="settings-btn settings-btn-secondary" id="server-log-download">${_t("下载")}</button>
+        <button class="settings-btn settings-btn-secondary" id="server-log-clear" style="color:#ff6b6b;">${_t("清空")}</button>
         <span id="server-log-status" style="font-size:12px;color:var(--c-text-3);"></span>
       </div>
       <div id="server-log-dir" style="font-size:11px;color:var(--c-text-4);word-break:break-all;margin-bottom:6px;"></div>

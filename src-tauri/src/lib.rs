@@ -226,10 +226,11 @@ pub fn run() {
             skills::install_skill_from_zip,
             skills::uninstall_skill,
             skills::list_installed_skills,
-            // logs.rs - 服务端日志查看 / 下载（GET /v1/logs）
+            // logs.rs - 服务端日志查看 / 下载 / 清空（GET|DELETE /v1/logs）
             logs::fetch_server_logs,
             logs::fetch_server_log_text,
             logs::download_server_log,
+            logs::clear_server_logs,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
