@@ -79,7 +79,8 @@
 - **视图结构**：左栏顶部工作目录下拉选择器（Rust `get_workdirs` ∪ `GET /v1/workspaces`，按路径去重，默认选中默认工作目录，即服务端 `work_directories` 的 `is_default`／当前工作目录）+ 下方懒加载文件树（默认全部收起，只显示项目根节点）；右侧 TAB 为 `预览 / 差异`，默认显示源文件内容，差异 TAB 仅在选中文件有 Git 变更时出现（双击变更文件可直接打开差异），差异内可切工作区/暂存。Git 命令面板已移除，项目管理只保留文件浏览与差异查看。目录一次只拉一层（`GET /v1/workspaces/{id}/files`），Git 状态由服务端 `git status --porcelain=v1 -z` 解析，目录颜色由前端按子树最高优先级聚合。
 - **workspace 存活依赖 SSE**：服务端在最后一条 SSE 流断开且无 hold 时会 teardown workspace。项目页每次选中项目都调用 `create_workspace({path, clientId})`（服务端按 path 幂等、Rust 复用已有 SSE 任务），返回的 `workspace_id` 作为后续所有请求的 id；不调用 `switch_workspace`（会改 Agent 页的激活 workspace）。
 - **嵌套仓库**：主目录不是仓库但子目录是仓库时，服务端聚合子仓库状态（`nested_repos`），树与差异照常着色；状态栏显示「子目录 Git 仓库: N 个」。
-- **能力门禁**：进入页面先 `GET /v1/version`；缺 `workspace_files` 整页提示升级，缺 `workspace_git` 隐藏颜色/差异，只保留文件浏览。
+- **能力门禁**：进入页面先 `GET /v1/version`；缺 `workspace_files` 整页提示升级，缺 `workspace_files_write` 隐藏「编辑 / 重命名」入口（仍可浏览/下载），缺 `workspace_git` 隐藏颜色/差异，只保留文件浏览。
+- **重命名 / 编辑**：文件树右键（文件行另有「编辑 / 下载到本地」）或右侧文件头「重命名」进入内联改名（Enter 提交、Esc 取消，目录改名后整棵子树前缀与展开态同步；目标已存在提示冲突）；右侧「编辑」进入 textarea 编辑，Ctrl/Cmd+S 保存，保存携带读取时的 `mtime`/`size`（服务端 409 时提示刷新后重试），CRLF 文件按原换行风格写回；**保存成功后保留编辑态与光标/滚动位置**（只用响应里的新 mtime/size 更新基线，不重拉文件），无改动时保存按钮禁用，「取消」按钮变为「退出编辑」。二进制、被截断（>1 MiB）文件与服务端未返回 `workspace_files_write` 时不可编辑。编辑/重命名期间 SSE 刷新会重绘内容区，编辑器按光标位置恢复焦点。
 - **刷新矩阵**：进入页面/切换项目重载根目录并拉状态；展开目录只拉该层；手动刷新重载根 + 已展开目录；SSE `file` / `run_complete`（同 workspace）标记 stale 并防抖 800ms 后拉状态，已展开目录 ≤10 时自动重载，否则提示「文件已变化，点击刷新」；页面可见时每 15s 轮询 `git/status`（仅 `is_repo && git_installed`，失败退避 30s，隐藏页暂停）。当前选中文件按当前 TAB 重新拉取（预览内容或差异）。
 - **渲染安全**：文件内容、diff、路径全部是服务端不可信文本，只能用 `textContent` / DOM 节点写入，禁止 `innerHTML` 拼接。
 - **接口契约**：见 [`server-api.md`](server-api.md#12-文件与-git-接口项目管理)（§12）。

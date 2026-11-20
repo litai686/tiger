@@ -1,7 +1,11 @@
 // 项目管理视图：左栏下部的懒加载文件树
 import { t as _t } from "../../i18n.js";
 import { aggregateDir, state, statusOf } from "./store.js";
+import * as store from "./store.js";
 import { BADGE_LABEL, badgeOf, basename, parentDir } from "./git.js";
+
+/** 重命名输入框在重绘前的光标位置（重绘后恢复，避免轮询/SSE 刷新丢焦点）。 */
+let pendingRenameFocus = null;
 
 function badgeSpan(badge) {
   const el = document.createElement("span");
@@ -15,6 +19,54 @@ function rowBase(level) {
   row.className = "projects-tree-row";
   row.style.paddingLeft = 6 + level * 14 + "px";
   return row;
+}
+
+function renderRenameInput(row) {
+  const input = document.createElement("input");
+  input.className = "projects-rename-input";
+  input.value = state.rename.value;
+  input.spellcheck = false;
+  input.disabled = !!state.rename.saving;
+  input.title = _t("回车确认，Esc 取消");
+  // 行本身带 toggle-dir/select-file，输入框内的点击不能冒泡。
+  input.addEventListener("click", function (ev) {
+    ev.stopPropagation();
+  });
+  input.addEventListener("dblclick", function (ev) {
+    ev.stopPropagation();
+  });
+  input.addEventListener("input", function () {
+    store.setRenameValue(input.value);
+  });
+  input.addEventListener("keydown", function (ev) {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      store.commitRename();
+    } else if (ev.key === "Escape") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      store.cancelRename();
+    }
+  });
+  row.appendChild(input);
+  if (state.rename.needFocus) {
+    state.rename.needFocus = false;
+    setTimeout(function () {
+      input.focus();
+      input.select();
+    }, 0);
+  } else if (pendingRenameFocus) {
+    const caret = pendingRenameFocus;
+    pendingRenameFocus = null;
+    setTimeout(function () {
+      input.focus();
+      try {
+        input.setSelectionRange(caret.start, caret.end);
+      } catch (_) {}
+    }, 0);
+  }
+  return input;
 }
 
 function arrow(expanded, placeholder) {
@@ -83,13 +135,17 @@ function renderEntries(container, relDir, level) {
   }
 
   for (const entry of entries) {
+    const renaming = !!state.rename.path && state.rename.path === entry.path;
     const row = rowBase(level);
     row.setAttribute("data-path", entry.path);
+    if (!renaming) row.setAttribute("data-kind", entry.is_dir ? "dir" : "file");
+    if (entry.deleted) row.setAttribute("data-deleted", "1");
+    if (entry.external) row.setAttribute("data-external", "1");
     if (entry.is_dir) {
       row.className += " projects-tree-dir";
-      if (!entry.external && !entry.deleted) row.setAttribute("data-action", "toggle-dir");
+      if (!renaming && !entry.external && !entry.deleted) row.setAttribute("data-action", "toggle-dir");
     } else {
-      row.setAttribute("data-action", "select-file");
+      if (!renaming) row.setAttribute("data-action", "select-file");
       if (state.selection.path === entry.path) row.className += " selected";
     }
     if (entry.external) {
@@ -108,14 +164,18 @@ function renderEntries(container, relDir, level) {
     // 只有可折叠的目录显示箭头；文件与不可展开的节点留空白占位，保持名称对齐。
     const togglable = entry.is_dir && !entry.external && !entry.deleted;
     row.appendChild(arrow(expanded, !togglable));
-    const name = document.createElement("span");
-    name.className = "projects-tree-name";
-    name.textContent = entry.name;
-    if (entry.deleted) name.classList.add("projects-git-deleted");
     const entryStatus = entry.is_dir ? null : statusOf(entry.path);
     const badge = entry.is_dir ? aggregateDir(entry.path) : entryStatus ? badgeOf(entryStatus) : null;
-    if (badge) name.classList.add("projects-git-" + badge);
-    row.appendChild(name);
+    if (renaming) {
+      renderRenameInput(row);
+    } else {
+      const name = document.createElement("span");
+      name.className = "projects-tree-name";
+      name.textContent = entry.name;
+      if (entry.deleted) name.classList.add("projects-git-deleted");
+      if (badge) name.classList.add("projects-git-" + badge);
+      row.appendChild(name);
+    }
 
     if (badge) {
       if (entry.is_dir) {
@@ -132,6 +192,14 @@ function renderEntries(container, relDir, level) {
     }
     if (entry.deleted) row.className += " projects-row-deleted";
     container.appendChild(row);
+    if (renaming && state.rename.error) {
+      const errorRow = rowBase(level + 1);
+      const errorText = document.createElement("span");
+      errorText.className = "projects-tree-meta projects-git-deleted";
+      errorText.textContent = state.rename.error;
+      errorRow.appendChild(errorText);
+      container.appendChild(errorRow);
+    }
     if (entry.is_dir && expanded) renderEntries(container, entry.path, level + 1);
   }
   if (dirState && dirState.truncated) {
@@ -146,6 +214,13 @@ function renderEntries(container, relDir, level) {
 
 /** @param {HTMLElement} container */
 export function renderTree(container) {
+  const active = document.activeElement;
+  if (active && active.classList && active.classList.contains("projects-rename-input")) {
+    const input = /** @type {HTMLInputElement} */ (active);
+    pendingRenameFocus = { start: input.selectionStart || 0, end: input.selectionEnd || 0 };
+  } else {
+    pendingRenameFocus = null;
+  }
   container.textContent = "";
   if (!state.activePath) {
     const empty = document.createElement("div");

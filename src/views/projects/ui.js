@@ -246,6 +246,13 @@ async function onClick(event) {
   if (!target) return;
   const action = target.getAttribute("data-action");
   const path = target.getAttribute("data-path") || "";
+  if (
+    state.rename.path &&
+    (action === "select-file" || action === "toggle-dir" || action === "retry-dir") &&
+    path !== state.rename.path
+  ) {
+    store.cancelRename();
+  }
   switch (action) {
     case "select-project": {
       const project = state.projects.find(function (p) {
@@ -264,6 +271,18 @@ async function onClick(event) {
       break;
     case "retry-dir":
       await store.loadDir(path, true);
+      break;
+    case "edit":
+      await editFile(state.selection.path);
+      break;
+    case "save-edit":
+      await store.saveEdit();
+      break;
+    case "cancel-edit":
+      store.cancelEdit();
+      break;
+    case "rename":
+      store.startRename(state.selection.path, false);
       break;
     case "tab":
       await store.setMode(target.getAttribute("data-mode") || "preview");
@@ -315,7 +334,7 @@ function onDblClick(event) {
   if (path && store.statusOf(path)) store.selectFile(path, "diff");
 }
 
-// ===== 右键菜单：文件树文件行 → 下载到本地；空白区一律屏蔽浏览器默认菜单 =====
+// ===== 右键菜单：文件行 → 编辑/下载/重命名；目录行 → 重命名；空白区一律屏蔽浏览器默认菜单 =====
 
 function hideCtxMenu() {
   const old = document.getElementById("projects-ctx-menu");
@@ -324,6 +343,33 @@ function hideCtxMenu() {
 
 function showToast(text) {
   if (/** @type {any} */ (window).showGlobalToast) /** @type {any} */ (window).showGlobalToast(text);
+}
+
+/** 选中并进入编辑；脏草稿未保存时 selectFile 会拒绝切文件，这里同步放弃。 */
+async function editFile(path) {
+  if (!path || !state.wsId) return;
+  if (state.selection.path !== path || !state.file.data) {
+    await store.selectFile(path);
+    if (state.destroyed || state.selection.path !== path) return;
+  }
+  if (!store.canEditSelection()) {
+    showToast(store.editBlockedReason());
+    return;
+  }
+  store.startEdit();
+}
+
+function addCtxItem(menu, label, onPick) {
+  const item = document.createElement("div");
+  item.textContent = _t(label);
+  item.style.cssText = "padding:6px 16px;font-size:12px;cursor:pointer;color:var(--c-text-2);";
+  item.addEventListener("mouseenter", function () { item.style.background = "var(--c-raise-2)"; });
+  item.addEventListener("mouseleave", function () { item.style.background = "transparent"; });
+  item.addEventListener("click", function () {
+    menu.remove();
+    onPick();
+  });
+  menu.appendChild(item);
 }
 
 async function downloadFileToLocal(path) {
@@ -350,9 +396,12 @@ function onContextMenu(event) {
   // 空白区（非文件行）也一律屏蔽 WebView 默认右键菜单
   event.preventDefault();
   hideCtxMenu();
-  const target = /** @type {HTMLElement|null} */ (event.target && event.target.closest ? event.target.closest('[data-action="select-file"]') : null);
-  if (!target) return;
-  const path = target.getAttribute("data-path") || "";
+  const row = /** @type {HTMLElement|null} */ (event.target && event.target.closest ? event.target.closest("[data-kind]") : null);
+  if (!row) return;
+  const path = row.getAttribute("data-path") || "";
+  const kind = row.getAttribute("data-kind") || "file";
+  const deleted = row.hasAttribute("data-deleted");
+  const external = row.hasAttribute("data-external");
   if (!path || !state.wsId) return;
 
   const menu = document.createElement("div");
@@ -362,17 +411,23 @@ function onContextMenu(event) {
   menu.style.left = Math.min(event.clientX, window.innerWidth - 140) + "px";
   menu.style.top = Math.min(event.clientY, window.innerHeight - 60) + "px";
 
-  const item = document.createElement("div");
-  item.textContent = _t("下载到本地");
-  item.style.cssText = "padding:6px 16px;font-size:12px;cursor:pointer;color:var(--c-text-2);";
-  item.addEventListener("mouseenter", function() { item.style.background = "var(--c-raise-2)"; });
-  item.addEventListener("mouseleave", function() { item.style.background = "transparent"; });
-  item.addEventListener("click", function() {
-    menu.remove();
-    downloadFileToLocal(path);
-  });
-  menu.appendChild(item);
+  let items = 0;
+  if (kind === "file" && !deleted) {
+    if (state.caps.write) {
+      addCtxItem(menu, "编辑", function () { editFile(path); });
+      items++;
+    }
+    addCtxItem(menu, "下载到本地", function () { downloadFileToLocal(path); });
+    items++;
+  }
+  if (state.caps.write && !deleted && !external) {
+    addCtxItem(menu, "重命名", function () { store.startRename(path, kind === "dir"); });
+    items++;
+  }
+  if (!items) return;
 
+  // 菜单高度按条目数计算，靠下时向上回退
+  menu.style.top = Math.min(event.clientY, window.innerHeight - (items * 30 + 12)) + "px";
   document.body.appendChild(menu);
   setTimeout(function() {
     document.addEventListener("mousedown", function closeHandler(ev) {
@@ -516,6 +571,7 @@ async function bindSSE() {
 /** @param {HTMLElement} root */
 export function bind(root) {
   boundRoot = root;
+  store.onToast(showToast);
   root.addEventListener("click", onClick);
   root.addEventListener("dblclick", onDblClick);
   root.addEventListener("contextmenu", onContextMenu);

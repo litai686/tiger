@@ -327,6 +327,47 @@ export const template = `
     background: rgba(229, 192, 123, 0.12);
     border-bottom: 1px solid var(--c-border-soft);
   }
+  .projects-notice.error {
+    color: var(--git-deleted);
+    background: rgba(239, 89, 111, 0.12);
+  }
+  .projects-dirty { font-size: 11px; color: var(--git-modified); }
+  .projects-rename-input {
+    flex: 1;
+    min-width: 0;
+    height: 22px;
+    box-sizing: border-box;
+    background: var(--c-panel-2);
+    color: var(--c-text-hi);
+    border: 1px solid var(--c-accent);
+    border-radius: 4px;
+    padding: 0 6px;
+    font-size: 12px;
+    outline: none;
+  }
+  .projects-content-body.editing {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .projects-editor {
+    flex: 1;
+    width: 100%;
+    min-height: 0;
+    box-sizing: border-box;
+    resize: none;
+    border: 0;
+    outline: none;
+    background: var(--c-bg);
+    color: var(--c-text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    tab-size: 4;
+    padding: 8px 12px;
+    white-space: pre;
+    overflow: auto;
+  }
   .projects-spinner {
     display: inline-block;
     width: 10px;

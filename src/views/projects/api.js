@@ -25,6 +25,14 @@ export async function get(path) {
   return p;
 }
 
+export function post(path, body) {
+  return api("POST", path, body);
+}
+
+export function put(path, body) {
+  return api("PUT", path, body);
+}
+
 export function qs(params) {
   const parts = [];
   for (const key of Object.keys(params || {})) {
@@ -59,6 +67,7 @@ export async function probeCapabilities() {
   const set = new Set(list);
   return {
     files: set.has("workspace_files"),
+    write: set.has("workspace_files_write"),
     git: set.has("workspace_git"),
   };
 }

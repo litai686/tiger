@@ -1,8 +1,12 @@
-// 项目管理视图：右侧内容区（默认预览源文件，有变更时可切到差异）
+// 项目管理视图：右侧内容区（默认预览源文件，可编辑保存，有变更时可切到差异）
 import { t as _t, tV } from "../../i18n.js";
-import { state, statusOf } from "./store.js";
+import { state, statusOf, canEditSelection, editBlockedReason } from "./store.js";
+import * as store from "./store.js";
 import { badgeOf, BADGE_LABEL, hasStaged } from "./git.js";
 import { fullAddRows, parseUnifiedDiff, renderDiffPlaceholder, renderDiffRows } from "./diff.js";
+
+/** 重绘前编辑器的光标位置；渲染后恢复，避免 SSE/轮询刷新丢焦点。 */
+let pendingEditorCaret = null;
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -71,7 +75,7 @@ function buildHeader(hasFile) {
   previewTab.setAttribute("data-action", "tab");
   previewTab.setAttribute("data-mode", "preview");
   tabs.appendChild(previewTab);
-  if (entry) {
+  if (entry && !state.editor.active) {
     const diffTab = el("div", "projects-tab" + (showDiff ? " active" : ""), _t("差异"));
     diffTab.setAttribute("data-action", "tab");
     diffTab.setAttribute("data-mode", "diff");
@@ -115,19 +119,107 @@ function buildHeader(hasFile) {
     tools.appendChild(seg);
   }
   if (hasFile) {
-    const refresh = el("button", "projects-btn", _t("刷新"));
-    refresh.setAttribute("data-action", "refresh-file");
-    tools.appendChild(refresh);
-    const copy = el("button", "projects-btn", _t("复制路径"));
-    copy.setAttribute("data-action", "copy-path");
-    tools.appendChild(copy);
+    if (state.editor.active) {
+      const save = el("button", "projects-btn", state.editor.saving ? _t("保存中...") : _t("保存"));
+      save.id = "projects-save-btn";
+      save.setAttribute("data-action", "save-edit");
+      if (state.editor.saving || !state.editor.dirty) save.disabled = true;
+      tools.appendChild(save);
+      const cancel = el("button", "projects-btn", state.editor.dirty ? _t("取消") : _t("退出编辑"));
+      cancel.setAttribute("data-action", "cancel-edit");
+      if (state.editor.saving) cancel.disabled = true;
+      tools.appendChild(cancel);
+      const dirty = el("span", "projects-dirty", state.editor.dirty ? _t("未保存") : "");
+      dirty.id = "projects-dirty-mark";
+      tools.appendChild(dirty);
+    } else {
+      if (state.caps.write) {
+        const editable = canEditSelection();
+        const edit = el("button", "projects-btn", _t("编辑"));
+        edit.setAttribute("data-action", "edit");
+        if (!editable) {
+          edit.disabled = true;
+          edit.title = editBlockedReason();
+        }
+        tools.appendChild(edit);
+        const status = statusOf(state.selection.path);
+        const deleted = !!status && (status.index === "D" || status.worktree === "D");
+        if (!deleted) {
+          const rename = el("button", "projects-btn", _t("重命名"));
+          rename.setAttribute("data-action", "rename");
+          tools.appendChild(rename);
+        }
+      }
+      const refresh = el("button", "projects-btn", _t("刷新"));
+      refresh.setAttribute("data-action", "refresh-file");
+      tools.appendChild(refresh);
+      const copy = el("button", "projects-btn", _t("复制路径"));
+      copy.setAttribute("data-action", "copy-path");
+      tools.appendChild(copy);
+    }
   }
   row.appendChild(tools);
   header.appendChild(row);
   return header;
 }
 
+function syncDirtyMark() {
+  if (!state.root) return;
+  const mark = /** @type {HTMLElement|null} */ (state.root.querySelector("#projects-dirty-mark"));
+  if (mark) mark.textContent = state.editor.dirty ? _t("未保存") : "";
+  const save = /** @type {HTMLButtonElement|null} */ (state.root.querySelector("#projects-save-btn"));
+  if (save) save.disabled = state.editor.saving || !state.editor.dirty;
+  const cancel = /** @type {HTMLElement|null} */ (state.root.querySelector('[data-action="cancel-edit"]'));
+  if (cancel) cancel.textContent = state.editor.dirty ? _t("取消") : _t("退出编辑");
+}
+
+/** 编辑态：草稿在 state.editor.draft，Ctrl/Cmd+S 保存，Esc（无改动时）取消。 */
+function renderEditor(body) {
+  body.classList.add("editing");
+  if (state.editor.error) {
+    body.appendChild(el("div", "projects-notice error", state.editor.error));
+  }
+  const ta = document.createElement("textarea");
+  ta.className = "projects-editor";
+  ta.value = state.editor.draft;
+  ta.spellcheck = false;
+  ta.setAttribute("wrap", "off");
+  ta.addEventListener("input", function () {
+    store.setDraft(ta.value);
+    syncDirtyMark();
+  });
+  ta.addEventListener("scroll", function () {
+    store.setEditorScroll(ta.scrollTop);
+  });
+  ta.addEventListener("keydown", function (ev) {
+    if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && (ev.key === "s" || ev.key === "S")) {
+      ev.preventDefault();
+      store.saveEdit();
+    } else if (ev.key === "Escape" && !state.editor.dirty) {
+      ev.preventDefault();
+      store.cancelEdit();
+    }
+  });
+  body.appendChild(ta);
+  ta.scrollTop = state.editor.scrollTop || 0;
+  if (state.editor.needFocus) {
+    state.editor.needFocus = false;
+    ta.focus();
+  } else if (pendingEditorCaret) {
+    const caret = pendingEditorCaret;
+    pendingEditorCaret = null;
+    ta.focus();
+    try {
+      ta.setSelectionRange(caret.start, caret.end);
+    } catch (_) {}
+  }
+}
+
 function renderPreview(body) {
+  if (state.editor.active) {
+    renderEditor(body);
+    return;
+  }
   const file = state.file;
   if (file.loading) {
     body.appendChild(el("div", "projects-placeholder", _t("加载中...")));
@@ -228,6 +320,12 @@ function renderDiff(body) {
 
 /** @param {HTMLElement} container */
 export function renderContent(container) {
+  pendingEditorCaret = null;
+  const active = document.activeElement;
+  if (active && active.classList && active.classList.contains("projects-editor")) {
+    const ta = /** @type {HTMLTextAreaElement} */ (active);
+    pendingEditorCaret = { start: ta.selectionStart || 0, end: ta.selectionEnd || 0 };
+  }
   container.textContent = "";
   if (!state.activePath) {
     container.appendChild(el("div", "projects-placeholder", _t("还没有加载项目")));

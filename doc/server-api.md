@@ -1746,9 +1746,10 @@ POST /v1/workspaces/{id}/mcp/docker/disable
 | capability | 含义 |
 | --- | --- |
 | `workspace_files` | 目录列表、文件内容与原始下载 |
+| `workspace_files_write` | 重命名文件/目录、写入文件内容 |
 | `workspace_git` | Git 状态与差异 |
 
-老服务端缺少对应项时客户端按能力降级：缺 `workspace_files` 整页不可用并提示升级；缺 `workspace_git` 只隐藏 Git 颜色/差异。
+老服务端缺少对应项时客户端按能力降级：缺 `workspace_files` 整页不可用并提示升级；缺 `workspace_files_write` 只隐藏「编辑 / 重命名」入口；缺 `workspace_git` 只隐藏 Git 颜色/差异。
 
 ### 11.1 列出目录（单层）
 
@@ -1816,6 +1817,64 @@ GET /v1/workspaces/{id}/files/content?path=README.md&max_bytes=1048576
 - `truncated:true` 表示还有剩余字节未读；截断点若落在多字节字符中间，服务端回退到上一个合法 UTF-8 边界。
 - 目录 → `400`；文件不存在 → `404`；`.git/` → `403`。
 - 内容不做日志输出。
+
+### 11.2.2 重命名文件/目录
+
+```
+POST /v1/workspaces/{id}/files/rename
+Content-Type: application/json
+
+{ "path": "src/old.js", "name": "new.js" }
+```
+
+| 参数 | 位置 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | path | 是 | Workspace ID |
+| `path` | body | 是 | 相对路径（文件或目录，不能是 workspace 根） |
+| `name` | body | 是 | 新名称，单个路径段（不能包含 `/`、`\`） |
+
+**响应** `200 OK`：
+
+```json
+{ "path": "src/new.js", "name": "new.js" }
+```
+
+语义：
+
+- 只在原父目录内改名；目录改名自动带上整个子树。
+- `name` 为空 / `.` / `..` / 含路径分隔符或控制字符 → `400`；Windows 上还拒绝 `<>:"|?*` 以及以点/空格结尾的名称。
+- 目标已存在 → `409`（大小写不敏感的同一项仅改大小写时除外）；源不存在 → `404`；workspace 根 → `400`；`.git` 名称或路径逃逸 → `403`。
+- 符号链接改的是链接本身，不跟随到目标；成功后调用方需重新拉目录与 Git 状态。
+
+### 11.2.3 写入文件内容
+
+```
+PUT /v1/workspaces/{id}/files/content
+Content-Type: application/json
+
+{ "path": "src/a.js", "content": "...", "expected_mtime": 1726300000, "expected_size": 8123 }
+```
+
+| 参数 | 位置 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | path | 是 | Workspace ID |
+| `path` | body | 是 | 相对文件路径（必须是已存在的普通文件） |
+| `content` | body | 是 | 新文本内容（UTF-8） |
+| `expected_mtime` | body | 否 | 读取时的 mtime（Unix 秒）；与当前不符 → `409` |
+| `expected_size` | body | 否 | 读取时的文件大小；与当前不符 → `409` |
+
+**响应** `200 OK`：
+
+```json
+{ "path": "src/a.js", "size": 123, "mtime": 1726300001 }
+```
+
+语义：
+
+- 只覆盖已存在的普通文件（不新建、不写目录）：目录 → `400`，文件不存在 → `404`。
+- `expected_mtime` / `expected_size` 是乐观并发护栏：文件在读取后被 Agent 或其他客户端改动时返回 `409`，客户端刷新后重试，避免静默覆盖。
+- 原文件带 UTF-8 BOM 时自动保留 BOM；`content` 含 NUL 字节 → `400`；内容上限 8 MiB。
+- 写入先落到同目录临时文件再 `rename` 覆盖，并发读取不会看到半截内容；文件权限模式沿用原文件，不做换行/格式化转换（CRLF 风格由客户端保持）。
 
 ### 12.2.1 下载文件（原始字节）
 
@@ -1915,9 +1974,10 @@ GET /v1/workspaces/{id}/git/diff?path=src%2Fa.js&staged=0
 | 状态码 | 场景 |
 | --- | --- |
 | `200` | 成功（含 `is_repo:false`、`untracked:true`、`binary:true` 等业务态） |
-| `400` | 路径缺失/格式非法、目标是目录（content）、目录不可读、`max_bytes` 非法、非 Git 仓库（diff） |
+| `400` | 路径/名称缺失或格式非法、目标是目录（content/write）、目录不可读、`max_bytes` 非法、非 Git 仓库（diff）、写入内容过大或含 NUL |
 | `403` | 路径逃逸 workspace、命中 `.git/`、跨盘符/UNC |
 | `404` | workspace 不存在、文件不存在 |
+| `409` | 重命名目标已存在；写入时 `expected_mtime` / `expected_size` 与当前文件不符 |
 | `500` | git 执行失败（无法启动/未安装）、读取文件失败等内部错误 |
 
 ---
