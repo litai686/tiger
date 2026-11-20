@@ -651,7 +651,7 @@ export const S = {
   pendingModelReload: false,
   agentInfoSeq: 0,
   toolsTab: "skill",
-  toolsData: { skill: [], lsp: [], mcp: [] },
+  toolsData: { skill: [], mcp: [] },
   todosCollapsed: false,
   initSeq: 0,
   sseListener: null,

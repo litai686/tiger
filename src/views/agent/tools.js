@@ -1,18 +1,16 @@
-// 工具面板（Skill / LSP / MCP）
+// 工具面板（Skill / MCP）
 import { t as _t } from "../../i18n.js";
 import { S, invoke } from "./store.js";
 import { api } from "./api.js";
-import { ensureFixTargets, isLspFixable, fixTarget, guideFor, runLspFix, runAiInstall, onLspStateEvent, isFixInFlight } from "./lsp_fix.js";
 
 // ===== 工具列表 =====
-// 分别调用 /skills、/mcp/states、/lsps 三个端点，外加工作区详情获取 skill 状态快照
-// 结果按 tab（skill / lsp / mcp）分类缓存到 toolsData，再渲染当前 tab
+// 分别调用 /skills、/mcp/states 两个端点，外加工作区详情获取 skill 状态快照
+// 结果按 tab（skill / mcp）分类缓存到 toolsData，再渲染当前 tab
 export async function loadTools() {
   if (!S.serverInfo) return;
   var wsId = S.serverInfo.workspace_id;
-  await ensureFixTargets();
 
-  // MCP/LSP 共用的 state 字符串 → 中文标签 + 颜色（显示时经 _t 翻译）
+  // MCP 的 state 字符串 → 中文标签 + 颜色（显示时经 _t 翻译）
   var stateMap = {
     connected: { label: _t("已连接"), color: "green" },
     starting:  { label: _t("启动中"), color: "yellow" },
@@ -20,12 +18,11 @@ export async function loadTools() {
     error:     { label: _t("错误"),   color: "red" },
   };
 
-  // 并行请求四个端点（工作区详情用于 skill 状态快照），外加本地磁盘扫描兜底
+  // 并行请求工作区（工作区详情用于 skill 状态快照），外加本地磁盘扫描兜底
   // + tigerAgent.json 中的 MCP 配置（可编辑来源）
   var results = await Promise.allSettled([
     api("GET", "/v1/workspaces/" + wsId + "/skills"),
     api("GET", "/v1/workspaces/" + wsId + "/mcp/states"),
-    api("GET", "/v1/workspaces/" + wsId + "/lsps"),
     api("GET", "/v1/workspaces/" + wsId),
     invoke("list_installed_skills"),
     invoke("list_mcp_servers"),
@@ -33,8 +30,8 @@ export async function loadTools() {
 
   // Skill 状态快照 map: name → {state, error}（state: 0=正常 1=错误）
   var skillStates = {};
-  if (results[3].status === "fulfilled" && results[3].value && Array.isArray(results[3].value.skills)) {
-    results[3].value.skills.forEach(function(s) {
+  if (results[2].status === "fulfilled" && results[2].value && Array.isArray(results[2].value.skills)) {
+    results[2].value.skills.forEach(function(s) {
       if (s && s.name) skillStates[s.name] = s;
     });
   }
@@ -83,10 +80,10 @@ export async function loadTools() {
   // 磁盘扫描兜底合并：server 的 skill 列表是 workspace 创建时的发现快照，
   // 技能管理页安装的全局/项目技能不会触发服务端重新发现，需以磁盘为准补齐，
   // 否则切回 Agent 页 Skill 栏看不到刚安装的技能。
-  if (results[4].status === "fulfilled" && Array.isArray(results[4].value)) {
+  if (results[3].status === "fulfilled" && Array.isArray(results[3].value)) {
     var knownNames = {};
     skillTools.forEach(function (tool) { knownNames[tool.name] = true; });
-    results[4].value.forEach(function (s) {
+    results[3].value.forEach(function (s) {
       if (!s || !s.name || knownNames[s.name]) return;
       knownNames[s.name] = true;
       skillTools.push({
@@ -118,8 +115,8 @@ export async function loadTools() {
 
   var mcpTools = [];
   var configViews = [];
-  if (results[5] && results[5].status === "fulfilled" && Array.isArray(results[5].value)) {
-    configViews = results[5].value;
+  if (results[4] && results[4].status === "fulfilled" && Array.isArray(results[4].value)) {
+    configViews = results[4].value;
   }
   configViews.forEach(function(view) {
     var runtime = runtimeStates[view.name];
@@ -148,65 +145,7 @@ export async function loadTools() {
     });
   });
 
-  // LSP clients（state 为整数：0=未启动 1=启动中 2=已连接 3=错误 4=已停止 5=已禁用）
-  // error_type=not_installed（服务端分类）表示二进制未安装：不作为故障展示，
-  // 直接隐藏——真正启动失败（startup_failed）才保留红点与修复入口。
-  var lspStateMap = {
-    0: { label: _t("未启动"), color: "gray" },
-    1: { label: _t("启动中"), color: "yellow" },
-    2: { label: _t("已连接"), color: "green" },
-    3: { label: _t("错误"), color: "red" },
-    4: { label: _t("已停止"), color: "gray" },
-    5: { label: _t("已禁用"), color: "gray" },
-  };
-  var lspTools = [];
-  if (results[2].status === "fulfilled") {
-    var lspStates = results[2].value;
-    if (lspStates && typeof lspStates === "object" && !Array.isArray(lspStates)) {
-      Object.keys(lspStates).forEach(function(key) {
-        var l = lspStates[key];
-        var lspName = l.name || key;
-        var isErr = l.state === 3;
-        // 状态事件先派发（用于启动失败提示），再决定是否展示：
-        // error_type=not_installed 仅表示未安装，不作为故障展示/计数。
-        if (isErr) onLspStateEvent(lspName, l.state, l.error, l.error_type, l.reason, l.fix, l.guide);
-        if (l.error_type === "not_installed") return;
-        var st = lspStateMap[l.state] || { label: l.state || _t("未知"), color: "gray" };
-        // 修复/安装入口由服务端返回的 fix 决定，不再要求 state==3：
-        // 未安装的托管服务器（state=0 + fix.kind=install_server）也能一键安装。
-        var fixable = isLspFixable(lspName, l.fix);
-        var fixKind = "";
-        // 启动中/已连接视为已在运行：不展示「安装」，也不展示安装指引。
-        // catalog 兜底或用户自定义 command 的旧响应仍可能带 install_server/reason，
-        // 但服务器已经在跑就不需要再装。
-        var running = l.state === 1 || l.state === 2;
-        if (fixable) {
-          fixKind = (l.fix && l.fix.kind) || "";
-          if (!fixKind) {
-            var ft = fixTarget(lspName);
-            fixKind = (ft && ft.fix && ft.fix.kind) || "";
-          }
-          if (running && fixKind === "install_server") {
-            fixable = false;
-            fixKind = "";
-          }
-        }
-        lspTools.push({
-          name: lspName,
-          status: st.label,
-          statusColor: st.color,
-          title: l.error || "",
-          errorText: l.error || "",
-          fixable: fixable,
-          fixKind: fixKind,
-          guide: !fixable && !running && (isErr || l.reason) ? guideFor(lspName, l.guide) : null,
-          aiInstall: isErr,
-        });
-      });
-    }
-  }
-
-  S.toolsData = { skill: skillTools, lsp: lspTools, mcp: mcpTools };
+  S.toolsData = { skill: skillTools, mcp: mcpTools };
   renderToolsList();
 }
 
@@ -249,53 +188,6 @@ export function renderToolsList() {
       hint.title = _t("点击修改");
       item.appendChild(hint);
     }
-    if (tool.fixable) {
-      var fixBtn = document.createElement("button");
-      fixBtn.className = "tool-fix-btn";
-      // data-lsp-name：lsp_fix.js 轮询进度时按名称重查按钮刷新文案（列表重绘后仍可定位）
-      fixBtn.setAttribute("data-lsp-name", tool.name);
-      var fixLabel = tool.fixKind === "install_server" ? _t("安装") : _t("修复");
-      fixBtn.textContent = fixLabel;
-      // 安装/修复进行中列表被重绘时，新按钮必须直接回到进行中态，
-      // 否则看起来可以再点（fixInFlight 会拦住重复 job，但按钮态不能误导）
-      if (isFixInFlight(tool.name)) {
-        fixBtn.disabled = true;
-        fixBtn.textContent = _t("修复中…");
-      }
-      var ft = fixTarget(tool.name);
-      if (ft && ft.command) fixBtn.title = ft.command + (ft.requires ? "（需要 " + ft.requires + "）" : "");
-      fixBtn.addEventListener("click", function(e) {
-        e.stopPropagation();
-        fixBtn.disabled = true;
-        fixBtn.textContent = _t("修复中…");
-        runLspFix(tool.name).then(function() {
-          fixBtn.disabled = false;
-          fixBtn.textContent = fixLabel;
-        });
-      });
-      item.appendChild(fixBtn);
-    } else if (tool.guide) {
-      var guideBtn = document.createElement("button");
-      guideBtn.className = "tool-fix-btn";
-      guideBtn.textContent = _t("指引");
-      if (tool.guide.hint) guideBtn.title = tool.guide.hint;
-      guideBtn.addEventListener("click", function(e) {
-        e.stopPropagation();
-        if (tool.guide && tool.guide.url) window.openUrl(tool.guide.url);
-      });
-      item.appendChild(guideBtn);
-    }
-    if (tool.aiInstall) {
-      var aiBtn = document.createElement("button");
-      aiBtn.className = "tool-fix-btn";
-      aiBtn.textContent = _t("AI 安装");
-      aiBtn.title = _t("把安装任务发给当前会话的 AI 处理");
-      aiBtn.addEventListener("click", function(e) {
-        e.stopPropagation();
-        runAiInstall(tool.name, tool.errorText);
-      });
-      item.appendChild(aiBtn);
-    }
     var statusLabel = document.createElement("span");
     statusLabel.className = "tool-status " + (tool.statusColor || "gray");
     statusLabel.textContent = tool.status;
@@ -304,7 +196,7 @@ export function renderToolsList() {
   });
 }
 
-// 切换工具 tab（Skill / LSP / MCP）并重绘列表；供 tab 点击与外部流程（如保存 MCP 后）调用
+// 切换工具 tab（Skill / MCP）并重绘列表；供 tab 点击与外部流程（如保存 MCP 后）调用
 export function activateToolsTab(tab) {
   S.toolsTab = tab;
   var toolsTabs = document.getElementById("agent-tools-tabs");

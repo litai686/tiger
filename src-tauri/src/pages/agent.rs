@@ -2657,7 +2657,7 @@ fn summarize_sse_event(payload: &serde_json::Value) -> Option<String> {
         // 权限请求 / 结果：Plan/Yolo 下一般直通，出现即值得记。
         "permission_request" => Some(format!("< permission_request tool={} session={}", field("tool_name"), field("session_id"))),
         "permission_notification" => Some(format!("< permission_notification granted={}", field("granted"))),
-        // session 快照（context_tokens/is_busy 每次 token 变化都推）、file/lsp/
+        // session 快照（context_tokens/is_busy 每次 token 变化都推）、file/
         // mcp/skills 等杂项：噪音，跳过。解析失败的原始事件仍记一行以便发现异常。
         "session" => None,
         "" if payload.get("raw").is_some() => Some(format!("< raw {}", api_log_snippet(payload.get("raw").and_then(|v| v.as_str()).unwrap_or(""), 200))),
@@ -2730,11 +2730,11 @@ pub async fn agent_http_request(
     })?;
 
     // 2xx 一律视为成功：201 Created（POST /terminals 等带响应体）、
-    // 202 Accepted（/agent 发送消息无 body；/v1/lsp/fix 等异步 job 接口带
-    // job JSON，前端要靠 job_id 轮询进度）、204 No Content（删除等）。
+    // 202 Accepted（/agent 发送消息无 body；异步 job 接口带 job JSON，
+    // 前端要靠 job_id 轮询进度）、204 No Content（删除等）。
     // 之前只认 200/202/204，201 的成功响应体被当错误抛给前端（终端视图把
-    // 新建会话的 JSON 原样显示在红色提示条里）；202 曾一律丢成 `{}`，LSP
-    // 安装永远报 "missing job_id"。现在除 204 外都解析 body，空 body /
+    // 新建会话的 JSON 原样显示在红色提示条里）；202 曾一律丢成 `{}`，异步
+    // 安装等调用永远报 "missing job_id"。现在除 204 外都解析 body，空 body /
     // 解析失败回落空对象，兼容 fire-and-forget 调用方。
     if (200..300).contains(&status) {
         let result = if status == 204 {

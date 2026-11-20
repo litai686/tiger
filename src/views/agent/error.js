@@ -98,7 +98,7 @@ export function classifyByErrorType(err) {
 
 // 分类关键词（大小写不敏感）。
 // 注意：不再包含裸 "balance" / "credits" / "insufficient" 这种泛词——它们会误命中
-// OpenCode/Go "available balance"、LSP "insufficient memory" 等无关错误。真正的"余额不足"
+// OpenCode/Go "available balance"、工具输出 "insufficient memory" 等无关错误。真正的"余额不足"
 // 由 classifyByErrorType（InsufficientQuotaError 等 ProviderError.type）精确分类，
 // 兜底正则只保留紧贴的词组匹配。
 // 同时不包含裸 "quota"（rpm exhausted 属速率限制而非余额不足，避免误报）。

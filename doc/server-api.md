@@ -21,13 +21,12 @@
 - [3. 会话接口](#3-会话接口)
 - [4. Agent 接口](#4-agent-接口)
 - [5. 配置接口](#5-配置接口)
-- [6. LSP 接口](#6-lsp-接口)
-- [7. 权限接口](#7-权限接口)
-- [8. 文件追踪接口](#8-文件追踪接口)
-- [9. 项目接口](#9-项目接口)
-- [10. Skills 接口](#10-skills-接口)
-- [11. MCP 接口](#11-mcp-接口)
-- [12. 文件与 Git 接口（项目管理）](#12-文件与-git-接口项目管理)
+- [6. 权限接口](#6-权限接口)
+- [7. 文件追踪接口](#7-文件追踪接口)
+- [8. 项目接口](#8-项目接口)
+- [9. Skills 接口](#9-skills-接口)
+- [10. MCP 接口](#10-mcp-接口)
+- [11. 文件与 Git 接口（项目管理）](#11-文件与-git-接口项目管理)
 - [附录 A：数据结构定义](#附录-a数据结构定义)
 - [附录 B：GUI 开发建议](#附录-bgui-开发建议)
 
@@ -93,7 +92,7 @@ Authorization: Bearer <token>
 |-------------|----------|
 | `400 Bad Request` | 请求体解析失败、Agent 未初始化、缺少路径参数、缺少 `client_id` 或 `client_id` 非 UUID 格式、无效的权限操作、未知命令、无效的 client_id；Git 命令参数非法或 `ack` 不匹配 |
 | `403 Forbidden` | 路径不在当前项目内（逃逸 workspace、命中 `.git/`、跨盘符/UNC） |
-| `404 Not Found` | 工作区不存在、文件不存在、LSP 客户端不存在 |
+| `404 Not Found` | 工作区不存在、文件不存在 |
 | `409 Conflict` | 工作区正在关闭中、客户端未挂载（无活跃 SSE 流）、服务器非空闲（有活跃会话）、客户端已被回收；同一 workspace 目录已有写类 Git 命令在执行 |
 | `500 Internal Server Error` | 其他未预期错误 |
 | `503 Service Unavailable` | 服务器正在关闭中 |
@@ -130,7 +129,6 @@ GUI 客户端通过 `GET /v1/workspaces/{id}/events` 订阅 Server-Sent Events�
 
 | `type` 值 | 内层 payload 类型 | 说明 |
 |-----------|-------------------|------|
-| `lsp_event` | `LSPEvent` | LSP 状态/诊断变更 |
 | `mcp_event` | `MCPEvent` | MCP 客户端状态变更 |
 | `permission_request` | `PermissionRequest` | 权限请求（等待用户授权） |
 | `permission_notification` | `PermissionNotification` | 权限处理结果通知 |
@@ -238,35 +236,6 @@ Agent 运行过程中产生的事件，包括错误、响应和摘要通知。
   }
 }
 ```
-
-#### LSPEvent（LSP 事件）
-
-LSP 客户端状态或诊断变更通知。
-
-```json
-{
-  "type": "lsp_event",
-  "payload": {
-    "type": "created",
-    "payload": {
-      "type": "state_changed",
-      "name": "gopls",
-      "state": 2,
-      "error": "",
-      "diagnostic_count": 3
-    }
-  }
-}
-```
-
-`LSPEvent.type` 取值：
-
-| 值 | 说明 |
-|----|------|
-| `state_changed` | LSP 服务器状态变更 |
-| `diagnostics_changed` | 诊断信息变更 |
-
-`LSPEvent.state` 为整数类型（`lsp.ServerState`），取值见 [LSP 接口](#61-列出-lsp-客户端)。
 
 #### MCPEvent（MCP 事件）
 
@@ -1362,280 +1331,9 @@ POST /v1/workspaces/{id}/config/provider-key
 
 ---
 
-## 6. LSP 接口
+## 6. 权限接口
 
-### 6.1 列出 LSP 客户端
-
-```
-GET /v1/workspaces/{id}/lsps
-```
-
-**响应** `200 OK`（`map[string]LSPClientInfo`）：
-
-```json
-{
-  "gopls": {
-    "name": "gopls",
-    "state": 2,
-    "error": "",
-    "diagnostic_count": 3,
-    "connected_at": "2025-07-26T10:00:00Z"
-  }
-}
-```
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `name` | string | LSP 客户端名称 |
-| `state` | int | LSP 服务器状态（整数，见下表） |
-| `error` | string | 错误信息（无错误时为空字符串） |
-| `diagnostic_count` | int | 诊断信息数量 |
-| `connected_at` | string | 连接时间（ISO 8601） |
-
-LSP `state` 取值（`lsp.ServerState`，序列化为整数）：
-
-| 值 | 常量名 | 说明 |
-|----|--------|------|
-| `0` | `StateUnstarted` | 未启动 |
-| `1` | `StateStarting` | 启动中 |
-| `2` | `StateReady` | 已就绪 |
-| `3` | `StateError` | 错误 |
-| `4` | `StateStopped` | 已停止 |
-| `5` | `StateDisabled` | 已禁用 |
-
-`LSPClientInfo` 还可携带托管 LSP 字段（见 6.7）：`reason`（未安装/启动失败等原因）、
-`fix`（建议修复动作）、`guide`（指引）、`runtime`（运行时信息）、`server_version`、
-`managed`（是否由托管目录提供）。未安装的托管 server 也会以 `state: 0`（未启动）合并进
-本列表，便于面板直接触发安装。
-
----
-
-### 6.2 获取 LSP 诊断
-
-```
-GET /v1/workspaces/{id}/lsps/{lsp}/diagnostics
-```
-
-**路径参数**：
-
-| 参数 | 说明 |
-|------|------|
-| `lsp` | LSP 客户端名称（如 `gopls`） |
-
-**响应** `200 OK`：诊断信息对象
-
----
-
-### 6.3 启动 LSP
-
-```
-POST /v1/workspaces/{id}/lsps/start
-```
-
-为指定路径启动 LSP 服务器。
-
-**请求体**（`proto.LSPStartRequest`）：
-
-```json
-{
-  "path": "/path/to/file.go"
-}
-```
-
-**响应**：`200 OK`（无响应体）
-
----
-
-### 6.4 停止所有 LSP
-
-```
-POST /v1/workspaces/{id}/lsps/stop
-```
-
-停止工作区内所有 LSP 服务器。
-
-**响应**：`200 OK`（无响应体）
-
----
-
-### 6.5 列出 LSP 安装目标
-
-```
-GET /v1/lsp/fix-targets
-```
-
-服务端认识的 LSP 及其安装方式（与工作区无关）。`command` 非空 = 服务端可自动安装；
-其余条目只带 `hint` / `url`，表示需要手工安装。安装命令表固定在服务端
-（`internal/lsp/fix.go`），客户端只传服务器名，不能借接口执行任意命令。
-
-**响应** `200 OK`（`LSPFixTarget[]`）：
-
-```json
-[
-  {
-    "name": "gopls",
-    "command": "go install golang.org/x/tools/gopls@latest",
-    "requires": "Go (go)"
-  },
-  {
-    "name": "clangd",
-    "hint": "winget install LLVM.LLVM / brew install llvm / apt install clangd",
-    "url": "https://clangd.llvm.org/installation"
-  }
-]
-```
-
----
-
-### 6.6 修复（安装 + 启动）LSP
-
-```
-POST /v1/workspaces/{id}/lsps/{lsp}/fix
-GET  /v1/workspaces/{id}/lsps/{lsp}/fix
-```
-
-`POST` 在**服务端所在主机**上调度一次安装作业（候选包管理器按顺序取第一个可用的；超时
-10 分钟；串行执行），装完复查二进制在 PATH 中，随后立即启动该服务器（跳过文件类型与
-自动启动白名单判断，并清除上次失败留下的 30s 冷却窗口）。安装动辄数分钟，远超客户端
-HTTP 超时，所以 `POST` **只调度并立即返回**（`running: true`），同一服务器重复 `POST`
-不会重复装包；`GET` 返回作业状态，客户端轮询到 `running: false`。客户端只发这两个请
-求，不执行任何安装命令。
-
-**路径参数**：
-
-| 参数 | 说明 |
-|------|------|
-| `lsp` | LSP 客户端名称（如 `gopls`），需在 6.5 的 `command` 非空列表中 |
-
-**响应** `200 OK`（`LSPFixResult`）：
-
-```json
-{
-  "name": "gopls",
-  "running": true,
-  "state": 0
-}
-```
-
-作业结束后同一结构变为（`output` = 安装输出尾部，最多 3000 字符）：
-
-```json
-{
-  "name": "gopls",
-  "running": false,
-  "state": 2,
-  "output": "go: downloading golang.org/x/tools ..."
-}
-```
-
-`state` 与 6.1 一致（`0` 未启动、`1` 启动中、`2` 已连接、`3` 错误、`4` 已停止、`5` 已
-禁用）。安装失败或启动失败时 `error` 非空，`state` 保持实际状态。
-
-**失败**：`lsp` 不在安装表内 → `500`；工作区不存在 → `404`。安装命令非 0 退出、二进制
-不在 PATH、包管理器缺失都体现在作业的 `error`（不是 HTTP 错误）。
-
----
-
-### 6.7 托管 LSP（安装 / 修复 / 运行时）
-
-服务端内置一份随二进制分发的托管 LSP 目录（`internal/lsp/managed/catalog.json`），
-按 server/版本隔离安装到 `<全局缓存目录>/lsp`（可用 `lsp_install_dir` 覆盖），并以跨
-进程锁写状态。以下接口全部在**服务端主机**上执行；安装只接受目录内固定版本并以参数
-数组执行，日志与下载不写代理凭据。
-
-运行时下载策略由 `options.lsp_managed_runtime`（`ask` 默认 / `auto` / `off`）与
-`options.lsp_runtime_preference`（`system` / `managed`）控制。
-
-#### 6.7.1 目录
-
-```
-GET /v1/lsp/catalog?workspace_id={id}
-```
-
-**响应** `200 OK`：`{"servers": []managed.CatalogEntry}`，每条含 `name`、
-`display_name`、`runtime`、`version`、`license`、`source`、`platforms`、`auto_install`、
-`large`、`experimental`、`active_version`、`available_on_host`、可选 `fix` / `guide`。
-
-`fix` 只在托管目录没有 active 版本**且**系统 PATH 也解析不到 manifest 入口时下发
-（`exec.LookPath` 命中即视为可用，托管安装只是可选并行安装）。系统安装的服务器
-（如 `~/go/bin/gopls`）因此不再被判成 `missing_package`，已连接的客户端旁边不会
-出现「安装」按钮。
-
-#### 6.7.2 环境体检
-
-```
-POST /v1/lsp/doctor
-```
-
-**请求体**（可选）：`{"workspace_id": "..."}`
-
-**响应** `200 OK`（`managed.DoctorReport`）：`runtime`（各运行时兼容性）、`path`、
-`install_dir`（路径/可写/剩余空间）、`proxy`（凭据已脱敏）、`problems[]`（每条带
-`reason` / `message` / 可选 `fix`）。
-
-#### 6.7.3 安装 / 修复 / 卸载
-
-```
-POST /v1/lsp/install
-POST /v1/lsp/fix
-POST /v1/lsp/uninstall
-```
-
-**请求体**分别为 `managed.InstallRequest` / `FixRequest` / `UninstallRequest`
-（均含 `workspace_id`、`name`、`confirm`、可选 `plan_id`；install 另有 `target`
-（`server` 或 `runtime`）、`runtime`、`version`、`install_runtime`；fix 另有 `action`）。
-
-`confirm=false` 时不执行，返回 `200` + `managed.Plan`（含 `plan_id`、`steps`、
-`requires_confirm`、`expires_at`，供客户端预览）；`confirm=true`（或动作无需确认）
-返回 `202 Accepted` + `managed.JobInfo`，客户端轮询 6.7.4。
-
-作业上下文脱离请求：安装/修复/回滚/卸载 job 一律用独立 ctx
-（`context.WithCancel(context.Background())`）在后台运行，202 响应后请求上下文
-（`r.Context()`）取消不会连带中断安装；取消只走 6.7.4 的
-`POST /v1/lsp/jobs/{job_id}/cancel`。
-
-**镜像回退**：npm / pip 首次安装使用用户自身配置（`.npmrc` / `pip.conf` / 环境变量），
-失败且作业未被取消时用公共镜像重试一次（npm `--registry https://registry.npmmirror.com`，
-pip `-i https://pypi.tuna.tsinghua.edu.cn/simple`），重试阶段 `phase=retry`；两次都失败
-返回首次（用户配置环境的）错误，避免镜像域名噪音掩盖真实报错。托管 Node 运行时发行包
-与 `SHASUMS256.txt` 按 `nodejs.org/dist` → `npmmirror.com/mirrors/node` 顺序回退，
-校验和仍按官方值比对。
-
-**失败**：未知 server → `404`；已有同 server 作业在跑 → `409`（响应头 `X-Existing-Job`
-带旧 job id）；`plan_id` 过期 → `409`；运行时策略禁止（`off`）或不支持 → `422`；
-版本非法 → `400`。
-
-#### 6.7.4 作业查询 / 取消
-
-```
-GET  /v1/lsp/jobs?workspace_id={id}
-GET  /v1/lsp/jobs/{job_id}?workspace_id={id}
-POST /v1/lsp/jobs/{job_id}/cancel?workspace_id={id}
-```
-
-**响应**：列表 `{"jobs": []managed.JobInfo}`；单个为 `managed.JobInfo`（`job_id`、
-`status`：`queued`/`running`/`succeeded`/`failed`/`canceled`、`phase`、`percent`、
-`message`、`error`、`log_tail` 等）。取消成功返回 `200`；作业不存在或已结束 → `404`。
-
-作业进度同时通过 SSE `lsp_event` 推送：内层 `type` 为 `install_progress`，终态
-（succeeded/failed/canceled）为 `job_finished`，payload 带 `job`（`managed.JobInfo`）。
-
-#### 6.7.5 按名称启动 / 重启
-
-```
-POST /v1/workspaces/{id}/lsps/{lsp}/start
-POST /v1/workspaces/{id}/lsps/{lsp}/restart
-```
-
-绕过文件类型检测与自动启动门禁（`auto_lsp`、根标记、未安装冷却），直接启动/重启指定
-名称的 server（含托管 server）。未知名称 → `404`。与 6.6 的修复流程互补：6.6 面向
-`fix.go` 安装表内的系统包安装，本组接口面向托管目录。
-
----
-
-## 7. 权限接口
-
-### 7.1 获取跳过权限状态
+### 6.1 获取跳过权限状态
 
 ```
 GET /v1/workspaces/{id}/permissions/skip
@@ -1651,7 +1349,7 @@ GET /v1/workspaces/{id}/permissions/skip
 
 ---
 
-### 7.2 设置跳过权限
+### 6.2 设置跳过权限
 
 ```
 POST /v1/workspaces/{id}/permissions/skip
@@ -1671,7 +1369,7 @@ POST /v1/workspaces/{id}/permissions/skip
 
 ---
 
-### 7.3 授权权限请求
+### 6.3 授权权限请求
 
 ```
 POST /v1/workspaces/{id}/permissions/grant
@@ -1724,9 +1422,9 @@ POST /v1/workspaces/{id}/permissions/grant
 
 ---
 
-## 8. 文件追踪接口
+## 7. 文件追踪接口
 
-### 8.1 列出会话追踪文件
+### 7.1 列出会话追踪文件
 
 ```
 GET /v1/workspaces/{id}/sessions/{sid}/filetracker/files
@@ -1738,7 +1436,7 @@ GET /v1/workspaces/{id}/sessions/{sid}/filetracker/files
 
 ---
 
-### 8.2 记录文件读取
+### 7.2 记录文件读取
 
 ```
 POST /v1/workspaces/{id}/filetracker/read
@@ -1759,7 +1457,7 @@ POST /v1/workspaces/{id}/filetracker/read
 
 ---
 
-### 8.3 获取最后读取时间
+### 7.3 获取最后读取时间
 
 ```
 GET /v1/workspaces/{id}/filetracker/lastread?path={path}&session_id={sid}
@@ -1776,9 +1474,9 @@ GET /v1/workspaces/{id}/filetracker/lastread?path={path}&session_id={sid}
 
 ---
 
-## 9. 项目接口
+## 8. 项目接口
 
-### 9.1 检查项目是否需要初始化
+### 8.1 检查项目是否需要初始化
 
 ```
 GET /v1/workspaces/{id}/project/needs-init
@@ -1794,7 +1492,7 @@ GET /v1/workspaces/{id}/project/needs-init
 
 ---
 
-### 9.2 标记项目已初始化
+### 8.2 标记项目已初始化
 
 ```
 POST /v1/workspaces/{id}/project/init
@@ -1804,7 +1502,7 @@ POST /v1/workspaces/{id}/project/init
 
 ---
 
-### 9.3 获取项目初始化提示
+### 8.3 获取项目初始化提示
 
 ```
 GET /v1/workspaces/{id}/project/init-prompt
@@ -1822,9 +1520,9 @@ GET /v1/workspaces/{id}/project/init-prompt
 
 ---
 
-## 10. Skills 接口
+## 9. Skills 接口
 
-### 10.1 列出可见 Skills
+### 9.1 列出可见 Skills
 
 ```
 GET /v1/workspaces/{id}/skills
@@ -1847,7 +1545,7 @@ GET /v1/workspaces/{id}/skills
 
 ---
 
-### 10.2 读取 Skill 内容
+### 9.2 读取 Skill 内容
 
 ```
 POST /v1/workspaces/{id}/skills/read
@@ -1877,9 +1575,9 @@ POST /v1/workspaces/{id}/skills/read
 
 ---
 
-## 11. MCP 接口
+## 10. MCP 接口
 
-### 11.1 获取 MCP 客户端状态
+### 10.1 获取 MCP 客户端状态
 
 ```
 GET /v1/workspaces/{id}/mcp/states
@@ -1922,7 +1620,7 @@ MCP `state` 取值（`proto.MCPState`，序列化为字符串）：
 
 ---
 
-### 11.2 刷新 MCP 工具
+### 10.2 刷新 MCP 工具
 
 ```
 POST /v1/workspaces/{id}/mcp/refresh-tools
@@ -1940,7 +1638,7 @@ POST /v1/workspaces/{id}/mcp/refresh-tools
 
 ---
 
-### 11.3 刷新 MCP Prompts
+### 10.3 刷新 MCP Prompts
 
 ```
 POST /v1/workspaces/{id}/mcp/refresh-prompts
@@ -1952,7 +1650,7 @@ POST /v1/workspaces/{id}/mcp/refresh-prompts
 
 ---
 
-### 11.4 刷新 MCP Resources
+### 10.4 刷新 MCP Resources
 
 ```
 POST /v1/workspaces/{id}/mcp/refresh-resources
@@ -1964,7 +1662,7 @@ POST /v1/workspaces/{id}/mcp/refresh-resources
 
 ---
 
-### 11.5 读取 MCP 资源
+### 10.5 读取 MCP 资源
 
 ```
 POST /v1/workspaces/{id}/mcp/read-resource
@@ -1983,7 +1681,7 @@ POST /v1/workspaces/{id}/mcp/read-resource
 
 ---
 
-### 11.6 获取 MCP Prompt
+### 10.6 获取 MCP Prompt
 
 ```
 POST /v1/workspaces/{id}/mcp/get-prompt
@@ -2011,7 +1709,7 @@ POST /v1/workspaces/{id}/mcp/get-prompt
 
 ---
 
-### 11.7 启用 Docker MCP
+### 10.7 启用 Docker MCP
 
 ```
 POST /v1/workspaces/{id}/mcp/docker/enable
@@ -2023,7 +1721,7 @@ POST /v1/workspaces/{id}/mcp/docker/enable
 
 ---
 
-### 11.8 禁用 Docker MCP
+### 10.8 禁用 Docker MCP
 
 ```
 POST /v1/workspaces/{id}/mcp/docker/disable
@@ -2035,13 +1733,13 @@ POST /v1/workspaces/{id}/mcp/docker/disable
 
 ---
 
-## 12. 文件与 Git 接口（项目管理）
+## 11. 文件与 Git 接口（项目管理）
 
 > 对应桌面端「项目管理」标签页（`#/projects`）。文件与 Git 数据全部由**服务端主机**读取/执行：桌面端可能连接远程服务端，客户端本地文件系统不可信。
 >
 > 所有路径参数都是 **workspace 相对路径**，使用 `/` 分隔，空串表示 workspace 根。路径中出现 `..` 上跳、绝对路径、盘符/UNC、NUL 或任一段为 `.git`（Windows 上大小写不敏感，`.GIT`、`.git.` 视为同一目录）时返回 `403`；workspace 不存在返回 `404`。
 
-### 12.0 capability
+### 11.0 capability
 
 有本组接口的服务端在 `GET /v1/version` 的 `capabilities` 中返回：
 
@@ -2053,7 +1751,7 @@ POST /v1/workspaces/{id}/mcp/docker/disable
 
 老服务端缺少对应项时客户端按能力降级：缺 `workspace_files` 整页不可用并提示升级；缺 `workspace_git` 只隐藏 Git 颜色/差异；缺 `workspace_git_exec` 时源码管理降级为只读（可看状态/差异，隐藏提交与暂存），项目管理只保留文件浏览与差异。
 
-### 12.1 列出目录（单层）
+### 11.1 列出目录（单层）
 
 ```
 GET /v1/workspaces/{id}/files?path=src%2Fviews&show_hidden=1
@@ -2085,7 +1783,7 @@ GET /v1/workspaces/{id}/files?path=src%2Fviews&show_hidden=1
 - 符号链接：`symlink:true`；目标在 workspace 内且为目录时 `is_dir:true` 可展开；目标在 workspace 外时 `external:true`，客户端禁用展开/预览。`path` 始终是逻辑相对路径，不是解析后的物理路径。
 - 目录不存在/不可读 → `400`。
 
-### 12.2 读取文件内容
+### 11.2 读取文件内容
 
 ```
 GET /v1/workspaces/{id}/files/content?path=README.md&max_bytes=1048576
@@ -2139,7 +1837,7 @@ GET /v1/workspaces/{id}/files/raw?path=assets%2Flogo.png
 - 路径校验与 `files/content` 一致：目录 → `400`；文件不存在 → `404`；`..`/`.git/`/绝对路径/盘符相对路径 → `403`。
 - 文件名取逻辑路径 basename，剔除 `"`、`\` 与控制字符以保证头字段合法。
 
-### 12.3 Git 状态
+### 11.3 Git 状态
 
 ```
 GET /v1/workspaces/{id}/git/status
@@ -2178,7 +1876,7 @@ GET /v1/workspaces/{id}/git/status
 - `ahead` / `behind` 仅在上游存在时计算，失败归 0。
 - workspace 目录在服务端已不存在时 `exists:false`。
 
-### 12.4 Git 差异
+### 11.4 Git 差异
 
 ```
 GET /v1/workspaces/{id}/git/diff?path=src%2Fa.js&staged=0
@@ -2213,7 +1911,7 @@ GET /v1/workspaces/{id}/git/diff?path=src%2Fa.js&staged=0
 - 主目录不是仓库时，服务端向上查找文件所属的子目录仓库并在该仓库执行 diff；文件不属于任何仓库 → `400`。
 - `path` 命中 `.git/` 或逃逸 workspace → `403`；非 Git 仓库 → `400`；git 执行失败 → `500`。
 
-### 12.5 Git 命令目录
+### 11.5 Git 命令目录
 
 ```
 GET /v1/workspaces/{id}/git/commands
@@ -2223,7 +1921,7 @@ GET /v1/workspaces/{id}/git/commands
 
 | 字段 | 说明 |
 | --- | --- |
-| `id` | 稳定契约标识（见 12.8 表），命令只能按 id 执行 |
+| `id` | 稳定契约标识（见 11.8 表），命令只能按 id 执行 |
 | `group` | `read` / `sync` / `change` / `danger` |
 | `risk` | `read` / `write` / `danger` |
 | `confirm` | `none` / `normal` / `strong`（`strong` 要求输入目标名或勾选红色确认） |
@@ -2233,7 +1931,7 @@ GET /v1/workspaces/{id}/git/commands
 | `preview` | 展示用命令模板（`{param}` 占位，不参与执行） |
 | `params[]` | `type` ∈ `text` / `int` / `bool` / `path` / `branch` / `rev`；`required`、`default`、`min`/`max`、`max_len`、`options` |
 
-### 12.6 执行 Git 命令
+### 11.6 执行 Git 命令
 
 ```
 POST /v1/workspaces/{id}/git/exec
@@ -2279,7 +1977,7 @@ Content-Type: application/json
 - 服务端日志只记录 `id / exit_code / duration_ms / timed_out`，不记录 stdout/stderr。
 - 执行环境：`cmd.Dir = workspace`、参数数组（不经 shell）、`GIT_TERMINAL_PROMPT=0`、`GIT_PAGER=cat`、`GIT_LITERAL_PATHSPECS=1`；只读命令额外 `GIT_OPTIONAL_LOCKS=0`。仓库 hooks 照常执行，由超时兜底。
 
-### 12.7 错误码
+### 11.7 错误码
 
 | 状态码 | 场景 |
 | --- | --- |
@@ -2290,7 +1988,7 @@ Content-Type: application/json
 | `409` | 同一 workspace 目录已有写类 Git 命令在执行 |
 | `500` | git 执行失败（无法启动/未安装）、读取文件失败等内部错误 |
 
-### 12.8 内置命令目录（契约表）
+### 11.8 内置命令目录（契约表）
 
 > 新增/删除命令必须同时改本表、`internal/backend/git_commands.go` 与桌面端 i18n。
 
@@ -2335,12 +2033,12 @@ Content-Type: application/json
 
 ---
 
-## 13. 终端与后台作业接口（桌面端「终端」）
+## 12. 终端与后台作业接口（桌面端「终端」）
 
 > capability：`terminal_v1`（终端与后台作业接口）与 `terminal_ssh_v1`（交互 PTY：内置本机 PTY、SSH 目标、输入/尺寸、`terminal_event`）；桌面端两者都要求。`options.terminal_enabled=false` 时所有终端/目标/作业端点返回 `403 [terminal:disabled]`，但 capability 仍返回，便于桌面端区分「版本过低」与「管理员关闭」。
 > 终端会话是**服务端进程内状态**（服务端重启即丢，不写数据库、不进对话历史）。终端只有**交互 PTY** 一种：目标 `transport=local`（内置目标 `local`，无需任何配置与凭据，直接在服务端主机开 shell）或 `transport=ssh`（服务端作为 SSH 客户端连 `terminal-targets.json` 中的目标机，在目标机 PTY 中运行交互 shell）。不是沙箱，且终端**不套用** agent bash 的 deny-list（`curl` / `apt` / `systemctl` 等可用）。
 
-### 13.1 通用约定
+### 12.1 通用约定
 
 - 全部为 workspace 作用域：`/v1/workspaces/{id}/terminals...` 与 `/v1/workspaces/{id}/shell-jobs...`；交互目标列表是全局的 `/v1/terminal-targets`。
 - 鉴权与其它端点一致（Bearer token）。
@@ -2349,7 +2047,7 @@ Content-Type: application/json
 - 错误 message 以 `[terminal:*]` / `[shelljob:*]` 前缀开头。
 - 输出块 `seq` 单调递增；同一 stream 的连续写入会合并。`pty` 的 stdout/stderr 单块 ≤ 16384 字节、`encoding=base64`（PTY 字节流可能不是合法 UTF-8），`system` 块为 `utf8`。
 
-### 13.2 列出终端会话
+### 12.2 列出终端会话
 
 ```
 GET /v1/workspaces/{id}/terminals?kind=pty|ssh|all
@@ -2385,7 +2083,7 @@ GET /v1/workspaces/{id}/terminals?kind=pty|ssh|all
 
 `last_exit_code` 为 `null` 表示远端 shell 尚未退出。
 
-### 13.3 新建终端会话
+### 12.3 新建终端会话
 
 ```
 POST /v1/workspaces/{id}/terminals
@@ -2420,7 +2118,7 @@ POST /v1/workspaces/{id}/terminals
 
 **响应** `201 Created`：`{ "terminal": { …同 13.2 单项… } }`。创建同步完成 PTY 启动（本机）或拨号/认证/PTY（SSH）；失败直接返回 502（SSH）/ 500（本机 PTY），不产生“连接中”会话。
 
-### 13.4 读取输出
+### 12.4 读取输出
 
 ```
 GET /v1/workspaces/{id}/terminals/{tid}/output?after={seq}&limit_bytes={n}
@@ -2456,7 +2154,7 @@ GET /v1/workspaces/{id}/terminals/{tid}/output?after={seq}&limit_bytes={n}
 - `truncated=true`：请求的 `after` 早于缓冲最旧块（`first_seq`），客户端应清屏后从 `first_seq` 重画。
 - `exit_code` 描述远端 shell 的退出码，未退出时为 `null`。
 
-### 13.5 关闭会话
+### 12.5 关闭会话
 
 ```
 DELETE /v1/workspaces/{id}/terminals/{tid}
@@ -2464,7 +2162,7 @@ DELETE /v1/workspaces/{id}/terminals/{tid}
 
 关闭 PTY 后端并移除会话，最多等 5 秒，`204 No Content`；不存在也返回 204（幂等）。
 
-### 13.6 交互目标与输入
+### 12.6 交互目标与输入
 
 #### 目标机列表
 
@@ -2587,7 +2285,7 @@ workspace 事件流（`GET /v1/workspaces/{id}/events`）新增：
 - 输出事件按有损投递；客户端必须按 `seq` 去重、检测缺口并用 `GET .../output?after=` 补齐。
 - 状态事件同样有损，客户端用列表轮询兜底。
 
-### 13.7 后台作业（Agent 已启动的进程）
+### 12.7 后台作业（Agent 已启动的进程）
 
 > 数据源与 agent 的 `job_output` / `job_kill` 是同一份内存对象；作业管理器是进程级全局，接口只返回 `working_dir` 位于该 workspace 内的作业（归属归类，不是安全边界）。
 
@@ -2625,7 +2323,7 @@ DELETE /v1/workspaces/{id}/shell-jobs/{jid}
 
 终止并移除作业，`204 No Content`；不存在也 204（幂等）。
 
-### 13.8 错误码
+### 12.8 错误码
 
 | HTTP | message 前缀 | 触发 |
 | --- | --- | --- |
@@ -2802,54 +2500,6 @@ interface MCPEvent {
   tool_count?: number;
   prompt_count?: number;
   resource_count?: number;
-}
-```
-
-### LSPClientInfo 结构
-
-```typescript
-interface LSPClientInfo {
-  name: string;
-  state: number;                 // 0=unstarted, 1=starting, 2=ready, 3=error, 4=stopped, 5=disabled
-  error?: string;
-  diagnostic_count?: number;
-  connected_at: string;          // ISO 8601 时间
-}
-```
-
-### LSPEvent 结构
-
-```typescript
-interface LSPEvent {
-  type: "state_changed" | "diagnostics_changed";
-  name: string;
-  state: number;                 // 0=unstarted, 1=starting, 2=ready, 3=error, 4=stopped, 5=disabled
-  error?: string;
-  diagnostic_count?: number;
-}
-```
-
-### LSPFixTarget 结构
-
-```typescript
-interface LSPFixTarget {
-  name: string;
-  command?: string;              // 非空 = 服务端可自动安装
-  requires?: string;             // 安装该命令需要的工具链/包管理器
-  hint?: string;                 // 手工安装提示（command 为空时有意义）
-  url?: string;                  // 安装文档链接
-}
-```
-
-### LSPFixResult 结构
-
-```typescript
-interface LSPFixResult {
-  name: string;
-  running: boolean;              // true = 服务端仍在装包/启动，需继续轮询 6.6 的 GET
-  state: number;                 // 与 LSPClientInfo.state 同取值
-  output?: string;               // 安装命令输出尾部（最多 3000 字符）
-  error?: string;                // 安装或启动失败原因
 }
 ```
 
@@ -3056,57 +2706,40 @@ GUI 准备退出或升级：
 | 23 | GET | `/v1/workspaces/{id}/sessions/{sid}/filetracker/files` | 追踪文件 |
 | 24 | POST | `/v1/workspaces/{id}/filetracker/read` | 记录文件读取 |
 | 25 | GET | `/v1/workspaces/{id}/filetracker/lastread` | 最后读取时间 |
-| 26 | GET | `/v1/workspaces/{id}/lsps` | LSP 客户端列表 |
-| 27 | GET | `/v1/workspaces/{id}/lsps/{lsp}/diagnostics` | LSP 诊断 |
-| 28 | POST | `/v1/workspaces/{id}/lsps/start` | 启动 LSP |
-| 29 | POST | `/v1/workspaces/{id}/lsps/stop` | 停止所有 LSP |
-| 30 | GET | `/v1/workspaces/{id}/permissions/skip` | 获取跳过权限状态 |
-| 31 | POST | `/v1/workspaces/{id}/permissions/skip` | 设置跳过权限 |
-| 32 | POST | `/v1/workspaces/{id}/permissions/grant` | 授权权限请求 |
-| 33 | GET | `/v1/workspaces/{id}/agent` | Agent 信息 |
-| 34 | POST | `/v1/workspaces/{id}/agent` | 发送消息给 Agent |
-| 35 | POST | `/v1/workspaces/{id}/agent/init` | 初始化 Agent |
-| 36 | POST | `/v1/workspaces/{id}/agent/update` | 更新 Agent |
-| 37 | GET | `/v1/workspaces/{id}/agent/sessions/{sid}` | Agent 会话信息 |
-| 38 | POST | `/v1/workspaces/{id}/agent/sessions/{sid}/cancel` | 取消会话 |
-| 39 | GET | `/v1/workspaces/{id}/agent/sessions/{sid}/prompts/queued` | 排队状态 |
-| 40 | GET | `/v1/workspaces/{id}/agent/sessions/{sid}/prompts/list` | 排队列表 |
-| 41 | POST | `/v1/workspaces/{id}/agent/sessions/{sid}/prompts/clear` | 清除排队 |
-| 42 | POST | `/v1/workspaces/{id}/agent/sessions/{sid}/summarize` | 摘要会话 |
-| 43 | POST | `/v1/workspaces/{id}/agent/sessions/{sid}/undo` | 撤销上一轮 |
-| 44 | POST | `/v1/workspaces/{id}/agent/sessions/{sid}/shell` | 执行 Shell |
-| 45 | POST | `/v1/workspaces/{id}/config/set` | 设置配置字段 |
-| 46 | POST | `/v1/workspaces/{id}/config/remove` | 移除配置字段 |
-| 47 | POST | `/v1/workspaces/{id}/config/model` | 设置模型 |
-| 48 | POST | `/v1/workspaces/{id}/config/compact` | 设置 Compact 模式 |
-| 49 | POST | `/v1/workspaces/{id}/config/provider-key` | 设置 API Key |
-| 50 | GET | `/v1/workspaces/{id}/project/needs-init` | 检查项目初始化 |
-| 51 | POST | `/v1/workspaces/{id}/project/init` | 标记已初始化 |
-| 52 | GET | `/v1/workspaces/{id}/project/init-prompt` | 初始化提示 |
-| 53 | GET | `/v1/workspaces/{id}/skills` | Skills 列表 |
-| 54 | POST | `/v1/workspaces/{id}/skills/read` | 读取 Skill |
-| 55 | POST | `/v1/workspaces/{id}/mcp/refresh-tools` | 刷新 MCP 工具 |
-| 56 | POST | `/v1/workspaces/{id}/mcp/read-resource` | 读取 MCP 资源 |
-| 57 | POST | `/v1/workspaces/{id}/mcp/get-prompt` | 获取 MCP Prompt |
-| 58 | GET | `/v1/workspaces/{id}/mcp/states` | MCP 状态 |
-| 59 | POST | `/v1/workspaces/{id}/mcp/refresh-prompts` | 刷新 MCP Prompts |
-| 60 | POST | `/v1/workspaces/{id}/mcp/refresh-resources` | 刷新 MCP Resources |
-| 61 | POST | `/v1/workspaces/{id}/mcp/docker/enable` | 启用 Docker MCP |
-| 62 | POST | `/v1/workspaces/{id}/mcp/docker/disable` | 禁用 Docker MCP |
-| 63 | GET | `/v1/lsp/fix-targets` | LSP 安装目标 |
-| 64 | POST | `/v1/workspaces/{id}/lsps/{lsp}/fix` | 调度 LSP 安装 + 启动 |
-| 65 | GET | `/v1/workspaces/{id}/lsps/{lsp}/fix` | LSP 修复作业状态 |
-| 66 | GET | `/v1/workspaces/{id}/git-info` | 工作区 git 信息 |
-| 67 | GET | `/v1/workspaces/{id}/project-memory` | 读取项目记忆 |
-| 68 | POST | `/v1/workspaces/{id}/project-memory` | 覆盖项目记忆 |
-| 69 | GET | `/v1/docs/` | Swagger 文档 |
-| 70 | GET | `/v1/lsp/catalog` | 托管 LSP 目录 |
-| 71 | POST | `/v1/lsp/doctor` | 托管 LSP 环境体检 |
-| 72 | POST | `/v1/lsp/install` | 托管 LSP 安装 |
-| 73 | POST | `/v1/lsp/fix` | 托管 LSP 修复 |
-| 74 | POST | `/v1/lsp/uninstall` | 托管 LSP 卸载 |
-| 75 | GET | `/v1/lsp/jobs` | 托管 LSP 作业列表 |
-| 76 | GET | `/v1/lsp/jobs/{job_id}` | 托管 LSP 作业状态 |
-| 77 | POST | `/v1/lsp/jobs/{job_id}/cancel` | 取消托管 LSP 作业 |
-| 78 | POST | `/v1/workspaces/{id}/lsps/{lsp}/start` | 按名称启动 LSP |
-| 79 | POST | `/v1/workspaces/{id}/lsps/{lsp}/restart` | 按名称重启 LSP |
+| 26 | GET | `/v1/workspaces/{id}/permissions/skip` | 获取跳过权限状态 |
+| 27 | POST | `/v1/workspaces/{id}/permissions/skip` | 设置跳过权限 |
+| 28 | POST | `/v1/workspaces/{id}/permissions/grant` | 授权权限请求 |
+| 29 | GET | `/v1/workspaces/{id}/agent` | Agent 信息 |
+| 30 | POST | `/v1/workspaces/{id}/agent` | 发送消息给 Agent |
+| 31 | POST | `/v1/workspaces/{id}/agent/init` | 初始化 Agent |
+| 32 | POST | `/v1/workspaces/{id}/agent/update` | 更新 Agent |
+| 33 | GET | `/v1/workspaces/{id}/agent/sessions/{sid}` | Agent 会话信息 |
+| 34 | POST | `/v1/workspaces/{id}/agent/sessions/{sid}/cancel` | 取消会话 |
+| 35 | GET | `/v1/workspaces/{id}/agent/sessions/{sid}/prompts/queued` | 排队状态 |
+| 36 | GET | `/v1/workspaces/{id}/agent/sessions/{sid}/prompts/list` | 排队列表 |
+| 37 | POST | `/v1/workspaces/{id}/agent/sessions/{sid}/prompts/clear` | 清除排队 |
+| 38 | POST | `/v1/workspaces/{id}/agent/sessions/{sid}/summarize` | 摘要会话 |
+| 39 | POST | `/v1/workspaces/{id}/agent/sessions/{sid}/undo` | 撤销上一轮 |
+| 40 | POST | `/v1/workspaces/{id}/agent/sessions/{sid}/shell` | 执行 Shell |
+| 41 | POST | `/v1/workspaces/{id}/config/set` | 设置配置字段 |
+| 42 | POST | `/v1/workspaces/{id}/config/remove` | 移除配置字段 |
+| 43 | POST | `/v1/workspaces/{id}/config/model` | 设置模型 |
+| 44 | POST | `/v1/workspaces/{id}/config/compact` | 设置 Compact 模式 |
+| 45 | POST | `/v1/workspaces/{id}/config/provider-key` | 设置 API Key |
+| 46 | GET | `/v1/workspaces/{id}/project/needs-init` | 检查项目初始化 |
+| 47 | POST | `/v1/workspaces/{id}/project/init` | 标记已初始化 |
+| 48 | GET | `/v1/workspaces/{id}/project/init-prompt` | 初始化提示 |
+| 49 | GET | `/v1/workspaces/{id}/skills` | Skills 列表 |
+| 50 | POST | `/v1/workspaces/{id}/skills/read` | 读取 Skill |
+| 51 | POST | `/v1/workspaces/{id}/mcp/refresh-tools` | 刷新 MCP 工具 |
+| 52 | POST | `/v1/workspaces/{id}/mcp/read-resource` | 读取 MCP 资源 |
+| 53 | POST | `/v1/workspaces/{id}/mcp/get-prompt` | 获取 MCP Prompt |
+| 54 | GET | `/v1/workspaces/{id}/mcp/states` | MCP 状态 |
+| 55 | POST | `/v1/workspaces/{id}/mcp/refresh-prompts` | 刷新 MCP Prompts |
+| 56 | POST | `/v1/workspaces/{id}/mcp/refresh-resources` | 刷新 MCP Resources |
+| 57 | POST | `/v1/workspaces/{id}/mcp/docker/enable` | 启用 Docker MCP |
+| 58 | POST | `/v1/workspaces/{id}/mcp/docker/disable` | 禁用 Docker MCP |
+| 59 | GET | `/v1/workspaces/{id}/git-info` | 工作区 git 信息 |
+| 60 | GET | `/v1/workspaces/{id}/project-memory` | 读取项目记忆 |
+| 61 | POST | `/v1/workspaces/{id}/project-memory` | 覆盖项目记忆 |
+| 62 | GET | `/v1/docs/` | Swagger 文档 |

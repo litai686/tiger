@@ -8,7 +8,6 @@ import { renderMessages, renderTodos, scheduleRenderMessages } from "./render.js
 import { loadConversations, refreshMessages, renderConversationList, selectConversation } from "./session.js";
 import { handlePermissionRequest, resetPermissionState } from "./permission.js";
 import { loadTools } from "./tools.js";
-import { onLspStateEvent } from "./lsp_fix.js";
 import { refreshAgentInfo, reloadAgentConfig } from "./model.js";
 import { log } from "./log.js";
 import { onSessionUpdated } from "./compact.js";
@@ -29,7 +28,6 @@ function tickMessageDelta(msgId) {
 }
 // 当前这条增量事件是否应写日志（由外层监听器 tick 一次，内层 handler 只读）
 var curDeltaLogged = true;
-var lastLspEventLogTs = 0;
 
 // ===== run_complete 丢失兜底 =====
 // 正常运行结束时服务端依序推送 agent_finished → run_complete；若 run_complete 在
@@ -135,10 +133,8 @@ function scheduleRunCompleteFallbackCheck(wsId, sessionId, runId) {
   }, RUN_COMPLETE_FALLBACK_DELAY_MS);
 }
 
-// 工具状态事件（lsp/mcp/skills）合并刷新：1s 窗口内最多执行一次 loadTools，
+// 工具状态事件（mcp/skills）合并刷新：1s 窗口内最多执行一次 loadTools，
 // 窗口结束时有新事件则补执行一次（尾随），连续事件流下既不超频也不漏掉最后一次。
-// 诊断事件是编辑文件期间的噪音大户（每次保存一次），而工具面板不显示诊断计数，
-// diagnostics_changed 在 case 分支里直接忽略，只有 state_changed 才需要刷新。
 var TOOLS_REFRESH_THROTTLE_MS = 1000;
 var toolsRefreshLast = 0;
 var toolsRefreshPending = false;
@@ -188,10 +184,6 @@ function onSSEEventReceived(event) {
   if (isDelta) {
     curDeltaLogged = tickMessageDelta(((rawData0.payload || {}).payload || {}).id || "");
     skipLog = !curDeltaLogged;
-  } else if (evType0 === "lsp_event") {
-    // LSP 诊断事件常成串爆发（编辑文件期间每秒多条），同样节流：5 秒最多 1 条
-    skipLog = Date.now() - lastLspEventLogTs < 5000;
-    if (!skipLog) lastLspEventLogTs = Date.now();
   }
   if (!skipLog) {
     log.debug("SSE", "event: " + evType0 + " ws: " + eventWsId + " activeWs: " + S.activeWsId + " currentConv: " + S.currentConvId);
@@ -691,14 +683,8 @@ function onFileSSEEvent() {
   // 文件变更，可忽略
 }
 
-function onToolStatusSSEEvent(ev) {
-  // 工具状态变更，节流合并刷新工具列表（1s 窗口）；
-  // lsp 诊断计数变化（每次编辑/保存触发）对工具面板无意义，直接忽略
-  if (ev.eventType === "lsp_event") {
-    var d = ev.actualData || {};
-    if (d.type === "diagnostics_changed") return;
-    if (d.type === "state_changed") onLspStateEvent(d.name, d.state, d.error, d.error_type, d.reason, d.fix, d.guide);
-  }
+function onToolStatusSSEEvent() {
+  // 工具状态变更，节流合并刷新工具列表（1s 窗口）
   scheduleLoadTools();
 }
 
@@ -718,7 +704,6 @@ var sseEventHandlers = new Map([
   ["file", onFileSSEEvent],
   ["skills_event", onToolStatusSSEEvent],
   ["mcp_event", onToolStatusSSEEvent],
-  ["lsp_event", onToolStatusSSEEvent],
 ]);
 
 // 处理消息 SSE 事件
@@ -777,7 +762,7 @@ export function cancelDiscardFallback() {
 
 // ===== 本轮运行统计（续跑进度判定） =====
 // 副作用工具：会真实修改工作区/执行命令的工具。todos 不算（进度由 incomplete 数体现）
-var SIDE_EFFECT_TOOLS = ["edit", "write", "multiedit", "bash", "lsp_replace_symbol", "lsp_rename", "download", "agent"];
+var SIDE_EFFECT_TOOLS = ["edit", "write", "multiedit", "bash", "download", "agent"];
 
 // 统计消息中的工具调用（tool_call / tool_result part）
 function collectRunStats(msgData) {

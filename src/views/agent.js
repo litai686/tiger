@@ -252,14 +252,14 @@ async function _doInit(seq, silent) {
   if (seq !== S.initSeq) return;
 
   // ===== Phase F: UI 收尾 =====
-  // 工具 tab 切换（Skill / LSP / MCP）
+  // 工具 tab 切换（Skill / MCP）
   var toolsTabs = document.getElementById("agent-tools-tabs");
   if (toolsTabs) {
     toolsTabs.addEventListener("click", function(e) {
       var target = /** @type {HTMLElement} */ (e.target);
       var tab = target.closest ? target.closest(".tools-tab") : null;
       if (!tab) return;
-      var mode = /** @type {"skill" | "lsp" | "mcp"} */ (tab.getAttribute("data-tab"));
+      var mode = /** @type {"skill" | "mcp"} */ (tab.getAttribute("data-tab"));
       if (!mode || mode === S.toolsTab) return;
       activateToolsTab(mode);
     });

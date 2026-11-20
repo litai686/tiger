@@ -179,7 +179,7 @@ export const template = `
   .conv-action-btn:hover { background: var(--c-overlay-strong); color: #fff; }
   .conv-action-btn.delete:hover { background: #3d1a1a; color: #ff6b6b; }
 
-  /* ② tools-block: Skills/MCP/LSP (固定高度, 内部滚动) */
+  /* ② tools-block: Skills/MCP (固定高度, 内部滚动) */
   .tools-section {
     border-top: 1px solid var(--c-border);
     flex-shrink: 0;
@@ -225,7 +225,7 @@ export const template = `
   .tools-add-btn.show { display: inline-block; }
   .tools-add-btn:hover { color: var(--c-text); border-color: var(--c-accent); }
 
-  /* 工具 tab 切换: Skill / LSP / MCP */
+  /* 工具 tab 切换: Skill / MCP */
   .tools-tabs {
     display: flex;
     border-bottom: 1px solid var(--c-raise-2);
@@ -292,19 +292,6 @@ export const template = `
   /* 已配置 MCP 条目的「修改」提示：悬停显现 */
   .tool-edit-hint { opacity: 0; font-size: 10px; color: var(--c-text-4); flex-shrink: 0; transition: opacity 0.15s; }
   .tool-item:hover .tool-edit-hint { opacity: 1; }
-  /* LSP 启动失败时的一键修复按钮 */
-  .tool-fix-btn {
-    font-size: 10px;
-    padding: 1px 6px;
-    border: 1px solid var(--c-border);
-    border-radius: 3px;
-    background: var(--c-raise);
-    color: var(--c-text-2);
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-  .tool-fix-btn:hover { color: var(--c-text); border-color: var(--c-text-4); }
-  .tool-fix-btn:disabled { opacity: 0.6; cursor: default; }
 
   /* ③ 底部: 设置 (不滚动) */
   .sidebar-footer {
@@ -1929,7 +1916,7 @@ export const template = `
         </div>
       </div>
 
-      <!-- ② tools-block: Skills/MCP/LSP (固定高度, 内部滚动, tab 切换) -->
+      <!-- ② tools-block: Skills/MCP (固定高度, 内部滚动, tab 切换) -->
       <div class="tools-section" id="agent-tools-section">
         <div class="tools-header">
           <span>${_t("工具")}</span>
@@ -1940,7 +1927,6 @@ export const template = `
         </div>
         <div class="tools-tabs" id="agent-tools-tabs">
           <span class="tools-tab active" data-tab="skill">Skill</span>
-          <span class="tools-tab" data-tab="lsp">LSP</span>
           <span class="tools-tab" data-tab="mcp">MCP</span>
         </div>
         <div class="tools-list" id="agent-tools-list">
