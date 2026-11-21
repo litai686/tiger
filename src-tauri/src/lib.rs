@@ -212,6 +212,8 @@ pub fn run() {
             agent::create_workspace,
             agent::switch_workspace,
             agent::download_workspace_file,
+            agent::upload_workspace_files,
+            agent::stop_workspace_session,
             agent::agent_debug_log,
             agent::set_debug_logging,
             agent::open_debug_log_dir,

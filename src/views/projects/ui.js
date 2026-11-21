@@ -1,5 +1,5 @@
 // 项目管理视图：事件绑定、布局、刷新调度、状态栏与 SSE 联动
-import { t as _t } from "../../i18n.js";
+import { t as _t, tV } from "../../i18n.js";
 import { copyText } from "../shared/clipboard.js";
 import { state } from "./store.js";
 import * as store from "./store.js";
@@ -54,6 +54,12 @@ export function render() {
     renderProjectsList(menu);
     menu.classList.toggle("show", state.projectsMenuOpen);
   }
+  const newBtn = /** @type {HTMLElement|null} */ (state.root.querySelector("#projects-new-btn"));
+  if (newBtn) {
+    newBtn.title = _t("新建 / 上传");
+    // 老服务端没有 workspace_files_create：隐藏入口（否则点了只会报错）
+    newBtn.style.display = state.caps.create ? "" : "none";
+  }
   const tree = /** @type {HTMLElement|null} */ (state.root.querySelector("#projects-tree"));
   if (tree) renderTree(tree);
   const content = /** @type {HTMLElement|null} */ (state.root.querySelector("#projects-content"));
@@ -66,6 +72,55 @@ export function render() {
   }
   renderBanner(view);
   renderStatusBar();
+  syncUploadProgressUI();
+}
+
+// ===== 上传进度条（预览按钮那一栏；事件驱动，不触发整页 render） =====
+/** 把字节数格式化成紧凑的 B / KB / MB / GB 文本。 */
+function formatBytes(n) {
+  const value = Number(n) || 0;
+  if (value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit++;
+  }
+  return (unit === 0 || size >= 100 ? Math.round(size) : size.toFixed(1)) + " " + units[unit];
+}
+
+function uploadNode(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+/** 按 store 的上传快照填充预览栏的 #projects-upload-progress（无上传时隐藏）。 */
+export function syncUploadProgressUI() {
+  const box = document.getElementById("projects-upload-progress");
+  if (!box) return;
+  const up = store.uploadState();
+  if (!up.active) {
+    box.style.display = "none";
+    box.textContent = "";
+    return;
+  }
+  box.style.display = "";
+  const pct = up.total > 0 ? Math.min(100, Math.floor((up.received / up.total) * 100)) : 0;
+  const name = uploadNode("span", "projects-upload-name", up.name || "");
+  name.title = up.name || "";
+  const label = up.index > 0
+    ? tV("上传中 {i}/{n} · {p}%", { i: up.index, n: up.count || up.index, p: pct })
+    : _t("上传中...");
+  const text = uploadNode("span", "projects-upload-text", label);
+  const bar = uploadNode("span", "projects-upload-bar");
+  const fill = uploadNode("i");
+  fill.style.width = pct + "%";
+  bar.appendChild(fill);
+  const bytes = uploadNode("span", "projects-upload-bytes", formatBytes(up.received) + " / " + formatBytes(up.total));
+  box.replaceChildren(name, text, bar, bytes);
 }
 
 function placeholder(container, text, action) {
@@ -113,6 +168,9 @@ function renderBanner(view) {
   let level = "warn";
   if (state.statusStatus === 404 && state.activePath) {
     message = _t("工作区失效，请重新加载项目");
+    level = "error";
+  } else if (state.deletedRoot) {
+    message = _t("项目根目录已删除");
     level = "error";
   } else if (state.git && state.git.exists === false) {
     message = _t("服务端上该目录不存在或已失去访问权限");
@@ -284,6 +342,24 @@ async function onClick(event) {
     case "rename":
       store.startRename(state.selection.path, false);
       break;
+    case "delete-file":
+      if (state.selection.path) confirmDelete(state.selection.path, false);
+      break;
+    case "new-menu": {
+      const rect = target.getBoundingClientRect();
+      openEntryMenu("", { clientX: rect.left, clientY: rect.bottom });
+      break;
+    }
+    case "delete-project": {
+      const project = state.projects.find(function (p) {
+        return p.path === path;
+      });
+      if (!project) break;
+      state.projectsMenuOpen = false;
+      store.notify();
+      confirmDeleteProject(project);
+      break;
+    }
     case "tab":
       await store.setMode(target.getAttribute("data-mode") || "preview");
       break;
@@ -392,24 +468,72 @@ async function downloadFileToLocal(path) {
   }
 }
 
-function onContextMenu(event) {
-  // 空白区（非文件行）也一律屏蔽 WebView 默认右键菜单
-  event.preventDefault();
-  hideCtxMenu();
-  const row = /** @type {HTMLElement|null} */ (event.target && event.target.closest ? event.target.closest("[data-kind]") : null);
-  if (!row) return;
-  const path = row.getAttribute("data-path") || "";
-  const kind = row.getAttribute("data-kind") || "file";
-  const deleted = row.hasAttribute("data-deleted");
-  const external = row.hasAttribute("data-external");
-  if (!path || !state.wsId) return;
-
+function newCtxMenu(event) {
   const menu = document.createElement("div");
   menu.id = "projects-ctx-menu";
   menu.style.cssText = "position:fixed;background:var(--c-raise);border:1px solid var(--c-border);border-radius:8px;padding:4px 0;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,0.4);min-width:120px;";
   // 靠近窗口右/下边缘时回退，避免菜单溢出屏幕
   menu.style.left = Math.min(event.clientX, window.innerWidth - 140) + "px";
   menu.style.top = Math.min(event.clientY, window.innerHeight - 60) + "px";
+  return menu;
+}
+
+function showCtxMenu(menu, event, items) {
+  // 菜单高度按条目数计算，靠下时向上回退
+  menu.style.top = Math.min(event.clientY, window.innerHeight - (items * 30 + 12)) + "px";
+  document.body.appendChild(menu);
+  setTimeout(function () {
+    document.addEventListener("mousedown", function closeHandler(ev) {
+      if (!menu.contains(/** @type {Node} */ (ev.target))) {
+        menu.remove();
+        document.removeEventListener("mousedown", closeHandler);
+      }
+    });
+  }, 0);
+}
+
+function onContextMenu(event) {
+  // 空白区（非文件行）也一律屏蔽 WebView 默认右键菜单
+  event.preventDefault();
+  hideCtxMenu();
+  if (!state.wsId) return;
+  const target = /** @type {Element|null} */ (event.target);
+  if (!target || !target.closest) return;
+
+  // 项目列表行：删除项目根目录（物理删除，并同步移除 Agent 工作目录列表）
+  const projectRow = /** @type {HTMLElement|null} */ (target.closest("[data-project-root]"));
+  if (projectRow) {
+    const projectPath = projectRow.getAttribute("data-path") || "";
+    if (!state.caps.remove || !projectPath) return;
+    const project = state.projects.find(function (p) {
+      return p.path === projectPath;
+    });
+    if (!project || !store.canDeleteProject(project)) return;
+    const menu = newCtxMenu(event);
+    addCtxItem(menu, "删除项目根目录", function () {
+      state.projectsMenuOpen = false;
+      store.notify();
+      confirmDeleteProject(project);
+    });
+    showCtxMenu(menu, event, 1);
+    return;
+  }
+
+  const row = /** @type {HTMLElement|null} */ (target.closest("[data-kind]"));
+  if (!row) {
+    // 根节点行与树空白区：在项目根目录新建/上传
+    if (target.closest("[data-root-dir]") || target.closest("#projects-tree")) {
+      openEntryMenu("", event);
+    }
+    return;
+  }
+  const path = row.getAttribute("data-path") || "";
+  const kind = row.getAttribute("data-kind") || "file";
+  const deleted = row.hasAttribute("data-deleted");
+  const external = row.hasAttribute("data-external");
+  if (!path) return;
+
+  const menu = newCtxMenu(event);
 
   let items = 0;
   if (kind === "file" && !deleted) {
@@ -420,23 +544,231 @@ function onContextMenu(event) {
     addCtxItem(menu, "下载到本地", function () { downloadFileToLocal(path); });
     items++;
   }
+  if (state.caps.create && kind === "dir" && !deleted && !external) {
+    addCtxItem(menu, "新建文件", function () { promptCreate(path, false); });
+    items++;
+    addCtxItem(menu, "新建文件夹", function () { promptCreate(path, true); });
+    items++;
+    addCtxItem(menu, "上传文件", function () { store.uploadFiles(path); });
+    items++;
+  }
   if (state.caps.write && !deleted && !external) {
     addCtxItem(menu, "重命名", function () { store.startRename(path, kind === "dir"); });
     items++;
   }
+  // 目录删除由服务端递归处理；external 行删的是链接本身，不动目标。
+  if (state.caps.remove && !deleted) {
+    addCtxItem(menu, "删除", function () { confirmDelete(path, kind === "dir"); });
+    items++;
+  }
   if (!items) return;
 
-  // 菜单高度按条目数计算，靠下时向上回退
-  menu.style.top = Math.min(event.clientY, window.innerHeight - (items * 30 + 12)) + "px";
-  document.body.appendChild(menu);
-  setTimeout(function() {
-    document.addEventListener("mousedown", function closeHandler(ev) {
-      if (!menu.contains(/** @type {Node} */ (ev.target))) {
-        menu.remove();
-        document.removeEventListener("mousedown", closeHandler);
-      }
-    });
-  }, 0);
+  showCtxMenu(menu, event, items);
+}
+
+// ===== 文件树：新建文件/文件夹、上传（新建走 files/create，上传走 Rust 原生多选 + files/upload） =====
+
+/**
+ * 在 parentDir（"" = 项目根）打开「新建文件 / 新建文件夹 / 上传文件」菜单。
+ * @param {string} parentDir
+ * @param {{clientX:number, clientY:number}} event
+ */
+function openEntryMenu(parentDir, event) {
+  if (!state.caps.create || !state.wsId) return;
+  hideCtxMenu();
+  const menu = newCtxMenu(event);
+  addCtxItem(menu, "新建文件", function () { promptCreate(parentDir, false); });
+  addCtxItem(menu, "新建文件夹", function () { promptCreate(parentDir, true); });
+  addCtxItem(menu, "上传文件", function () { store.uploadFiles(parentDir); });
+  showCtxMenu(menu, event, 3);
+}
+
+/**
+ * 新建文件/文件夹：先弹名称输入框，成功后文件自动选中。
+ * @param {string} parentDir
+ * @param {boolean} isDir
+ */
+function promptCreate(parentDir, isDir) {
+  openPrompt(
+    isDir ? _t("新建文件夹") : _t("新建文件"),
+    isDir ? _t("文件夹名称") : _t("文件名（含扩展名）"),
+    function (name) {
+      store.createEntry(parentDir, name, isDir).then(function (path) {
+        if (path && !isDir) store.selectFile(path);
+      });
+    }
+  );
+}
+
+/**
+ * 输入名称的视图内弹窗：Enter 确认、Esc / 点遮罩取消，空名称时确定按钮禁用。
+ * @param {string} title
+ * @param {string} placeholder
+ * @param {(name: string) => void} onOk
+ */
+function openPrompt(title, placeholder, onOk) {
+  if (!state.root) return;
+  const host = /** @type {HTMLElement|null} */ (state.root.querySelector("#projects-view"));
+  if (!host) return;
+  if (closeOverlay) closeOverlay();
+
+  const overlay = document.createElement("div");
+  overlay.className = "projects-overlay";
+  const modal = document.createElement("div");
+  modal.className = "projects-modal";
+  const titleEl = document.createElement("div");
+  titleEl.className = "projects-modal-title";
+  titleEl.textContent = title;
+  const input = document.createElement("input");
+  input.className = "projects-prompt-input";
+  input.spellcheck = false;
+  input.placeholder = placeholder;
+  const actions = document.createElement("div");
+  actions.className = "projects-modal-actions";
+  const cancel = document.createElement("button");
+  cancel.className = "projects-btn";
+  cancel.textContent = _t("取消");
+  const ok = document.createElement("button");
+  ok.className = "projects-btn projects-btn-primary";
+  ok.textContent = _t("确定");
+  ok.disabled = true;
+  actions.appendChild(cancel);
+  actions.appendChild(ok);
+  modal.appendChild(titleEl);
+  modal.appendChild(input);
+  modal.appendChild(actions);
+  overlay.appendChild(modal);
+
+  function submit() {
+    const name = input.value.trim();
+    if (!name) return;
+    close();
+    onOk(name);
+  }
+  function close() {
+    document.removeEventListener("keydown", onKey);
+    overlay.remove();
+    if (closeOverlay === close) closeOverlay = null;
+  }
+  function onKey(ev) {
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      close();
+    } else if (ev.key === "Enter") {
+      ev.preventDefault();
+      submit();
+    }
+  }
+  closeOverlay = close;
+  input.addEventListener("input", function () {
+    ok.disabled = !input.value.trim();
+  });
+  cancel.addEventListener("click", close);
+  ok.addEventListener("click", submit);
+  overlay.addEventListener("mousedown", function (ev) {
+    if (ev.target === overlay) close();
+  });
+  document.addEventListener("keydown", onKey);
+  host.appendChild(overlay);
+  input.focus();
+}
+
+// ===== 删除确认弹窗（Tauri WebView 中原生 confirm() 不可用，视图内自建遮罩） =====
+
+/** @type {null|(() => void)} */
+let closeOverlay = null;
+
+/**
+ * 打开视图内确认遮罩；Enter 确认、Esc / 点遮罩取消。
+ * @param {string} message
+ * @param {() => void} onOk
+ */
+function openConfirm(message, onOk) {
+  if (!state.root) return;
+  const host = /** @type {HTMLElement|null} */ (state.root.querySelector("#projects-view"));
+  if (!host) return;
+  if (closeOverlay) closeOverlay();
+
+  const overlay = document.createElement("div");
+  overlay.className = "projects-overlay";
+  const modal = document.createElement("div");
+  modal.className = "projects-modal";
+  const title = document.createElement("div");
+  title.className = "projects-modal-title";
+  title.textContent = _t("确认删除");
+  const text = document.createElement("div");
+  text.className = "projects-confirm-text";
+  text.textContent = message;
+  const actions = document.createElement("div");
+  actions.className = "projects-modal-actions";
+  const cancel = document.createElement("button");
+  cancel.className = "projects-btn";
+  cancel.textContent = _t("取消");
+  const ok = document.createElement("button");
+  ok.className = "projects-btn projects-btn-danger";
+  ok.textContent = _t("删除");
+  actions.appendChild(cancel);
+  actions.appendChild(ok);
+  modal.appendChild(title);
+  modal.appendChild(text);
+  modal.appendChild(actions);
+  overlay.appendChild(modal);
+
+  function close() {
+    document.removeEventListener("keydown", onKey);
+    overlay.remove();
+    if (closeOverlay === close) closeOverlay = null;
+  }
+  function onKey(ev) {
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      close();
+    } else if (ev.key === "Enter") {
+      ev.preventDefault();
+      close();
+      onOk();
+    }
+  }
+  closeOverlay = close;
+  cancel.addEventListener("click", close);
+  ok.addEventListener("click", function () {
+    close();
+    onOk();
+  });
+  overlay.addEventListener("mousedown", function (ev) {
+    if (ev.target === overlay) close();
+  });
+  document.addEventListener("keydown", onKey);
+  host.appendChild(overlay);
+  cancel.focus();
+}
+
+/**
+ * 删除文件/目录（目录由服务端递归删除整棵子树）。
+ * @param {string} target
+ * @param {boolean} isDir
+ */
+function confirmDelete(target, isDir) {
+  const message = isDir
+    ? tV("确定删除目录「{path}」及其中的全部文件？此操作不可恢复。", { path: target })
+    : tV("确定删除文件「{path}」？此操作不可恢复。", { path: target });
+  openConfirm(message, function () {
+    store.deleteEntry(target);
+  });
+}
+
+/**
+ * 删除项目根目录：物理删除整个目录，并从 Agent 工作目录列表移除。
+ * @param {any} project
+ */
+function confirmDeleteProject(project) {
+  const message = tV(
+    "确定删除项目根目录「{path}」及其中的全部内容，并从 Agent 工作目录列表移除？磁盘上的所有文件都会被删除，此操作不可恢复。",
+    { path: project.path }
+  );
+  openConfirm(message, function () {
+    store.deleteProjectRoot(project);
+  });
 }
 
 // ===== 下载进度事件（Rust download_workspace_file 流式读取时按百分比发射） =====
@@ -572,6 +904,7 @@ async function bindSSE() {
 export function bind(root) {
   boundRoot = root;
   store.onToast(showToast);
+  store.onUploadChange(syncUploadProgressUI);
   root.addEventListener("click", onClick);
   root.addEventListener("dblclick", onDblClick);
   root.addEventListener("contextmenu", onContextMenu);
@@ -596,6 +929,10 @@ export function unbind() {
   }
   // 清理 body 级右键菜单浮层：视图卸载后残留的 fixed 菜单会挡住新视图交互
   hideCtxMenu();
+  // 上传进度条刷新随视图卸载注销；上传本身与事件监听继续（切页不丢进度）
+  store.onUploadChange(null);
+  // 删除确认遮罩随视图一起关闭，避免 keydown 监听泄漏
+  if (closeOverlay) closeOverlay();
   document.removeEventListener("visibilitychange", onVisibilityChange);
   if (pollTimer) clearTimeout(pollTimer);
   pollTimer = null;

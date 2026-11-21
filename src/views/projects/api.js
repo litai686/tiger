@@ -68,6 +68,8 @@ export async function probeCapabilities() {
   return {
     files: set.has("workspace_files"),
     write: set.has("workspace_files_write"),
+    remove: set.has("workspace_files_delete"),
+    create: set.has("workspace_files_create"),
     git: set.has("workspace_git"),
   };
 }

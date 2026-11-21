@@ -1621,36 +1621,6 @@ export const template = `
   }
   .add-model-overlay.show { display: flex; }
 
-  /* 添加工作目录：浏览服务端目录树（工作目录在服务端主机，客户端原生选择框只看得到本机路径） */
-  .workdir-browser-list {
-    height: 240px;
-    overflow-y: auto;
-    padding: 4px;
-    border: 1px solid var(--c-border);
-    border-radius: 6px;
-    background: var(--c-bg);
-  }
-  .workdir-browser-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 5px 8px;
-    border-radius: 4px;
-    font-size: 13px;
-    color: var(--c-text);
-    cursor: pointer;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .workdir-browser-item:hover { background: var(--c-overlay-strong); }
-  .workdir-browser-item.parent { color: var(--c-text-2); }
-  .workdir-browser-empty {
-    padding: 8px;
-    font-size: 12px;
-    color: var(--c-text-4);
-  }
-
   /* 服务端日志弹窗：等宽正文，保留原始换行并可滚动（10MB 级日志也不撑破布局） */
   .server-log-content {
     margin: 0;
@@ -2291,26 +2261,21 @@ export const template = `
   </div>
 </div>
 
-<!-- 添加工作目录：浏览服务端目录（工作目录在服务端主机，客户端原生目录选择框只能列出本机路径） -->
-<div class="add-model-overlay" id="agent-workdir-browser-overlay">
-  <div class="settings-modal" style="width:560px;max-width:94vw;">
+<!-- 添加工作目录：只填名称，确定后由服务端在用户主目录下创建同名文件夹（客户端本机管不到服务端目录） -->
+<div class="add-model-overlay" id="agent-workdir-create-overlay">
+  <div class="settings-modal" style="width:440px;max-width:94vw;">
     <div class="settings-header">
       <span class="settings-title">${_t("添加工作目录")}</span>
-      <button class="settings-close" id="workdir-browser-close">✕</button>
+      <button class="settings-close" id="workdir-create-close">✕</button>
     </div>
     <div class="settings-body">
       <div class="param-row" style="flex-direction:column;gap:8px;">
-        <div class="param-desc">${_t("工作目录在服务端主机上，这里浏览的是服务端目录（客户端可能不在同一台机器）。")}</div>
-        <div style="display:flex;gap:6px;">
-          <input type="text" class="settings-input" id="workdir-browser-path" style="flex:1;" placeholder="${_t("服务端目录路径（可手动输入）")}">
-          <button class="settings-btn settings-btn-secondary" id="workdir-browser-home">${_t("主目录")}</button>
-          <button class="settings-btn settings-btn-secondary" id="workdir-browser-go">${_t("转到")}</button>
-        </div>
-        <div class="workdir-browser-list" id="workdir-browser-list"></div>
-        <div id="workdir-browser-msg" style="font-size:12px;min-height:18px;line-height:18px;"></div>
+        <div class="param-desc">${_t("填写工作目录名称，确定后会在服务端用户主目录下自动创建同名文件夹。")}</div>
+        <input type="text" class="settings-input" id="workdir-create-name" placeholder="${_t("例如：my-project")}">
+        <div id="workdir-create-msg" style="font-size:12px;min-height:18px;line-height:18px;"></div>
         <div style="display:flex;gap:8px;justify-content:flex-end;">
-          <button class="settings-btn settings-btn-secondary" id="workdir-browser-cancel">${_t("取消")}</button>
-          <button class="settings-btn settings-btn-primary" id="workdir-browser-confirm">${_t("使用此目录")}</button>
+          <button class="settings-btn settings-btn-secondary" id="workdir-create-cancel">${_t("取消")}</button>
+          <button class="settings-btn settings-btn-primary" id="workdir-create-confirm">${_t("确定")}</button>
         </div>
       </div>
     </div>

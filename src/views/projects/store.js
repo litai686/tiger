@@ -12,7 +12,7 @@ import { normalizePath, wsIdByPath } from "../shared/paths.js";
 export const state = {
   /** @type {HTMLElement|null} */
   root: null,
-  caps: { files: false, write: false, git: false },
+  caps: { files: false, write: false, remove: false, create: false, git: false },
   /** @type {Project[]} */
   projects: [],
   projectsLoading: false,
@@ -41,6 +41,11 @@ export const state = {
   editor: { active: false, path: "", draft: "", dirty: false, saving: false, error: "", scrollTop: 0, needFocus: false },
   /** 文件树内联重命名：value 由输入框实时写回，Enter 提交、Esc 取消。 */
   rename: { path: "", isDir: false, value: "", saving: false, error: "", needFocus: false },
+  /** 删除请求进行中：确认弹窗点多次也只发一次请求。 */
+  removeBusy: false,
+  /** 项目根目录已被删除：banner 提示，直到重新选择/重新加载项目。 */
+  deletedRoot: false,
+  /** 上传进行中：避免重复打开原生选择框/并发上传。 */
   pageError: "",
   seq: 0,
   destroyed: false,
@@ -74,11 +79,76 @@ export function notify() {
   if (!state.destroyed) renderFn();
 }
 
+// ===== 上传进度（模块级，跨页面切换保留） =====
+// 上传由 Rust 命令在后台执行，进度经 workspace-upload-progress 事件回传。
+// tracker 放在模块级而不是 state：切换页面会 reset()，但上传仍在继续，
+// 回到本页时要能按它恢复进度显示。
+const uploadProgress = {
+  active: false,
+  workspaceId: "",
+  dir: "",
+  name: "",
+  index: 0,
+  count: 0,
+  received: 0,
+  total: 0,
+  error: "",
+};
+
+/** 当前上传进度快照（ui.js 渲染进度条用）。 */
+export function uploadState() {
+  return uploadProgress;
+}
+
+let uploadChangeFn = null;
+
+/** ui.js 注册轻量进度刷新入口（只更新进度条，不触发整页 render）。 */
+export function onUploadChange(fn) {
+  uploadChangeFn = fn;
+}
+
+function notifyUpload() {
+  if (uploadChangeFn) uploadChangeFn();
+}
+
+// 上传序号：旧的上传命令收尾时不能用 finally 清掉新一次上传的 tracker。
+let uploadSeq = 0;
+
+let uploadListenerBound = false;
+
+/**
+ * 监听器只注册一次并常驻：切到别的页面后事件仍要更新 tracker，
+ * 这样再回到项目管理时进度是连续的（unbind 不会注销它）。
+ */
+function bindUploadProgressListener() {
+  if (uploadListenerBound || !window.__agent_listen) return;
+  uploadListenerBound = true;
+  window.__agent_listen("workspace-upload-progress", function (event) {
+    const payload = event && event.payload;
+    if (!payload) return;
+    if (payload.state === "uploading") {
+      uploadProgress.active = true;
+      uploadProgress.workspaceId = String(payload.workspace_id || "");
+      uploadProgress.dir = String(payload.dir || "");
+      uploadProgress.name = String(payload.name || "");
+      uploadProgress.index = Number(payload.index) || 0;
+      uploadProgress.count = Number(payload.count) || 0;
+      uploadProgress.received = Number(payload.received) || 0;
+      uploadProgress.total = Number(payload.total) || 0;
+      uploadProgress.error = "";
+    } else {
+      uploadProgress.active = false;
+      uploadProgress.error = payload.state === "error" ? String(payload.message || "") : "";
+    }
+    notifyUpload();
+  }).catch(function () {});
+}
+
 export function init(root) {
   state.root = root;
   state.destroyed = false;
   state.pageError = "";
-  state.caps = { files: false, write: false, git: false };
+  state.caps = { files: false, write: false, remove: false, create: false, git: false };
   state.projects = [];
   state.projectsLoading = false;
   state.projectsError = "";
@@ -88,6 +158,7 @@ export function init(root) {
   state.statusStatus = 0;
   state.staleTree = false;
   state.clientId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + "-" + Math.random().toString(16).slice(2);
+  bindUploadProgressListener();
 }
 
 export function reset() {
@@ -111,6 +182,8 @@ export function reset() {
   state.download = { path: "", received: 0, total: 0, active: false };
   state.editor = blankEditor();
   state.rename = blankRename();
+  state.removeBusy = false;
+  state.deletedRoot = false;
   for (const timer of state.timers) clearTimeout(timer);
   state.timers = [];
   if (state.unlisten) {
@@ -157,6 +230,10 @@ export async function loadProjects() {
     for (const w of workspaces || []) {
       const path = String(w.path || "");
       if (!path) continue;
+      // 目录已在服务端被删除、但工作区仍存活（最后一条 SSE 流断开前不会销毁）：
+      // 并进列表只会得到一个打不开的项目（删完项目根目录后切页重现）。
+      // 老服务端没有 exists 字段时为 undefined，按存在处理。
+      if (w.exists === false) continue;
       const key = normalizePath(path);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -215,6 +292,7 @@ export async function selectProject(project) {
   state.download = { path: "", received: 0, total: 0, active: false };
   state.editor = blankEditor();
   state.rename = blankRename();
+  state.deletedRoot = false;
   state.projectsMenuOpen = false;
   project.loadState = "loading";
   project.error = "";
@@ -671,4 +749,274 @@ async function refreshAfterRename() {
   // 旧路径的目录缓存全部作废；已展开目录按新前缀重新加载。
   state.dirs.clear();
   await refreshAll({ status: true, tree: true, file: !state.editor.active });
+}
+
+// ===== 删除（文件/目录递归删除；项目根目录删除后同步 Agent 工作目录列表） =====
+
+/** path 是否落在 target 之下（target 为 "" 即项目根，包含一切）。 */
+function coversPath(path, target) {
+  if (!path) return false;
+  if (!target) return true;
+  return path === target || path.indexOf(target + "/") === 0;
+}
+
+/** 工作目录条目数（「服务端工作区」不计）：用于「最后一个工作目录不可删」判定。 */
+export function workdirCount() {
+  return state.projects.filter(function (p) {
+    return p.source === "workdir";
+  }).length;
+}
+
+/**
+ * 该项目是否可以删除根目录：服务端支持删除，且删除后至少还剩一个工作目录。
+ * 服务端工作区不占用工作目录名额，不受最后一项限制。
+ * @param {Project} project
+ */
+export function canDeleteProject(project) {
+  if (!state.caps.remove || !project || !project.path) return false;
+  if (project.source === "workdir" && workdirCount() <= 1) return false;
+  return true;
+}
+
+/**
+ * 删除一个文件或目录。目录由服务端一次性递归删除整棵子树，
+ * 成功后清理本地缓存并重新拉取。
+ * @param {string} target
+ */
+export async function deleteEntry(target) {
+  if (!state.wsId || !target) return;
+  if (!state.caps.remove) {
+    toast(_t("服务端版本过低，请升级服务端后使用删除"));
+    return;
+  }
+  if (state.removeBusy) return;
+  if (state.editor.active && state.editor.dirty && coversPath(state.editor.path, target)) {
+    toast(_t("当前文件有未保存的修改，请先保存或取消"));
+    return;
+  }
+  state.removeBusy = true;
+  notify();
+  try {
+    const res = await api.post("/v1/workspaces/" + state.wsId + "/files/delete", { path: target });
+    if (state.destroyed) return;
+    state.removeBusy = false;
+    const removed = res && typeof res.path === "string" ? res.path : target;
+    applyDelete(removed, false);
+    notify();
+    toast(tV("已删除 {path}", { path: removed }));
+    await refreshAfterDelete();
+  } catch (e) {
+    if (state.destroyed) return;
+    state.removeBusy = false;
+    notify();
+    toast(tV("删除失败: {err}", { err: api.errorMessage(e) }));
+  }
+}
+
+/**
+ * 物理删除项目根目录（整个目录及其中的全部文件），成功后把该路径从
+ * Agent 工作目录列表移除（Rust remove_workdir 同步到服务端 settings）。
+ * 当前选中的项目也可以删除；删除后自动切到列表里的下一个项目。
+ * @param {Project} project
+ */
+export async function deleteProjectRoot(project) {
+  if (!project || !project.path) return;
+  if (!state.caps.remove) {
+    toast(_t("服务端版本过低，请升级服务端后使用删除"));
+    return;
+  }
+  if (!canDeleteProject(project)) {
+    toast(_t("仅剩最后一个工作目录，不能删除"));
+    return;
+  }
+  if (state.removeBusy) return;
+  const isActive = project.path === state.activePath;
+  if (isActive && state.editor.active && state.editor.dirty) {
+    toast(_t("当前文件有未保存的修改，请先保存或取消"));
+    return;
+  }
+  state.removeBusy = true;
+  notify();
+  try {
+    // 优先复用服务端列表里已知的 workspace id：非当前项目若已有活 workspace，
+    // 直接用它删除，避免 create_workspace 为一次删除新开 SSE 会话。
+    let wsId = project.wsId || "";
+    let createdSession = false;
+    if (!wsId) {
+      // 列表里没有活 workspace 时才建：create_workspace 按 path 幂等，
+      // Rust 侧对已有活 SSE 任务直接复用。
+      const info = await api.invokeCmd("create_workspace", { path: project.path, clientId: state.clientId });
+      if (state.destroyed) return;
+      wsId = info && info.workspace_id;
+      if (!wsId) throw new Error(_t("无法打开项目"));
+      createdSession = true;
+    }
+    await api.post("/v1/workspaces/" + wsId + "/files/delete", { path: "" });
+    if (state.destroyed) return;
+    // 文件已删除，列表同步失败不掩盖删除结果。
+    try {
+      await api.invokeCmd("remove_workdir", { path: project.path });
+    } catch (_) {}
+    // 为删除临时建立的会话没有后续用途，删除成功后立即停掉：否则这条 SSE 流
+    // 会一直挂在已删目录上直到与服务端整体断开（服务端 workspace 随之释放）。
+    if (createdSession && wsId !== state.wsId) {
+      try {
+        await api.invokeCmd("stop_workspace_session", { workspaceId: wsId });
+      } catch (_) {}
+    }
+    if (state.destroyed) return;
+    state.removeBusy = false;
+    state.projects = state.projects.filter(function (p) {
+      return p.path !== project.path;
+    });
+    if (isActive) {
+      state.activePath = "";
+      state.wsId = "";
+      applyDelete("", true);
+      state.deletedRoot = false;
+      const next = state.projects.find(function (p) {
+        return p.isDefault;
+      }) || state.projects[0];
+      if (next) {
+        await selectProject(next);
+      } else {
+        notify();
+      }
+    } else {
+      notify();
+    }
+    toast(tV("已删除 {path}", { path: project.path }));
+  } catch (e) {
+    if (state.destroyed) return;
+    state.removeBusy = false;
+    notify();
+    toast(tV("删除失败: {err}", { err: api.errorMessage(e) }));
+  }
+}
+
+/** 删除成功后同步本地状态：缓存、展开项、选中项与编辑器都随之失效。 */
+function applyDelete(removed, isRoot) {
+  state.rename = blankRename();
+  state.dirs.clear();
+  const expanded = new Set();
+  for (const dir of state.expanded) {
+    if (!coversPath(dir, removed)) expanded.add(dir);
+  }
+  state.expanded = isRoot ? new Set() : expanded;
+  if (coversPath(state.selection.path, removed)) {
+    state.selection = { path: "", mode: "preview", staged: false };
+  }
+  if (coversPath(state.editor.path, removed)) state.editor = blankEditor();
+  if (coversPath(state.file.path, removed)) state.file = { path: "", loading: false, error: "", data: null };
+  if (coversPath(state.diff.path, removed)) state.diff = { path: "", staged: false, loading: false, error: "", data: null };
+  if (isRoot) {
+    state.deletedRoot = true;
+    state.git = null;
+    state.statusError = "";
+    state.statusStatus = 0;
+    state.lastStatusAt = 0;
+  }
+}
+
+async function refreshAfterDelete() {
+  await refreshAll({ status: true, tree: true, file: !!state.selection.path });
+}
+
+// ===== 新建文件/文件夹与上传 =====
+
+/**
+ * 在 parentDir（"" = 项目根）下新建空文件或目录；成功后刷新该层并返回新路径。
+ * @param {string} parentDir
+ * @param {string} name
+ * @param {boolean} isDir
+ * @returns {Promise<string>}
+ */
+export async function createEntry(parentDir, name, isDir) {
+  if (!state.wsId || !name) return "";
+  if (!state.caps.create) {
+    toast(_t("服务端版本过低，请升级服务端后使用新建/上传"));
+    return "";
+  }
+  try {
+    const res = await api.post("/v1/workspaces/" + state.wsId + "/files/create", {
+      path: parentDir || "",
+      name,
+      is_dir: !!isDir,
+    });
+    if (state.destroyed) return "";
+    const path = (res && res.path) || "";
+    if (parentDir) state.expanded.add(parentDir);
+    await loadDir(parentDir || "", true);
+    if (state.caps.git) await loadStatus();
+    notify();
+    toast(tV("已创建 {path}", { path }));
+    return path;
+  } catch (e) {
+    if (!state.destroyed) toast(tV("创建失败: {err}", { err: api.errorMessage(e) }));
+    return "";
+  }
+}
+
+/**
+ * 打开本机文件选择框（Rust 原生多选），把文件上传到 dir（"" = 项目根）。
+ * 进度由 Rust 的 workspace-upload-progress 事件驱动，上传本身在 Rust 侧继续，
+ * 切换页面只会离开画布，不中断上传（回到本页按 tracker 恢复进度）。
+ * 服务端同名文件返回 409；取消选择不算失败。
+ * @param {string} dir
+ */
+export async function uploadFiles(dir) {
+  if (!state.wsId) return [];
+  if (!state.caps.create) {
+    toast(_t("服务端版本过低，请升级服务端后使用新建/上传"));
+    return [];
+  }
+  if (uploadProgress.active) return [];
+  const workspaceId = state.wsId;
+  const seq = ++uploadSeq;
+  // 先占位：文件对话框打开期间就显示进度，取消/失败由 finally 清理。
+  uploadProgress.active = true;
+  uploadProgress.workspaceId = workspaceId;
+  uploadProgress.dir = dir || "";
+  uploadProgress.name = "";
+  uploadProgress.index = 0;
+  uploadProgress.count = 0;
+  uploadProgress.received = 0;
+  uploadProgress.total = 0;
+  uploadProgress.error = "";
+  notifyUpload();
+  try {
+    const uploaded = await api.invokeCmd("upload_workspace_files", { workspaceId, dir: dir || "" });
+    if (state.destroyed) return [];
+    const list = Array.isArray(uploaded) ? uploaded : [];
+    if (state.wsId === workspaceId) {
+      if (dir) state.expanded.add(dir);
+      await loadDir(dir || "", true);
+      if (state.caps.git) await loadStatus();
+      notify();
+    }
+    if (list.length) toast(tV("已上传 {n} 个文件", { n: list.length }));
+    return list;
+  } catch (e) {
+    if (state.destroyed) return [];
+    const message = api.errorMessage(e);
+    if (message.indexOf("取消") !== -1) return [];
+    // Rust 侧逐文件上传、失败即停：此前成功的文件已写入服务端，刷新目录
+    // 让它们可见，避免树与磁盘不一致。
+    try {
+      if (state.wsId === workspaceId) {
+        await loadDir(dir || "", true);
+        if (state.caps.git) await loadStatus();
+      }
+    } catch (_) {}
+    notify();
+    toast(tV("上传失败: {err}", { err: message }));
+    return [];
+  } finally {
+    // 事件可能已把 active 置 false（done）；这里兜底清理取消/异常路径。
+    // 用序号避开“旧上传收尾时清掉新上传”的竞态。
+    if (uploadSeq === seq) {
+      uploadProgress.active = false;
+      notifyUpload();
+    }
+  }
 }

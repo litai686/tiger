@@ -162,6 +162,23 @@ export const template = `
   .projects-project-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
   .projects-project-name { color: var(--c-text-hi); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .projects-project-star { color: var(--git-modified); font-size: 10px; }
+  .projects-project-del {
+    margin-left: auto;
+    flex-shrink: 0;
+    font-size: 11px;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 4px;
+    color: var(--c-text-3);
+    cursor: pointer;
+    opacity: 0.35;
+  }
+  .projects-project:hover .projects-project-del, .projects-project.active .projects-project-del { opacity: 1; }
+  .projects-project-del:hover { color: var(--git-deleted); background: var(--git-deleted-bg); }
+  .projects-project:hover .projects-project-del.disabled,
+  .projects-project.active .projects-project-del.disabled,
+  .projects-project-del.disabled { opacity: 0.2; cursor: not-allowed; }
+  .projects-project-del.disabled:hover { color: var(--c-text-3); background: transparent; }
   .projects-project-path {
     font-size: 10px;
     color: var(--c-text-3);
@@ -272,6 +289,37 @@ export const template = `
     gap: 8px;
     padding: 0 12px 6px;
   }
+  .projects-upload {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    max-width: 360px;
+    font-size: 11px;
+    color: var(--c-text-2);
+    white-space: nowrap;
+  }
+  .projects-upload-name {
+    max-width: 110px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--c-text-hi);
+  }
+  .projects-upload-bar {
+    flex-shrink: 0;
+    width: 90px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--c-overlay-strong);
+    overflow: hidden;
+  }
+  .projects-upload-bar > i {
+    display: block;
+    height: 100%;
+    background: var(--c-accent);
+    transition: width 0.15s linear;
+  }
+  .projects-upload-bytes { color: var(--c-text-3); }
   .projects-tabs { display: flex; gap: 2px; background: var(--c-overlay); border-radius: 8px; padding: 3px; }
   .projects-tab {
     padding: 4px 14px;
@@ -296,6 +344,58 @@ export const template = `
   }
   .projects-btn:hover { color: var(--c-text-hi); border-color: var(--c-accent); }
   .projects-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .projects-btn-danger { background: var(--git-deleted); border-color: var(--git-deleted); color: #fff; }
+  .projects-btn-danger:hover { color: #fff; filter: brightness(1.12); }
+
+  .projects-overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 10000;
+  }
+  .projects-modal {
+    width: 360px;
+    max-width: calc(100vw - 48px);
+    box-sizing: border-box;
+    background: var(--c-panel);
+    border: 1px solid var(--c-border);
+    border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+    padding: 14px 16px;
+    color: var(--c-text);
+  }
+  .projects-modal-title { font-size: 13px; font-weight: 600; color: var(--c-text-hi); margin-bottom: 8px; }
+  .projects-confirm-text { font-size: 12px; line-height: 1.6; color: var(--c-text-2); word-break: break-all; }
+  .projects-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+  .projects-btn-primary { background: var(--c-accent); border-color: var(--c-accent); color: #fff; }
+  .projects-btn-primary:hover { color: #fff; filter: brightness(1.1); }
+  .projects-prompt-input {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--c-panel-2);
+    border: 1px solid var(--c-border);
+    border-radius: 6px;
+    color: var(--c-text-hi);
+    padding: 6px 8px;
+    font-size: 12px;
+    outline: none;
+  }
+  .projects-prompt-input:focus { border-color: var(--c-accent); }
+  .projects-section-add {
+    margin-left: auto;
+    background: transparent;
+    border: 0;
+    color: var(--c-text-2);
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 4px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .projects-section-add:hover { color: var(--c-text-hi); background: var(--c-panel-2); }
   .projects-seg { display: flex; border: 1px solid var(--c-border); border-radius: 6px; overflow: hidden; }
   .projects-seg-item {
     padding: 3px 10px;
@@ -469,7 +569,10 @@ export const template = `
         </div>
       </div>
       <div class="projects-section projects-tree-section">
-        <div class="projects-section-title"><span data-i18n="文件">文件</span></div>
+        <div class="projects-section-title">
+          <span data-i18n="文件">文件</span>
+          <button class="projects-section-add" id="projects-new-btn" data-action="new-menu">＋</button>
+        </div>
         <div class="projects-tree" id="projects-tree"></div>
       </div>
     </aside>

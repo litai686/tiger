@@ -15,7 +15,7 @@ import { setupSSEListener, cancelScheduledLoadTools, cancelRunCompleteFallback, 
 import { syncModeToServer } from "./agent/permission.js";
 import { loadTools, activateToolsTab } from "./agent/tools.js";
 import { switchModel, refreshServerProviders, resolveAgentModel, updateModelDropdown, updateModelBtn, refreshAgentInfo, setAddCloudModelHandler } from "./agent/model.js";
-import { enableAutoCompact, updateWorkspaceSelector, toggleWorkDirDropdown, closeWorkDirDropdown, validateWorkDirs, initWorkdirBrowserUI } from "./agent/workspace.js";
+import { enableAutoCompact, updateWorkspaceSelector, toggleWorkDirDropdown, closeWorkDirDropdown, validateWorkDirs, initWorkdirCreateUI } from "./agent/workspace.js";
 import { showSettings, hideSettings, updateSettingsUI, saveSettings, renderVisionModelSelect, BUILTIN_VISION_KEY } from "./agent/settings_dialog.js";
 import { addPendingFiles, parseUriListPaths, addPastedPaths, looksLikeFilePath } from "./agent/attach.js";
 import { bindSkillSelectorEvents, initSkillSelector, clearAttachedSkillsAfterSend } from "./agent/skill_selector.js";
@@ -543,8 +543,8 @@ function bindEvents() {
   document.getElementById("agent-settings-close").addEventListener("click", hideSettings);
   // 项目记忆弹窗交互（toolbar 按钮 / 条目增删改 / 压缩时自动提取开关）
   initProjectMemoryUI();
-  // 添加工作目录弹窗：浏览服务端目录（工作目录在服务端主机，不能用本机原生选择框）
-  initWorkdirBrowserUI();
+  // 添加工作目录弹窗：只填名称，服务端在用户主目录下创建文件夹
+  initWorkdirCreateUI();
 
   // 工作区选择器点击 → 下拉列表
   var wsSelector = document.getElementById("agent-workspace-selector");

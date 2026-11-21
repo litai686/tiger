@@ -2,9 +2,10 @@
 import { t as _t } from "../../i18n.js";
 import { S, invoke, store } from "./store.js";
 import { api } from "./api.js";
-import { updateContextUsage, exitManualScrollMode, clearErrorNotices, reportError, clearSendSafetyTimer, updateStatusBar, updateSendButton, showConfirm, showNotice, showWarning } from "./ui.js";
+import { updateContextUsage, exitManualScrollMode, clearErrorNotices, reportError, clearSendSafetyTimer, updateStatusBar, updateSendButton, showConfirm, showNotice } from "./ui.js";
 import { getErrorMessage } from "./error.js";
 import { $input, modelContextWindow } from "./utils.js";
+import { normalizePath } from "../shared/paths.js";
 import { log } from "./log.js";
 import { renderMessages, renderTodos } from "./render.js";
 import { loadConversations, renderConversationList } from "./session.js";
@@ -235,16 +236,16 @@ async function renderWorkDirDropdown() {
     item.style.alignItems = "center";
     item.style.gap = "4px";
 
-    // 删除按钮（当前默认目录不可删除）
+    // 删除按钮（仅从列表移除，不删除磁盘文件；当前默认目录不可删除）
     if (!d.is_default) {
       var delBtn = document.createElement("span");
       delBtn.textContent = "✕";
       delBtn.className = "workdir-dropdown-del";
-      delBtn.title = _t("移除");
+      delBtn.title = _t("仅从列表移除（不删除磁盘文件）");
       delBtn.addEventListener("click", function(e) {
         e.stopPropagation();
         // 移除前确认，避免误删工作目录
-        showConfirm(_t("确定要移除工作目录「") + d.path + _t("」吗？"), async function() {
+        showConfirm(_t("确定从列表移除工作目录「") + d.path + _t("」吗？不会删除磁盘上的文件。"), async function() {
           try {
             await invoke("remove_workdir", { path: d.path });
             // 清理该 workspace 的状态池（会话/消息/运行状态），避免残留；
@@ -282,14 +283,14 @@ async function renderWorkDirDropdown() {
     dd.appendChild(sep);
   }
 
-  // 添加工作目录：浏览**服务端**目录（工作目录在服务端主机，本机原生选择框只能列出客户端路径）
+  // 添加工作目录：只填名称，服务端在用户主目录下创建同名文件夹
   var addBtn = document.createElement("div");
   addBtn.className = "workdir-dropdown-item add";
   addBtn.textContent = "＋ " + _t("添加工作目录");
   addBtn.addEventListener("click", function(e) {
     e.stopPropagation();
     closeWorkDirDropdown();
-    openWorkdirBrowser();
+    openWorkdirCreate();
   });
   dd.appendChild(addBtn);
 
@@ -326,173 +327,107 @@ async function doSwitchWorkDir(path) {
   }
 }
 
-// ===== 添加工作目录：浏览服务端目录 =====
-// 工作目录路径属于服务端主机：旧实现调客户端原生目录选择框（pick_workdir_folder），
-// 远程部署时选出来的本机路径在服务端不存在，添加后会被 validate_workdirs 当作
-// “目录不存在”清掉。现在改为经 GET /v1/fs/list 浏览服务端目录树、
-// POST /v1/fs/validate 校验后写入（接口见 docs/server-api.md §1.9；可浏览范围由
-// 服务端限制为家目录 / 工作目录 / 已配置的工作目录，越界返回 403）。
-var browserPath = "";
-var browserBusy = false;
+// ===== 添加工作目录：只填名称，服务端在用户主目录下创建文件夹 =====
+// 工作目录属于服务端主机：客户端既看不到也建不了服务端目录，所以弹窗只收一个
+// 名称，由 POST /v1/fs/mkdir 在服务端用户主目录下创建同名文件夹，再 add_workdir
+// 落盘并切换（接口见 docs/server-api.md §1.9）。不要再接回本机目录选择框或目录
+// 浏览：客户端本机路径在服务端通常不存在，添加后会被 validate_workdirs 清掉。
+var createBusy = false;
 
-export function openWorkdirBrowser() {
-  var overlay = document.getElementById("agent-workdir-browser-overlay");
+export function openWorkdirCreate() {
+  var overlay = document.getElementById("agent-workdir-create-overlay");
   if (!overlay) return;
-  browserPath = "";
-  var input = $input("workdir-browser-path");
+  var input = $input("workdir-create-name");
   if (input) input.value = "";
-  var list = document.getElementById("workdir-browser-list");
-  if (list) list.innerHTML = "";
+  setWorkdirCreateMsg("");
   overlay.classList.add("show");
-  // 从当前工作区目录开始浏览（属于已配置工作目录，服务端一定允许），否则回落到服务端默认根
-  var start = S.workspaceInfo && S.workspaceInfo.path ? S.workspaceInfo.path : "";
-  loadServerDir(start);
+  if (input) input.focus();
 }
 
-export function closeWorkdirBrowser() {
-  var overlay = document.getElementById("agent-workdir-browser-overlay");
+export function closeWorkdirCreate() {
+  var overlay = document.getElementById("agent-workdir-create-overlay");
   if (overlay) overlay.classList.remove("show");
 }
 
-function setWorkdirBrowserMsg(text, level) {
-  var msg = document.getElementById("workdir-browser-msg");
+function setWorkdirCreateMsg(text, level) {
+  var msg = document.getElementById("workdir-create-msg");
   if (!msg) return;
   msg.textContent = text || "";
   msg.style.color = level === "error" ? "#ff6b6b" : level === "warn" ? "#f0ad4e" : "var(--c-text-2)";
 }
 
-// 读取服务端目录（path 为空 = 服务端默认根，通常是服务端用户主目录）。
-// 失败时保留上一次的列表、只改提示：越界（403）或不存在（400）只是导航失败，
-// 清空列表会让用户正在浏览的目录一起消失。
-async function loadServerDir(path) {
-  if (browserBusy) return;
-  browserBusy = true;
-  var list = document.getElementById("workdir-browser-list");
-  var input = $input("workdir-browser-path");
-  var goBtn = /** @type {HTMLButtonElement} */ (document.getElementById("workdir-browser-go"));
-  if (goBtn) goBtn.disabled = true;
-  setWorkdirBrowserMsg(_t("加载中…"));
-  try {
-    var data = await api("GET", path ? "/v1/fs/list?path=" + encodeURIComponent(path) : "/v1/fs/list");
-    browserPath = data && typeof data.path === "string" ? data.path : (path || "");
-    if (input) input.value = browserPath;
-    renderServerDirEntries(data && Array.isArray(data.entries) ? data.entries : []);
-    setWorkdirBrowserMsg("");
-  } catch (e) {
-    setWorkdirBrowserMsg(_t("读取服务端目录失败: ") + getErrorMessage(e), "error");
-    if (list && !list.childElementCount) {
-      list.innerHTML = '<div class="workdir-browser-empty">' + _t("无法读取该目录") + "</div>";
-    }
-  } finally {
-    browserBusy = false;
-    if (goBtn) goBtn.disabled = false;
+// 服务端只接受单段目录名（不能带路径分隔符），这里用同一规则先挡一道
+function invalidWorkdirName(name) {
+  return !name || name === "." || name === ".." || /[\\/]/.test(name);
+}
+
+async function confirmWorkdirCreate() {
+  if (createBusy) return;
+  var input = $input("workdir-create-name");
+  var name = input ? input.value.trim() : "";
+  if (invalidWorkdirName(name)) {
+    setWorkdirCreateMsg(_t("请输入工作目录名称（不能包含路径分隔符）"), "warn");
+    return;
   }
-}
-
-// 只列目录（工作目录必须选目录）；".." 行按当前路径推导，越界由服务端 403 拒绝
-function renderServerDirEntries(entries) {
-  var list = document.getElementById("workdir-browser-list");
-  if (!list) return;
-  list.innerHTML = "";
-  var dirs = entries.filter(function(en) { return en && en.is_dir; });
-  var parent = parentServerPath(browserPath);
-  if (parent) list.appendChild(buildDirRow("⬆ " + _t("上级目录"), parent, "parent"));
-  dirs.forEach(function(en) {
-    list.appendChild(buildDirRow("📁 " + en.name, en.path, ""));
-  });
-  if (!list.childElementCount) {
-    list.innerHTML = '<div class="workdir-browser-empty">' + _t("目录为空") + "</div>";
-  }
-}
-
-function buildDirRow(text, path, extraClass) {
-  var row = document.createElement("div");
-  row.className = "workdir-browser-item" + (extraClass ? " " + extraClass : "");
-  row.textContent = text;
-  row.title = path;
-  row.addEventListener("click", function() { loadServerDir(path); });
-  return row;
-}
-
-// 上级目录：兼容 / 与 \ 分隔符；盘符根（C:）与 / 没有上级
-function parentServerPath(path) {
-  if (!path) return "";
-  var norm = path.replace(/[\\/]+$/, "");
-  var idx = Math.max(norm.lastIndexOf("/"), norm.lastIndexOf("\\"));
-  if (idx < 0) return "";
-  var parent = norm.slice(0, idx);
-  if (/^[A-Za-z]:$/.test(parent)) parent += "\\";
-  return parent;
-}
-
-// 确认：以服务端 POST /v1/fs/validate 为准（存在 / 是目录 / 可写），再写入工作目录列表并切换
-async function confirmWorkdirBrowser() {
-  if (browserBusy) return;
-  var input = $input("workdir-browser-path");
-  var path = input ? input.value.trim() : "";
-  if (!path) { setWorkdirBrowserMsg(_t("请输入或选择服务端目录"), "warn"); return; }
-  browserBusy = true;
-  var okBtn = /** @type {HTMLButtonElement} */ (document.getElementById("workdir-browser-confirm"));
+  createBusy = true;
+  var okBtn = /** @type {HTMLButtonElement} */ (document.getElementById("workdir-create-confirm"));
   if (okBtn) okBtn.disabled = true;
+  setWorkdirCreateMsg(_t("创建中…"));
   try {
-    var res = await api("POST", "/v1/fs/validate", { paths: [path] });
-    var item = res && Array.isArray(res.results) ? res.results[0] : null;
-    if (item && item.error) { setWorkdirBrowserMsg(item.error, "error"); return; }
-    if (!item || !item.exists) { setWorkdirBrowserMsg(_t("服务端不存在该目录"), "error"); return; }
-    if (!item.is_dir) { setWorkdirBrowserMsg(_t("该路径不是目录"), "error"); return; }
-    var target = item.path || path;
+    var res = await api("POST", "/v1/fs/mkdir", { name: name });
+    var target = res && typeof res.path === "string" ? res.path : "";
+    if (!target) throw new Error("server returned no path");
+    // 判重：目标目录可能已存在（created=false），或用户重复添加同一目录。
+    // 比较用 normalizePath（去尾斜杠、Windows 忽略大小写与分隔符），
+    // 命中时留在弹窗里提示，不重复落列表、也不切换。
+    var key = normalizePath(target);
+    var dirs = await invoke("get_workdirs");
+    var exists = (dirs || []).some(function (d) {
+      return normalizePath(d.path) === key;
+    });
+    if (exists) {
+      setWorkdirCreateMsg(_t("该工作目录已在列表中: ") + target, "warn");
+      return;
+    }
     // 先落盘工作目录再关弹窗：写入失败时错误留在弹窗里，避免“弹窗关了、什么都没发生”
     try {
       await invoke("add_workdir", { path: target });
       await doSwitchWorkDir(target);
     } catch (e2) {
-      setWorkdirBrowserMsg(_t("添加工作目录失败: ") + getErrorMessage(e2), "error");
+      setWorkdirCreateMsg(_t("添加工作目录失败: ") + getErrorMessage(e2), "error");
       return;
     }
-    closeWorkdirBrowser();
-    // 只读目录仍可添加（浏览/只读分析），但要提示 Agent 无法写入
-    if (item.writable === false) showWarning(_t("该目录在服务端不可写，Agent 无法在其中修改文件"));
+    closeWorkdirCreate();
   } catch (e) {
-    setWorkdirBrowserMsg(_t("校验路径失败: ") + getErrorMessage(e), "error");
+    setWorkdirCreateMsg(_t("创建目录失败: ") + getErrorMessage(e), "error");
   } finally {
-    browserBusy = false;
+    createBusy = false;
     if (okBtn) okBtn.disabled = false;
   }
 }
 
-// 视图 mount 时调用一次：弹窗开合、路径跳转、确认
-export function initWorkdirBrowserUI() {
-  var overlay = document.getElementById("agent-workdir-browser-overlay");
+// 视图 mount 时调用一次：弹窗开合与确认
+export function initWorkdirCreateUI() {
+  var overlay = document.getElementById("agent-workdir-create-overlay");
   if (!overlay) return;
-  var closeBtn = document.getElementById("workdir-browser-close");
-  if (closeBtn) closeBtn.addEventListener("click", closeWorkdirBrowser);
-  var cancelBtn = document.getElementById("workdir-browser-cancel");
-  if (cancelBtn) cancelBtn.addEventListener("click", closeWorkdirBrowser);
+  var closeBtn = document.getElementById("workdir-create-close");
+  if (closeBtn) closeBtn.addEventListener("click", closeWorkdirCreate);
+  var cancelBtn = document.getElementById("workdir-create-cancel");
+  if (cancelBtn) cancelBtn.addEventListener("click", closeWorkdirCreate);
   overlay.addEventListener("click", function(e) {
-    if (e.target === overlay) closeWorkdirBrowser();
+    if (e.target === overlay) closeWorkdirCreate();
   });
-  var input = $input("workdir-browser-path");
-  var goBtn = /** @type {HTMLButtonElement} */ (document.getElementById("workdir-browser-go"));
-  if (goBtn && input) {
-    goBtn.addEventListener("click", function() { loadServerDir(input.value.trim()); });
-  }
+  var input = $input("workdir-create-name");
   if (input) {
     input.addEventListener("keydown", function(e) {
       if (e.key === "Enter") {
         e.preventDefault();
-        loadServerDir(input.value.trim());
+        confirmWorkdirCreate();
       }
     });
   }
-  var homeBtn = document.getElementById("workdir-browser-home");
-  if (homeBtn && input) {
-    homeBtn.addEventListener("click", function() {
-      input.value = "";
-      loadServerDir("");
-    });
-  }
-  var okBtn = /** @type {HTMLButtonElement} */ (document.getElementById("workdir-browser-confirm"));
-  if (okBtn) okBtn.addEventListener("click", confirmWorkdirBrowser);
+  var okBtn = document.getElementById("workdir-create-confirm");
+  if (okBtn) okBtn.addEventListener("click", confirmWorkdirCreate);
 }
 
 // 启动时验证工作目录列表：以服务端为准（路径属于服务端主机），不存在的目录

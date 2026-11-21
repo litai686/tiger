@@ -1,12 +1,14 @@
 // 项目管理视图：左栏上部的项目列表
 import { t as _t } from "../../i18n.js";
-import { state } from "./store.js";
+import { state, canDeleteProject } from "./store.js";
 
 function projectRow(project) {
   const row = document.createElement("div");
   row.className = "projects-project" + (project.path === state.activePath ? " active" : "");
   row.setAttribute("data-action", "select-project");
   row.setAttribute("data-path", project.path);
+  // 右键该行可删除项目根目录（任意项目，含当前激活项，见 ui.js onContextMenu）
+  row.setAttribute("data-project-root", "1");
   row.title = project.path;
 
   const top = document.createElement("div");
@@ -26,6 +28,26 @@ function projectRow(project) {
     const spinner = document.createElement("span");
     spinner.className = "projects-spinner";
     top.appendChild(spinner);
+  }
+  // 删除项目根目录：物理删除整棵目录并从 Agent 工作目录列表移除（当前项目也可删）。
+  // 仅剩最后一个工作目录时置灰：保证 Agent 始终至少有一个工作目录可用。
+  if (state.caps.remove) {
+    const removable = canDeleteProject(project);
+    const del = document.createElement("span");
+    del.className = "projects-project-del" + (removable ? "" : " disabled");
+    del.textContent = "✕";
+    if (removable) {
+      del.title = _t("删除项目根目录（物理删除整个目录，并移出 Agent 工作目录列表）");
+      del.setAttribute("data-action", "delete-project");
+      del.setAttribute("data-path", project.path);
+    } else {
+      del.title = _t("仅剩最后一个工作目录，不能删除");
+      // 置灰时点它不应该选中项目（跌落到行的 select-project），直接吞掉。
+      del.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+      });
+    }
+    top.appendChild(del);
   }
   row.appendChild(top);
 

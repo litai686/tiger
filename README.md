@@ -9,11 +9,11 @@ Tiger 把「Agent 运行时」和「操作界面」拆成两个独立程序：Go
 
 ## 功能
 
-- **Agent 对话**：工具调用、文件改动、任务清单与每轮撤销入口都在对话里；运行中可切换页面并保持状态，底部常驻服务端硬件与连接状态。
+- **Agent 对话**：工具调用、文件改动、任务清单与每轮撤销入口都在对话里；运行中可切换页面并保持状态，底部常驻服务端硬件与连接状态；Agent 设置里可查看 / 下载 / 一键清空服务端日志。
 - **模型管理**：provider 增删改即时生效，云端模型改完无需重启服务端；内置模型从服务端快照进入下拉。
-- **项目管理**：懒加载文件树浏览服务端工作区，右侧「预览 / 差异」双 TAB；有 Git 变更的文件直接看差异并暂存，双击跳转。
-- **技能管理**：查看、安装、卸载服务端技能。
-- **设置**：外观主题、网络代理、服务端连接、系统版本号与关于，支持配置导入导出；所有配置都落在服务端，桌面端保持纯 UI。
+- **项目管理**：懒加载文件树浏览服务端工作区，支持新建 / 上传 / 重命名 / 内联编辑 / 下载到本机 / 删除（含项目根目录）；右侧「预览 / 差异」双 TAB，有 Git 变更的文件直接看差异并暂存，双击跳转；默认打开服务端当前工作目录，「添加工作目录」只填名称（由服务端在用户主目录下创建），移除只影响列表、不删磁盘文件。
+- **技能管理**：技能商店浏览与在线安装（全局 / 当前项目）、本地上传 zip 包、查看与卸载已装技能。
+- **设置**：外观主题、网络代理、服务端连接、系统版本号与关于；旧本机配置可一键导入服务端；所有配置都落在服务端，桌面端保持纯 UI。
 - **更新与本地化**：启动后检查更新，新版本弹窗 → 后台下载 → 提示安装，可跳过指定版本；中英双语界面；剪贴板粘贴（三平台差异处理）与 PDF 分批转图。
 
 ## 连接方式
@@ -35,6 +35,7 @@ tigerAgent 服务端（用户自行启动）
   ```
 
 - 在「设置 → 服务端连接」整条粘贴并保存：客户端用 SPKI 指纹校验服务端身份，之后每个请求携带 Bearer token。
+- 连接串的 host 可以是 IP 或域名，端口可省略（默认 443，适配域名 / 反向代理 / 隧道预览）；反向代理终止 TLS 时客户端自动改用公共根证书校验代理证书（指纹只用于直连），并按连接串 host 发送真实 `Host` 头供代理按域名路由。
 - 服务端可用 `--print-connection` 重新打印连接串；浏览器打开 `https://<服务端地址>/admin/` 可用指纹 + token 登录，生成 / 删除 token、查看活跃连接。
 - 细节见 [doc/tcp-tls-ecdsa.md](doc/tcp-tls-ecdsa.md) 与 [doc/server-api.md](doc/server-api.md)。
 
@@ -50,11 +51,11 @@ tigerAgent 服务端（用户自行启动）
 
 ## 服务端安装（一键脚本）
 
-服务端 `tigerAgent` 与桌面端分开部署。Linux / macOS 服务器可直接用仓库内的 `desktop/install-server.sh` 安装并启动（只支持 bash 环境；Windows 请手动解压 Release 里的 `*_server.zip`）：
+服务端 `tigerAgent` 与桌面端分开部署。Linux / macOS 服务器可直接用仓库内的 `./install-server.sh` 安装并启动（只支持 bash 环境；Windows 请手动解压 Release 里的 `*_server.zip`）：
 
 ```bash
 # 在仓库根目录执行
-bash desktop/install-server.sh
+bash install-server.sh
 ```
 
 脚本会读取当前系统的 OS / 架构（Linux x86_64、macOS x86_64 / arm64），从 [Releases](https://github.com/litai686/tiger/releases) 取最近一次发布的 `*_server` 产物并：
@@ -68,6 +69,7 @@ bash desktop/install-server.sh
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
+| `TIGER_REPO` | `litai686/tiger` | GitHub 仓库（`owner/repo`） |
 | `TIGER_VERSION` | `latest` | 指定版本，如 `0.0.1` / `v0.0.1` |
 | `TIGER_HOST` | `tcp://:6464` | 服务端监听地址（host 留空 = IPv4 + IPv6 双栈） |
 | `TIGER_INSTALL_DIR` | `~/.local/bin` | 二进制安装目录 |
@@ -75,6 +77,7 @@ bash desktop/install-server.sh
 | `TIGER_NO_START` | `0` | `1` 只安装不启动 |
 | `TIGER_DEBUG` | `0` | `1` 以 `--debug` 启动 |
 | `TIGER_FORCE` | `0` | `1` 忽略已安装版本、强制重新下载 |
+| `GITHUB_TOKEN` | 未设置 | 可选；GitHub API 限流时提升额度 |
 
 服务端自身日志在 `~/.cache/tigerAgent/tigerAgent.log`；忘记连接串时可用
 `~/.local/bin/tigerAgent --print-connection --data-dir ~/.local/share/tigerAgent/data` 重新打印。
@@ -106,11 +109,11 @@ pnpm tauri:build:linux      # deb / AppImage
 
 | 路径 | 内容 |
 | --- | --- |
-| `src/` | 前端 SPA：原生 HTML / CSS / JS，无框架、无打包工具，hash 路由 + 7 个视图模块 |
-| `src-tauri/` | Tauri Rust 后端：IPC 命令、服务端连接（TLS + 指纹钉扎）、自升级与下载链路 |
+| `src/` | 前端 SPA：原生 HTML / CSS / JS，无框架、无打包工具，hash 路由 + 5 个视图模块（Agent / 模型 / 项目 / 技能 / 设置） |
+| `src-tauri/` | Tauri Rust 后端：IPC 命令、服务端连接（TLS + 指纹钉扎，反向代理终止 TLS 时回退公共根证书）、自升级与下载链路 |
 | `doc/` | 桌面端开发文档（索引见下） |
 | `website/` | 产品官网（静态 HTML） |
-| `scripts/` | 构建、签名、图标与官网封面生成脚本 |
+| `scripts/` | 构建、签名、图标与官网封面生成脚本，以及服务端二进制推送 |
 | `install-server.sh` | 服务端一键部署脚本：按系统下载 Release 里的 `*_server` 产物、校验、安装并用 nohup 启动 |
 
 ## 文档
@@ -121,6 +124,7 @@ pnpm tauri:build:linux      # deb / AppImage
 | [doc/frontend-agent-conventions.md](doc/frontend-agent-conventions.md) | Agent 视图错误处理、自动续跑、假完成检测、拖拽保护、每轮撤销、同目录多会话并行 |
 | [doc/rust-backend.md](doc/rust-backend.md) | Rust 命令地图、应用自升级、下载链路、平台差异 |
 | [doc/agent-server.md](doc/agent-server.md) | 服务端回合循环、压缩与事实块、提示词预算、决策模式、工具与权限边界 |
+| [doc/agent-settings.md](doc/agent-settings.md) | Agent 设置项、推理强度与思考开关、服务端日志入口 |
 | [doc/server-api.md](doc/server-api.md) | 服务端 HTTP API 契约 |
 | [doc/tcp-tls-ecdsa.md](doc/tcp-tls-ecdsa.md) | TCP + TLS（ECDSA P-256）传输、连接串与 token 管理 |
 | [doc/attachments.md](doc/attachments.md) | 剪贴板粘贴（三平台差异）与 PDF 分批转图 |

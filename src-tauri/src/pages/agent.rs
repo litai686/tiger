@@ -1910,6 +1910,26 @@ fn load_workdirs(app: &tauri::AppHandle) -> Vec<WorkDirEntry> {
     settings.agent_workdirs
 }
 
+/// 工作目录判重用的规范化键（只用于比较，不改变落盘路径）：
+/// - 去首尾空白；
+/// - Unix：去掉末尾多余的 `/`（保留根 `/`），大小写敏感；
+/// - Windows：`/` 统一成 `\`，去掉末尾多余的 `\`（保留 `C:\` 这类盘符根），忽略大小写。
+fn normalize_workdir_key(path: &str) -> String {
+    let mut s = path.trim().to_string();
+    if cfg!(target_os = "windows") {
+        s = s.replace('/', "\\");
+        while s.len() > 1 && s.ends_with('\\') && !s.ends_with(":\\") {
+            s.pop();
+        }
+        s = s.to_lowercase();
+    } else {
+        while s.len() > 1 && s.ends_with('/') {
+            s.pop();
+        }
+    }
+    s
+}
+
 /// Write workdirs to config.json (read-modify-write to preserve other fields)
 fn save_workdirs_internal(app: &tauri::AppHandle, dirs: &[WorkDirEntry]) -> Result<(), AppError> {
     let state = app.state::<AppState>();
@@ -2010,7 +2030,9 @@ pub async fn add_workdir(app: tauri::AppHandle, path: String) -> Result<Vec<Work
     if path.is_empty() {
         bail!("工作目录不能为空");
     }
-    if dirs.iter().any(|d| d.path == path) {
+    // 规范化判重：大小写 / 分隔符 / 末尾斜杠不同但指向同一目录时不重复添加。
+    let key = normalize_workdir_key(&path);
+    if dirs.iter().any(|d| normalize_workdir_key(&d.path) == key) {
         return Ok(dirs); // Already exists
     }
     let is_first = dirs.is_empty();
@@ -2024,9 +2046,13 @@ pub async fn add_workdir(app: tauri::AppHandle, path: String) -> Result<Vec<Work
 #[tauri::command]
 pub async fn remove_workdir(app: tauri::AppHandle, path: String) -> Result<Vec<WorkDirEntry>, AppError> {
     let mut dirs = load_workdirs(&app);
-    let path = path.trim().to_string();
-    let removed_default = dirs.iter().find(|d| d.path == path).map(|d| d.is_default).unwrap_or(false);
-    dirs.retain(|d| d.path != path);
+    let key = normalize_workdir_key(&path);
+    let removed_default = dirs
+        .iter()
+        .find(|d| normalize_workdir_key(&d.path) == key)
+        .map(|d| d.is_default)
+        .unwrap_or(false);
+    dirs.retain(|d| normalize_workdir_key(&d.path) != key);
     if removed_default && !dirs.is_empty() {
         dirs[0].is_default = true;
     }
@@ -2039,9 +2065,9 @@ pub async fn remove_workdir(app: tauri::AppHandle, path: String) -> Result<Vec<W
 #[tauri::command]
 pub async fn set_default_workdir(app: tauri::AppHandle, path: String) -> Result<Vec<WorkDirEntry>, AppError> {
     let mut dirs = load_workdirs(&app);
-    let path = path.trim().to_string();
+    let key = normalize_workdir_key(&path);
     for d in &mut dirs {
-        d.is_default = d.path == path;
+        d.is_default = normalize_workdir_key(&d.path) == key;
     }
     push_workdirs(&dirs).await?;
     save_workdirs_internal(&app, &dirs)?;
@@ -3079,8 +3105,192 @@ pub async fn download_workspace_file(
     Ok(save_path.to_string_lossy().to_string())
 }
 
-// ===== 日志管理 =====
+/// 上传进度回调：按 100 ms / 256 KiB 节流发 `workspace-upload-progress`；由
+/// `send_file` 的流式请求体在每块读盘后调用（首帧 received=0）。事件由 Rust
+/// 发送，与前端哪个页面在显示无关，切换页面不会中断上传或丢进度。
+fn upload_progress_emitter(
+    app: tauri::AppHandle,
+    workspace_id: String,
+    dir: String,
+    name: String,
+    index: usize,
+    count: usize,
+    total: u64,
+) -> impl FnMut(u64) + Send + 'static {
+    let mut last_emit = std::time::Instant::now();
+    let mut last_sent = 0u64;
+    move |sent: u64| {
+        if sent > 0
+            && sent < total
+            && sent - last_sent < 256 * 1024
+            && last_emit.elapsed() < Duration::from_millis(100)
+        {
+            return;
+        }
+        last_emit = std::time::Instant::now();
+        last_sent = sent;
+        let _ = app.emit(
+            "workspace-upload-progress",
+            serde_json::json!({
+                "state": "uploading",
+                "workspace_id": &workspace_id,
+                "dir": &dir,
+                "name": &name,
+                "index": index,
+                "count": count,
+                "received": sent,
+                "total": total,
+            }),
+        );
+    }
+}
 
+/// 上传本机文件到工作区目录（项目管理「上传文件」）：
+/// 原生多选对话框 → 逐个把文件以流式请求体 POST 到 `files/upload`
+/// （按 64 KiB 块读盘，不整文件入内存；不设大小上限，受服务端磁盘空间限制）。
+/// 上传期间按 `workspace-upload-progress` 事件回传实时进度；
+/// 任一文件失败即中止并报错（此前已写入的文件保留）。
+#[tauri::command]
+pub async fn upload_workspace_files(
+    app: tauri::AppHandle,
+    workspace_id: String,
+    dir: String,
+) -> Result<Vec<String>, AppError> {
+    use tauri_plugin_dialog::DialogExt;
+
+    if workspace_id.is_empty() {
+        bail!("缺少 workspace");
+    }
+    let target = require_target()?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_files(move |paths| {
+        let _ = tx.send(paths);
+    });
+    let picked = rx
+        .await
+        .map_err(|_| AppError::msg("打开文件对话框失败"))?
+        .ok_or_else(|| AppError::msg("用户取消了上传"))?;
+    if picked.is_empty() {
+        bail!("用户取消了上传");
+    }
+
+    let client = build_client(&target, Duration::from_secs(5))
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+    let mut uploaded: Vec<String> = Vec::new();
+    let file_count = picked.len();
+    for (idx, picked_path) in picked.into_iter().enumerate() {
+        let local = picked_path
+            .into_path()
+            .map_err(|e| AppError::msg(format!("无法获取文件路径: {}", e)))?;
+        let name = local
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if name.is_empty() {
+            bail!("无法获取文件名: {}", local.display());
+        }
+        let meta = tokio::fs::metadata(&local)
+            .await
+            .map_err(|e| format!("读取本地文件信息失败 {}: {}", name, e))?;
+        if !meta.is_file() {
+            bail!("不是普通文件: {}", name);
+        }
+        let file = tokio::fs::File::open(&local)
+            .await
+            .map_err(|e| format!("读取本地文件失败 {}: {}", name, e))?;
+        let url = format!(
+            "/v1/workspaces/{}/files/upload?path={}&name={}",
+            workspace_id,
+            percent_encode(dir.trim()),
+            percent_encode(&name)
+        );
+        let progress = upload_progress_emitter(
+            app.clone(),
+            workspace_id.clone(),
+            dir.clone(),
+            name.clone(),
+            idx + 1,
+            file_count,
+            meta.len(),
+        );
+        let (status, body) = agent_http::send_file(
+            &client,
+            "POST",
+            &url,
+            "application/octet-stream",
+            file,
+            meta.len(),
+            progress,
+        )
+        .await
+        .map_err(|e| AppError::msg(format!("上传失败 {}: {}", name, e)))?;
+        if !(200..300).contains(&status) {
+            let value: serde_json::Value =
+                serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+            let message = value
+                .get("message")
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("请求失败 (HTTP {})", status));
+            api_debug_log(|| format!("Projects ! 上传工作区文件 {} 失败: {}", name, message));
+            bail!("{}: {}", name, message);
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        uploaded.push(
+            value
+                .get("path")
+                .and_then(|p| p.as_str())
+                .unwrap_or(&name)
+                .to_string(),
+        );
+    }
+    api_debug_log(|| {
+        format!(
+            "Projects: 已上传 {} 个文件到 {}",
+            uploaded.len(),
+            if dir.is_empty() { "/" } else { dir.as_str() }
+        )
+    });
+    let _ = app.emit(
+        "workspace-upload-progress",
+        serde_json::json!({
+            "state": "done",
+            "workspace_id": workspace_id,
+            "dir": dir,
+            "uploaded": uploaded.len(),
+        }),
+    );
+    Ok(uploaded)
+}
+
+/// 停止一个 workspace 的 SSE 转发任务并从会话表移除（不销毁服务端 workspace）。
+/// 仅供删除项目根目录后回收「为删除而临时创建」的会话：否则这条流会一直挂在
+/// 已删除的目录上，直到与服务端整体断开。
+#[tauri::command]
+pub async fn stop_workspace_session(
+    state: tauri::State<'_, AppState>,
+    workspace_id: String,
+) -> Result<(), AppError> {
+    let removed = {
+        let mut sessions = state.agent_sessions.lock().map_err(|e| e.to_string())?;
+        sessions.remove(&workspace_id)
+    };
+    if let Some(sess) = removed {
+        sess.sse_stop.store(true, Ordering::Relaxed);
+        if let Some(task) = sess.sse_task {
+            task.abort();
+        }
+        api_debug_log(|| format!("Agent: 已停止 workspace 会话 {}", workspace_id));
+    }
+    let mut active = state.active_workspace_id.lock().map_err(|e| e.to_string())?;
+    if active.as_deref() == Some(workspace_id.as_str()) {
+        *active = None;
+    }
+    Ok(())
+}
+
+// ===== 日志管理 =====
 /// 启动时根据持久化设置恢复调试日志开关（config.json 的 debug_logging）。
 /// 开启时截断重建日志文件 —— 实现“每次重启软件自动清空上次日志”。
 /// 在 setup 阶段调用，早于任何 Agent 交互。

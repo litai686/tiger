@@ -240,6 +240,8 @@ export function renderTree(container) {
   rootRow.className += " projects-tree-dir";
   rootRow.setAttribute("data-action", "toggle-dir");
   rootRow.setAttribute("data-path", "");
+  // 右键根节点（或树空白区）在项目根目录新建/上传，见 ui.js onContextMenu
+  rootRow.setAttribute("data-root-dir", "1");
   rootRow.title = state.activePath;
   rootRow.appendChild(arrow(state.expanded.has(""), false));
   const rootName = document.createElement("span");

@@ -98,6 +98,11 @@ function buildHeader(hasFile) {
     row.appendChild(download);
   }
   row.appendChild(el("span", "projects-tab-spacer"));
+  // 上传进度条占位：内容由 ui.js syncUploadProgressUI 按事件填充（无上传时隐藏）
+  const upload = el("div", "projects-upload");
+  upload.id = "projects-upload-progress";
+  upload.style.display = "none";
+  row.appendChild(upload);
 
   const tools = el("div", "projects-toolbar");
   if (showDiff) {
@@ -148,6 +153,11 @@ function buildHeader(hasFile) {
           const rename = el("button", "projects-btn", _t("重命名"));
           rename.setAttribute("data-action", "rename");
           tools.appendChild(rename);
+        }
+        if (state.caps.remove && !deleted) {
+          const remove = el("button", "projects-btn", _t("删除"));
+          remove.setAttribute("data-action", "delete-file");
+          tools.appendChild(remove);
         }
       }
       const refresh = el("button", "projects-btn", _t("刷新"));

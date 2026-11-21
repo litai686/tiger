@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use hyper::body::{Bytes, Incoming};
 use hyper::Uri;
-use http_body_util::Full;
+use http_body_util::combinators::UnsyncBoxBody;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -356,13 +356,17 @@ pub fn spki_fingerprint(cert_der: &[u8]) -> Result<String, String> {
     ))
 }
 
+/// 请求体统一装箱类型：普通请求用 `Full`，文件上传用按块读盘的流式 body。
+/// 流式 body（文件流）不满足 `Sync`，因此用 unsync 版本。
+type AgentRequestBody = UnsyncBoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>;
+
 /// Agent server 的 HTTP 客户端（连接池按 target 复用）。
 ///
 /// 包一层是为了在每个请求上统一附加 `Authorization: Bearer <token>`，
 /// 这样 `send` / `stream_get` 之外不会出现漏带凭据的调用路径。
 #[derive(Clone)]
 pub struct AgentHttpClient {
-    inner: Client<AgentConnector, Full<Bytes>>,
+    inner: Client<AgentConnector, AgentRequestBody>,
     token: String,
     /// 真实主机的 `Host` 头：URI 里用的是内部占位 authority，反向代理按域名
     /// 路由时不能把占位值发出去。
@@ -370,10 +374,14 @@ pub struct AgentHttpClient {
 }
 
 impl AgentHttpClient {
-    pub async fn request(
+    pub async fn request<B>(
         &self,
-        mut req: hyper::Request<Full<Bytes>>,
-    ) -> Result<hyper::Response<Incoming>, hyper_util::client::legacy::Error> {
+        mut req: hyper::Request<B>,
+    ) -> Result<hyper::Response<Incoming>, hyper_util::client::legacy::Error>
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + 'static,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
         if !self.token.is_empty() {
             if let Ok(value) = hyper::http::HeaderValue::from_str(&format!("Bearer {}", self.token)) {
                 req.headers_mut().insert(hyper::header::AUTHORIZATION, value);
@@ -382,7 +390,8 @@ impl AgentHttpClient {
         if let Ok(value) = hyper::http::HeaderValue::from_str(&self.authority) {
             req.headers_mut().insert(hyper::header::HOST, value);
         }
-        self.inner.request(req).await
+        use http_body_util::BodyExt;
+        self.inner.request(req.map(|body| body.map_err(Into::into).boxed_unsync())).await
     }
 }
 
@@ -477,6 +486,77 @@ pub async fn send(
     let payload = body.map(|b| b.to_string().into_bytes()).unwrap_or_default();
     let req = builder
         .body(Full::new(Bytes::from(payload)))
+        .map_err(|e| format!("构建请求失败: {}", e))?;
+    let resp = client
+        .request(req)
+        .await
+        .map_err(|e| format!("HTTP 请求失败: {}", e))?;
+    let status = resp.status().as_u16();
+    let collected = resp
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| format!("读取响应失败: {}", e))?;
+    Ok((status, collected.to_bytes().to_vec()))
+}
+
+/// 把本地文件包成按块读取的请求体：任意时刻只有当前 64 KiB 块在内存里。
+/// 每读出一块就把累计字节数交给 `on_progress`（上传进度用）。
+fn file_body<F>(file: tokio::fs::File, len: u64, on_progress: F) -> impl hyper::body::Body<Data = Bytes, Error = io::Error>
+where
+    F: FnMut(u64) + Send + 'static,
+{
+    use futures_util::TryStreamExt;
+
+    struct BodyState<F> {
+        reader: tokio::io::Take<tokio::fs::File>,
+        on_progress: F,
+        sent: u64,
+    }
+
+    let state = BodyState {
+        reader: tokio::io::AsyncReadExt::take(file, len),
+        on_progress,
+        sent: 0,
+    };
+    let stream = futures_util::stream::unfold(state, |mut state| async move {
+        let mut buf = vec![0u8; 64 * 1024];
+        match tokio::io::AsyncReadExt::read(&mut state.reader, &mut buf).await {
+            Ok(0) => None,
+            Ok(n) => {
+                buf.truncate(n);
+                state.sent += n as u64;
+                (state.on_progress)(state.sent);
+                Some((Ok(Bytes::from(buf)), state))
+            }
+            Err(err) => Some((Err(err), state)),
+        }
+    });
+    http_body_util::StreamBody::new(stream.map_ok(hyper::body::Frame::data))
+}
+
+/// 流式发送一个本地文件（`application/octet-stream` 原始体）并读完整响应体。
+/// 请求体按块读盘，不把整文件读进内存；`len` 必须取自同一个文件快照（调用方
+/// 先用 metadata 取大小），`on_progress` 按累计已发送字节回调（首帧为 0）。
+pub async fn send_file(
+    client: &AgentHttpClient,
+    method: &str,
+    path: &str,
+    content_type: &str,
+    file: tokio::fs::File,
+    len: u64,
+    mut on_progress: impl FnMut(u64) + Send + 'static,
+) -> Result<(u16, Vec<u8>), String> {
+    use http_body_util::BodyExt;
+
+    on_progress(0);
+    let uri = uri_for(path)?;
+    let req = hyper::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", content_type)
+        .header(hyper::header::CONTENT_LENGTH, len.to_string())
+        .body(file_body(file, len, on_progress))
         .map_err(|e| format!("构建请求失败: {}", e))?;
     let resp = client
         .request(req)

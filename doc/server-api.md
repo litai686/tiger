@@ -99,7 +99,7 @@ Authorization: Bearer <token>
 
 ### 请求体大小上限
 
-所有端点的请求体都经 `http.MaxBytesReader` 限制为 128 MiB（`internal/server` 的 `maxRequestBodyBytes`，包裹在 handler 链最内层）。超限时 `json.Decode` 报错，端点按普通请求体解析失败返回 `400`。**为什么**：附件是 base64 内联发出的，`encoding/json` 会把整个 body 读进内存，没有上限时一个 POST 就能把 daemon 内存打满。新增端点不需要单独处理，但不要在 handler 里 `r.Body` 上再套一层自己的 `MaxBytesReader` 覆盖这个值。
+除 `POST /v1/workspaces/{id}/files/upload`（流式落盘、不受此限制）外，所有端点的请求体都经 `http.MaxBytesReader` 限制为 128 MiB（`internal/server` 的 `maxRequestBodyBytes`，包裹在 handler 链最内层）。超限时 `json.Decode` 报错，端点按普通请求体解析失败返回 `400`。**为什么**：附件是 base64 内联发出的，`encoding/json` 会把整个 body 读进内存，没有上限时一个 POST 就能把 daemon 内存打满。新增端点不需要单独处理，但不要在 handler 里 `r.Body` 上再套一层自己的 `MaxBytesReader` 覆盖这个值。
 
 ---
 
@@ -454,20 +454,23 @@ GET /v1/system/info
 
 ---
 
-### 1.9 服务端目录浏览 / 路径校验
+### 1.9 服务端目录浏览 / 路径校验 / 创建目录
 
 （与仓库根 `docs/server-api.md` §1.9 同步）
 
 ```
-GET /v1/fs/list?path=/srv
+GET  /v1/fs/list?path=/srv
 POST /v1/fs/validate
+POST /v1/fs/mkdir
 ```
 
-`list` 返回 `{ "path": "...", "entries": [{ "name", "path", "is_dir", "size", "mtime" }] }`（目录在前，最多 2000 项）；`path` 为空时返回服务端用户主目录。桌面端「添加工作目录」用它浏览服务端目录树（`src/views/agent/workspace.js`）——客户端本机选择框只能看到客户端路径，远程部署时不可用。
+`list` 返回 `{ "path": "...", "entries": [{ "name", "path", "is_dir", "size", "mtime" }] }`（目录在前，最多 2000 项）；`path` 为空时返回服务端用户主目录。
 
 `validate` 请求体 `{ "paths": ["/srv/proj/a"] }`，响应 `{ "results": [{ "path", "exists", "is_dir", "writable" }] }`；越界路径额外带 `error`。
 
-**安全边界**：只允许访问服务端用户主目录、服务端工作目录与已配置的工作目录（先 `EvalSymlinks` 再判前缀），越界返回 `403`；不提供读取文件内容的接口。
+`mkdir` 请求体 `{ "name": "my-project" }`，在**服务端用户主目录**下创建同名文件夹并返回 `{ "path", "name", "created" }`；目录已存在时 `created=false` 直接返回该路径，已有同名文件返回 `400`。`name` 只接受单段目录名（空、`.`、`..`、含 `/` 或 `\` 均返回 `400`）。桌面端「添加工作目录」弹窗只填名称，由它建目录后再 `add_workdir` + 切换工作区（`src/views/agent/workspace.js`）——客户端本机既看不到也建不了服务端目录。
+
+**安全边界**：`list` / `validate` 只允许访问服务端用户主目录、服务端工作目录与已配置的工作目录（先 `EvalSymlinks` 再判前缀），越界返回 `403`；`mkdir` 固定落在服务端用户主目录下。不提供读取文件内容的接口。
 
 ### 1.11 服务端日志
 
@@ -501,6 +504,7 @@ GET /v1/workspaces
   {
     "id": "工作区ID",
     "path": "/path/to/project",
+    "exists": true,
     "yolo": false,
     "debug": false,
     "data_dir": "/path/to/data",
@@ -519,6 +523,11 @@ GET /v1/workspaces
   }
 ]
 ```
+
+语义：
+
+- `exists` 是响应时对 `path` 的实时检查：服务端主机上该路径仍是目录即为 `true`。工作区不会因为目录被删而立即销毁（要等最后一条 SSE 流断开且没有创建 hold），`exists:false` 表示目录已删、工作区还活着；桌面端「项目管理」据此不把该工作区并入项目列表，避免已删除的目录重新出现成打不开的项目。
+- 其余字段与 `proto.Workspace` 一致（`config` 可能较大，按需读取）。
 
 ---
 
@@ -1747,9 +1756,11 @@ POST /v1/workspaces/{id}/mcp/docker/disable
 | --- | --- |
 | `workspace_files` | 目录列表、文件内容与原始下载 |
 | `workspace_files_write` | 重命名文件/目录、写入文件内容 |
+| `workspace_files_delete` | 删除文件/目录（目录连同整棵子树，含项目根目录） |
+| `workspace_files_create` | 新建空文件/文件夹、上传文件 |
 | `workspace_git` | Git 状态与差异 |
 
-老服务端缺少对应项时客户端按能力降级：缺 `workspace_files` 整页不可用并提示升级；缺 `workspace_files_write` 只隐藏「编辑 / 重命名」入口；缺 `workspace_git` 只隐藏 Git 颜色/差异。
+老服务端缺少对应项时客户端按能力降级：缺 `workspace_files` 整页不可用并提示升级；缺 `workspace_files_write` 只隐藏「编辑 / 重命名」入口；缺 `workspace_files_delete` 只隐藏「删除」入口；缺 `workspace_files_create` 只隐藏「新建 / 上传」入口；缺 `workspace_git` 只隐藏 Git 颜色/差异。
 
 ### 11.1 列出目录（单层）
 
@@ -1779,7 +1790,7 @@ GET /v1/workspaces/{id}/files?path=src%2Fviews&show_hidden=1
 语义：
 
 - 排序为「目录优先、名称不区分大小写」；单目录最多 2000 条，超出时 `truncated:true`。
-- 永不返回 `.git` 条目（Windows 上含大小写与结尾点号变体）；其余隐藏文件按 `show_hidden` 决定。
+- 永不返回 `.git` 与 `.tigerAgent` 条目（Windows 上含大小写与结尾点号变体）；其余隐藏文件按 `show_hidden` 决定。`.tigerAgent` 是 tigerAgent 自己的数据目录（配置快照/会话库/撤销快照），不属于项目内容。
 - 符号链接：`symlink:true`；目标在 workspace 内且为目录时 `is_dir:true` 可展开；目标在 workspace 外时 `external:true`，客户端禁用展开/预览。`path` 始终是逻辑相对路径，不是解析后的物理路径。
 - 目录不存在/不可读 → `400`。
 
@@ -1894,6 +1905,93 @@ GET /v1/workspaces/{id}/files/raw?path=assets%2Flogo.png
 - 与 `files/content`（1 MiB 文本预览）互补：无大小上限、不做 UTF-8/二进制判定，字节原样到达，供桌面端「下载到本地」使用。
 - 路径校验与 `files/content` 一致：目录 → `400`；文件不存在 → `404`；`..`/`.git/`/绝对路径/盘符相对路径 → `403`。
 - 文件名取逻辑路径 basename，剔除 `"`、`\` 与控制字符以保证头字段合法。
+
+### 11.2.4 删除文件/目录
+
+```
+POST /v1/workspaces/{id}/files/delete
+Content-Type: application/json
+
+{ "path": "src/old" }
+```
+
+| 参数 | 位置 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | path | 是 | Workspace ID |
+| `path` | body | 是 | 相对路径；空串（或 `.`）表示 workspace 根目录本身 |
+
+**响应** `200 OK`：
+
+```json
+{ "path": "src/old", "name": "old", "is_dir": true }
+```
+
+语义：
+
+- 目录**一次性递归删除整棵子树**（等价 `os.RemoveAll`），不存在「非空目录拒绝」。
+- `path` 为空串时删除 workspace 根目录本身；文件系统根目录与服务端用户的 home 目录一律 `403`（误配置保护）。
+- 符号链接删的是链接本身、不跟随目标，此时 `is_dir:false`。
+- 路径不存在 → `404`；`..`/`.git/`/绝对路径/盘符相对路径 → `403`；删除失败（权限、被占用）→ `400`。
+- 删除后调用方需重新拉目录与 Git 状态；根目录删除后 `git/status` 返回 `exists:false`。
+
+### 11.2.5 新建文件 / 文件夹
+
+```
+POST /v1/workspaces/{id}/files/create
+Content-Type: application/json
+
+{ "path": "src", "name": "new.js", "is_dir": false }
+```
+
+| 参数 | 位置 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | path | 是 | Workspace ID |
+| `path` | body | 否 | 父目录相对路径，默认 `""`（项目根），必须已存在 |
+| `name` | body | 是 | 新条目名称，单个路径段 |
+| `is_dir` | body | 否 | `true` 新建目录；默认新建空文件 |
+
+**响应** `200 OK`：
+
+```json
+{ "path": "src/new.js", "name": "new.js", "is_dir": false }
+```
+
+语义：
+
+- 父目录不存在 → `404`；父路径不是目录 → `400`；同名文件或目录已存在 → `409`。
+- `name` 规则与重命名一致（空 / `.` / `..` / 含路径分隔符或控制字符 → `400`，Windows 额外拒绝 `<>:"|?*` 与点/空格结尾）；`.git` 与 `.tigerAgent` 为保留名 → `403`。
+- 文件按 `0644` 创建、目录按 `0755` 创建。
+
+### 11.2.6 上传文件
+
+```
+POST /v1/workspaces/{id}/files/upload?path=assets&name=logo.png[&overwrite=1]
+Content-Type: application/octet-stream
+
+<原始文件字节>
+```
+
+| 参数 | 位置 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | path | 是 | Workspace ID |
+| `path` | query | 否 | 目标目录相对路径，默认 `""`（项目根），必须已存在 |
+| `name` | query | 是 | 目标文件名（单个路径段） |
+| `overwrite` | query | 否 | `1` 覆盖已存在的同名文件；默认冲突返回 `409` |
+
+请求体是**原始字节**（不做 multipart / base64），按块流式写入目标目录的临时文件后 `rename`，不设大小上限（受服务端磁盘剩余空间限制）；该接口豁免全局 128 MiB 请求体内存上限（body 不经过内存缓冲）。
+
+**响应** `200 OK`：
+
+```json
+{ "path": "assets/logo.png", "name": "logo.png", "size": 20480, "mtime": 1726300000 }
+```
+
+语义：
+
+- 目标目录不存在 → `404`；不是目录 → `400`；同名**目录** → `400`；同名文件且未带 `overwrite=1` → `409`。
+- 覆盖写入沿用原文件权限；落盘走同目录临时文件 + `rename`，并发读取不会看到半截内容。
+- `name` 规则同 `files/create`（含 `.git` / `.tigerAgent` 保留名 → `403`）；磁盘写满等落盘失败 → `400`，不会留下半截文件。
+- 桌面端由 Rust `upload_workspace_files`（原生多选对话框）逐个调用本接口，路径按文件 basename 取。
 
 ### 11.3 Git 状态
 
