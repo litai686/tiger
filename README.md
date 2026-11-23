@@ -79,7 +79,23 @@ bash install-server.sh
 | `TIGER_FORCE` | `0` | `1` 忽略已安装版本、强制重新下载 |
 | `GITHUB_TOKEN` | 未设置 | 可选；GitHub API 限流时提升额度 |
 
-服务端自身日志在 `~/.cache/tigerAgent/tigerAgent.log`；忘记连接串时可用
+### systemd 部署（仅 Linux，推荐服务器长期运行）
+
+需要开机自启、崩溃自动拉起时，用同目录的 `install-server-systemd.sh`（下载 / 校验逻辑与上面一致，额外生成 systemd unit 管理进程）：
+
+```bash
+# 普通用户：用户级单元 ~/.config/systemd/user/tigerAgent.service（systemctl --user，强制开启 linger，失败报错）
+bash install-server-systemd.sh
+
+# root / sudo：系统级单元 /etc/systemd/system/tigerAgent.service，默认以 sudo 调用者身份运行
+sudo bash install-server-systemd.sh
+```
+
+- unit 带 `Restart=on-failure`、`KillSignal=SIGTERM`；`enable` 后会校验 `systemctl is-enabled`，用户级单元强制开启 linger（失败直接报错并给出 `sudo loginctl enable-linger <用户>`），保证系统重启 / 未登录时也自动拉起；系统级数据目录默认 `/var/lib/tigerAgent`（检测到服务用户旧 `~/.local/share/tigerAgent/data/tigerAgent.json` 时自动沿用，身份 / token 不变）
+- 重跑即升级：先覆盖二进制、重写 unit 并 `daemon-reload`（任一步失败都不动正在运行的旧实例），最后才停旧单元（含迁移前遗留的用户级单元）与 `install-server.sh` 留下的 nohup 进程并重启；版本未变也重启
+- 健康检查与连接串回显改读 `journalctl`（`journalctl -u tigerAgent -f`，用户级加 `--user`），启动后先校验 `systemctl is-active`，没有 curl 也能发现启动失败；`TIGER_SYSTEMD_SCOPE`（`user` / `system`）、`TIGER_SERVICE_NAME`、`TIGER_SERVICE_USER` 可覆盖作用域 / 服务名 / 运行用户，其余环境变量同上表；`TIGER_NO_START=1` 只安装并写入 unit、不启用
+
+服务端自身日志在 `~/.cache/tigerAgent/tigerAgent.log`（systemd 系统级服务为运行用户 HOME 下的同一路径）；忘记连接串时可用
 `~/.local/bin/tigerAgent --print-connection --data-dir ~/.local/share/tigerAgent/data` 重新打印。
 
 ## 从源码构建
@@ -115,6 +131,7 @@ pnpm tauri:build:linux      # deb / AppImage
 | `website/` | 产品官网（静态 HTML） |
 | `scripts/` | 构建、签名、图标与官网封面生成脚本，以及服务端二进制推送 |
 | `install-server.sh` | 服务端一键部署脚本：按系统下载 Release 里的 `*_server` 产物、校验、安装并用 nohup 启动 |
+| `install-server-systemd.sh` | 服务端 systemd 部署脚本（仅 Linux）：下载 / 校验同 `install-server.sh`，生成 systemd unit 并 `enable --now`（普通用户装用户级单元，`sudo` 装系统级单元），重跑即升级 |
 
 ## 文档
 

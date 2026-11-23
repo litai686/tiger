@@ -15,6 +15,7 @@
 | `doc/` | 桌面端 + 服务端对接文档（下文索引） |
 | `scripts/` | 构建、签名、`push-agent-binaries.mjs` 等 |
 | `install-server.sh` | 服务端一键部署脚本（仓库根执行 `bash desktop/install-server.sh`）：按 OS / 架构下载 Releases 里的 `*_server` 产物，校验后装到 `~/.local/bin` 并用 nohup 启动（默认监听 `tcp://:6464`）；已装同版本跳过下载；再次执行会先停止运行中的旧实例（SIGTERM → 超时 SIGKILL）再覆盖二进制并重启；不落安装记录 / PID / nohup 日志等额外文件 |
+| `install-server-systemd.sh` | 服务端 systemd 部署脚本（仅 Linux，仓库根执行 `bash desktop/install-server-systemd.sh`，`sudo` 执行装系统级单元）：复用 `install-server.sh` 的下载 / 校验 / 安装，生成 unit（普通用户 → 用户级 `~/.config/systemd/user` + `loginctl enable-linger`；root → 系统级 `/etc/systemd/system`，默认以 sudo 调用者身份运行）并 `enable --now`（校验 `systemctl is-enabled`，用户级单元强制 linger，失败报错）；重跑即升级（覆盖二进制 → 重写 unit → daemon-reload → 停旧单元含遗留用户级单元与 nohup 进程 → 重启）；系统级数据目录默认 `/var/lib/tigerAgent`（自动沿用服务用户旧目录配置），启动后校验 `systemctl is-active`、健康检查与连接串回显读 `journalctl`；`TIGER_NO_START=1` 只装不启用 |
 | `website/` | 营销网站 |
 
 ## 开发命令（始终使用 `pnpm`，不要用 `npm`/`yarn`）
