@@ -65,3 +65,7 @@
 - **附件统一 base64 上传**：`send.js` 对非图片附件也带 `content`（之前只传客户端本地路径，远程服务端读不到），服务端 `ingestAttachments` 先按自己的磁盘判断 `file_path` 是否可用、不可用就用 `content` 落盘到 `<data_dir>/attachments/<session>` 并回填路径后注入 view 引导；附加技能（`skill_selector.js`）同样只传 base64。旧的 Rust `save_attachment_file`、`check_git_repo`、`read/update_project_memory` 已删除。
 - **旧配置迁移**：设置 → 服务端连接 →「旧配置迁移」检测本机残留 `tigerAgent.json`（provider/MCP/代理/vision/开关），用户确认后 `import_local_agent_config` 经 `POST /v1/settings` 推到服务端，并在本机文件写 `__migrated_to_server: true`；工作目录不迁移（本机路径与服务端通常不同，需在服务端重新添加）。
 - **写入白名单**（`internal/backend/config_keys.go`）：`POST /config/set|remove` 只接受桌面端真正管理的键（`agent_proxy.*`、`agent_vision_model.*`、`providers.*`、`mcp.*`、`options.bash_allow_all|project_memory_sync|disabled_skills`、`work_directories`、`recent_models`），`hooks.*`、`data_directory`、`options.context_paths` 等一律 400。
+
+## 服务端进程生命周期
+
+- **默认常驻，workspace 清空不退出**：`internal/backend/backend.go` 的 `teardown`（最后一个 workspace 的最后一个客户端 claim 释放 / `DELETE /v1/workspaces/{id}`，含 10s detach grace）只销毁该 workspace（`app.Shutdown`），**不再联动关闭进程**；tigerAgent 的服务端由用户自行启动（nohup / systemd，见 [build-and-release.md](build-and-release.md)），桌面端只连接不管理进程，旧行为会在用户关掉最后一个项目（或退出桌面端）时把整台服务停掉。开关是 `backend.DefaultAutoExitOnIdle`（默认 false，`TIGERAGENT_SERVER_AUTO_EXIT=1` 或启动参数 `--auto-exit` 恢复），`Backend.SetAutoExitOnIdle` / `Server.SetAutoExitOnIdle` 供测试与启动参数使用。`POST /v1/control` 的 `shutdown` / `shutdown_if_idle` **不受该开关影响**（显式请求 + 空闲判定 + `closing` 闩锁保持原样），仍是客户端停止服务端的唯一途径；空闲但未开自动退出时日志为 `Last workspace removed, server keeps running (idle auto-exit disabled)`（排查「服务端为什么没退出」先看这行）。
