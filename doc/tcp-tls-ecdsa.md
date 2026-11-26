@@ -255,6 +255,7 @@ tigerAgent --host tcp://:18471 --tls=off --allow-plaintext-tcp
 - `TcpTarget { host, port, pin, token }`；`agent_http::AgentHttpClient` 包装 hyper 客户端，在 `request()` 里统一加 `Authorization: Bearer` 与真实 `Host` 头（反向代理按域名路由；直连时服务端不校验 Host）。
 - TLS 配置：`with_no_client_auth()` + 自定义 `SpkiPinVerifier`；不出示客户端证书。SNI 取 `TcpTarget.host`（`ServerName::try_from`，IP 字面量走 `IpAddress` 不发 SNI），身份仍只由 pin 判定——域名 + 反向代理可按 SNI 路由到服务端。
 - **反向代理终止 TLS 的回退**：pin 校验失败且代理证书能被公共根证书（`webpki-roots`）验过域名时，自动改用标准 HTTPS 信任模型建链并置位 `proxy_tls_active()`，设置页提示「TLS 由反向代理终止」；后续连接直接走该模式。直连自签服务端的错误 pin 仍硬失败（公共根证书不信任自签证书）。
+- **连接复用与错误可读性**：普通请求（含建工作区、文件上传/下载）统一走 `shared_client` 的 keep-alive 连接池，只有 SSE 长连接和探活另建冷连接——服务端在 NAT / 反代 / 隧道后时新连接最容易失败，若建工作区单独建连就只剩 `client error (Connect)` 而同一进程的其它请求都正常。传输错误经 `describe_error` 打印完整 `source()` 链（DNS / 拒绝连接 / TLS / 超时），不要只打印 hyper-util 的分类名。
 - 「检测服务端」= 解析连接串 → `/v1/health`（匿名，判断可达）→ `/v1/workspaces`（认证，区分 token 错误）。
 - 设备身份目录 `<app_data>/device/`、`prepare_device_identity` 命令、`rcgen` 依赖均已删除；旧配置里的 `server.mode` / `server.remote.addr` / `server.remote.fingerprint` 会被忽略，需要重新粘贴连接串。
 

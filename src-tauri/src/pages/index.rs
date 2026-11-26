@@ -80,7 +80,10 @@ pub async fn get_system_info(app: tauri::AppHandle) -> Result<SystemInfo, AppErr
         Some(target) => target,
         None => crate::common::server_mode::apply(&app)?,
     };
-    let client = agent_http::build_client(&target, std::time::Duration::from_secs(3))
+    // 底部硬件栏每 5s 轮询一次：必须复用共享连接池，不能每次 build_client——
+    // 否则每次轮询都新建一条 TCP + TLS 连接，远程部署下不仅浪费握手，还会在
+    // NAT / 反向代理 / 隧道限制并发连接时把可用连接额度耗在轮询上。
+    let client = agent_http::shared_client(&target, std::time::Duration::from_secs(5))
         .map_err(AppError::msg)?;
     let (status, body) = tokio::time::timeout(
         std::time::Duration::from_secs(8),

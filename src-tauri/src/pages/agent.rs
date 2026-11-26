@@ -2297,23 +2297,26 @@ pub async fn start_agent_server(
                     validate_paths_on_server(std::slice::from_ref(&requested_workdir)).await,
                     Some(missing) if !missing.is_empty()
                 );
+                let message = e.message(&requested_workdir);
                 if !path_gone {
-                    return Err(e);
+                    return Err(AppError::msg(message));
                 }
                 eprintln!(
                     "[Agent] 服务端工作目录 {} 已不存在（{}），回退到服务端当前目录",
-                    requested_workdir, e
+                    requested_workdir, message
                 );
                 create_workspace_on_server(&target, &client_id, ".")
                     .await
                     .map_err(|fallback_err| {
                         AppError::msg(format!(
                             "使用服务端工作目录 {} 创建工作区失败（{}）；回退到服务端当前目录也失败: {}",
-                            requested_workdir, e, fallback_err
+                            requested_workdir,
+                            message,
+                            fallback_err.message(".")
                         ))
                     })?
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(AppError::msg(e.message(&requested_workdir))),
         };
 
     let sse_stop = Arc::new(AtomicBool::new(false));
@@ -2837,33 +2840,73 @@ pub fn kill_agent_session(state: &AppState) {
 
 // ===== 新增：多 workspace 管理命令 =====
 
+/// `create_workspace_on_server` 的失败原因。
+///
+/// 调用方要区分「连不上服务端」和业务错误：前者补可操作提示，后者只把 HTTP 状态
+/// 抛给用户。用类型区分而不是匹配错误文案——改文案不会让提示逻辑静默失效。
+enum CreateWorkspaceFailure {
+    /// 请求整体超时（10s）：服务端可能卡住，立刻重试没有意义
+    Timeout,
+    /// 传输层失败（连不上 / TLS 握手失败 / 响应中断）；值已带完整原因链
+    Transport(String),
+    /// 服务端返回非 2xx
+    Http { status: u16 },
+}
+
+impl CreateWorkspaceFailure {
+    /// 用户可见文案（与改动前逐字一致：`start_agent_server` 的回退日志也用它）
+    fn message(&self, path: &str) -> String {
+        match self {
+            Self::Timeout => "创建工作区超时".to_string(),
+            Self::Transport(e) => format!("创建工作区失败: {}", e),
+            Self::Http { status } => format!("创建工作区失败: HTTP {}（路径：{}）", status, path),
+        }
+    }
+
+    /// 是否是「服务端不可达」类失败（只有这类才补连接提示）
+    fn is_connection_failure(&self) -> bool {
+        matches!(self, Self::Timeout | Self::Transport(_))
+    }
+}
+
 /// 在服务端创建/复用 workspace，返回 `(workspace_id, workspace_path)`。
-/// `path` 必须按服务端视角解释；非 2xx 直接返回错误，由调用方决定是否回退。
+/// `path` 必须按服务端视角解释；失败原因按 [`CreateWorkspaceFailure`] 分类返回，
+/// 由调用方决定是回退还是上报。
 async fn create_workspace_on_server(
     target: &TcpTarget,
     client_id: &str,
     path: &str,
-) -> Result<(String, String), AppError> {
-    let client = build_client(target, Duration::from_secs(5))
-        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
-
-    let (status, bytes) = tokio::time::timeout(
-        Duration::from_secs(10),
-        agent_http::send(
-            &client,
-            "POST",
-            "/v1/workspaces",
-            Some(serde_json::json!({ "path": path, "client_id": client_id })),
-        ),
-    )
-    .await
-    .map_err(|_| "创建工作区超时".to_string())?
-    .map_err(|e| format!("创建工作区失败: {}", e))?;
+) -> Result<(String, String), CreateWorkspaceFailure> {
+    let payload = || serde_json::json!({ "path": path, "client_id": client_id });
+    // 走共享连接池而不是临时 build_client：列表 / 设置 / 文件这些请求都复用同一条
+    // keep-alive 连接，建工作区却新建客户端只会多做一次 TCP + TLS 握手。服务端在 NAT /
+    // 反向代理 / 隧道后面时，新连接恰恰是最容易失败的一步——表现为
+    // "client error (Connect)"，而同一进程里走共享连接池的请求全部正常。
+    let post = |client: agent_http::AgentHttpClient, body: serde_json::Value| async move {
+        match tokio::time::timeout(
+            Duration::from_secs(10),
+            agent_http::send(&client, "POST", "/v1/workspaces", Some(body)),
+        )
+        .await
+        {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(e)) => Err(CreateWorkspaceFailure::Transport(e)),
+            Err(_) => Err(CreateWorkspaceFailure::Timeout),
+        }
+    };
+    let client = agent_http::shared_client(target, Duration::from_secs(5))
+        .map_err(CreateWorkspaceFailure::Transport)?;
+    let mut result = post(client.clone(), payload()).await;
+    if matches!(result, Err(CreateWorkspaceFailure::Transport(_))) {
+        // 同一连接池再试一次：健康连接原地复用（NAT / 反向代理限制新连接时这是唯一能成功的路径），
+        // 池里的死连接会被 hyper 判废后自动新建。POST /v1/workspaces 按 path 幂等，
+        // 第一次实际已建好、只是响应丢失时，重试会拿回同一个 workspace。
+        api_debug_log(|| format!("HTTP ! POST /v1/workspaces 传输失败，重试一次 path={}", path));
+        result = post(client, payload()).await;
+    }
+    let (status, bytes) = result?;
     if !(200..300).contains(&status) {
-        return Err(AppError::msg(format!(
-            "创建工作区失败: HTTP {}（路径：{}）",
-            status, path
-        )));
+        return Err(CreateWorkspaceFailure::Http { status });
     }
 
     let body: serde_json::Value =
@@ -2882,6 +2925,22 @@ async fn create_workspace_on_server(
     Ok((workspace_id, workspace_path))
 }
 
+/// 连接类失败（连不上服务端）时补一句可操作提示：项目页 / 工作目录切换都依赖
+/// 服务端在线，只给 "client error (Connect)" 用户既不知道原因也不知道怎么重试。
+/// HTTP 4xx/5xx 是业务错误，不加这条提示。
+fn with_connection_hint(err: CreateWorkspaceFailure, target: &TcpTarget, path: &str) -> String {
+    let connection_failure = err.is_connection_failure();
+    let text = err.message(path);
+    if !connection_failure {
+        return text;
+    }
+    format!(
+        "{}（无法连接服务端 {}：请确认服务端仍在运行、地址可达；恢复后重新点击该项目 / 工作目录即可重试）",
+        text,
+        target.display()
+    )
+}
+
 /// 在已运行的 Agent server 上创建新 workspace 并启动独立 SSE 转发。
 /// 不影响已有 workspace 的运行。
 #[tauri::command]
@@ -2898,8 +2957,9 @@ pub async fn create_workspace(
     // 使用前端传入的 client_id（同 start_agent_server）
     let client_id = generate_client_id(client_id);
 
-    let (workspace_id, workspace_path) =
-        create_workspace_on_server(&target, &client_id, &path).await?;
+    let (workspace_id, workspace_path) = create_workspace_on_server(&target, &client_id, &path)
+        .await
+        .map_err(|e| AppError::msg(with_connection_hint(e, &target, &path)))?;
 
     // 检查是否已有该 workspace 的活 SSE 转发任务。切回已存在的 path 时
     // Go 端按 path 去重返回同一 workspace_id，若这里无条件 spawn 新任务
@@ -2998,7 +3058,9 @@ pub async fn download_workspace_file(
         bail!("缺少 workspace 或文件路径");
     }
     let target = require_target()?;
-    let client = build_client(&target, Duration::from_secs(5))
+    // 走共享连接池：项目页的目录 / 预览请求已经占着一条 keep-alive 连接，临时新建客户端
+    // 只会多一次握手；服务端在 NAT / 反向代理后时，新连接反而是最容易失败的一步。
+    let client = agent_http::shared_client(&target, Duration::from_secs(5))
         .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
     let url = format!(
         "/v1/workspaces/{}/files/raw?path={}",
@@ -3174,7 +3236,8 @@ pub async fn upload_workspace_files(
         bail!("用户取消了上传");
     }
 
-    let client = build_client(&target, Duration::from_secs(5))
+    // 同下载：上传复用共享连接池，不额外建连（大文件仍按块流式发送）。
+    let client = agent_http::shared_client(&target, Duration::from_secs(5))
         .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
     let mut uploaded: Vec<String> = Vec::new();
     let file_count = picked.len();
@@ -4276,5 +4339,34 @@ mod cloud_provider_view_tests {
         assert_eq!(list[0].model_id, "m1");
         assert!(list[0].has_key);
         assert!(list[0].supports_images);
+    }
+}
+
+#[cfg(test)]
+mod create_workspace_failure_tests {
+    use super::*;
+
+    #[test]
+    fn messages_match_user_visible_contract() {
+        assert_eq!(
+            CreateWorkspaceFailure::Timeout.message("/root/ad"),
+            "创建工作区超时"
+        );
+        assert_eq!(
+            CreateWorkspaceFailure::Transport("HTTP 请求失败: client error (Connect)".to_string())
+                .message("/root/ad"),
+            "创建工作区失败: HTTP 请求失败: client error (Connect)"
+        );
+        assert_eq!(
+            CreateWorkspaceFailure::Http { status: 500 }.message("/root/ad"),
+            "创建工作区失败: HTTP 500（路径：/root/ad）"
+        );
+    }
+
+    #[test]
+    fn only_connection_failures_are_hinted() {
+        assert!(CreateWorkspaceFailure::Timeout.is_connection_failure());
+        assert!(CreateWorkspaceFailure::Transport("x".to_string()).is_connection_failure());
+        assert!(!CreateWorkspaceFailure::Http { status: 400 }.is_connection_failure());
     }
 }

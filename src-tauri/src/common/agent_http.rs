@@ -466,6 +466,26 @@ pub fn uri_for(path: &str) -> Result<Uri, String> {
         .map_err(|e| format!("无效的请求路径 {}: {}", path, e))
 }
 
+/// 把错误连同底层原因拼成一条可读消息。
+///
+/// hyper-util 只把传输失败归类成 `client error (Connect)` / `client error (SendRequest)`，
+/// 真正原因（DNS 解析失败、连接被拒、TLS 握手 / 指纹不匹配、建连超时）都藏在
+/// `source()` 链里。只打印第一层时，界面和日志里只剩一个无法排查的分类名，
+/// 因此逐层拼接底层原因。
+pub fn describe_error(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !text.is_empty() && !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        source = cause.source();
+    }
+    out
+}
+
 /// 发送一次请求并读完整响应体，返回 (HTTP 状态码, 响应体字节)。
 /// 调用方负责整体超时与状态码语义（202/204/200/4xx…）。
 pub async fn send(
@@ -490,13 +510,13 @@ pub async fn send(
     let resp = client
         .request(req)
         .await
-        .map_err(|e| format!("HTTP 请求失败: {}", e))?;
+        .map_err(|e| format!("HTTP 请求失败: {}", describe_error(&e)))?;
     let status = resp.status().as_u16();
     let collected = resp
         .into_body()
         .collect()
         .await
-        .map_err(|e| format!("读取响应失败: {}", e))?;
+        .map_err(|e| format!("读取响应失败: {}", describe_error(&e)))?;
     Ok((status, collected.to_bytes().to_vec()))
 }
 
@@ -561,13 +581,13 @@ pub async fn send_file(
     let resp = client
         .request(req)
         .await
-        .map_err(|e| format!("HTTP 请求失败: {}", e))?;
+        .map_err(|e| format!("HTTP 请求失败: {}", describe_error(&e)))?;
     let status = resp.status().as_u16();
     let collected = resp
         .into_body()
         .collect()
         .await
-        .map_err(|e| format!("读取响应失败: {}", e))?;
+        .map_err(|e| format!("读取响应失败: {}", describe_error(&e)))?;
     Ok((status, collected.to_bytes().to_vec()))
 }
 
@@ -589,7 +609,7 @@ pub async fn stream_get(
     let resp = client
         .request(req)
         .await
-        .map_err(|e| format!("HTTP 请求失败: {}", e))?;
+        .map_err(|e| format!("HTTP 请求失败: {}", describe_error(&e)))?;
     Ok((resp.status().as_u16(), resp.into_body()))
 }
 
@@ -610,7 +630,7 @@ pub async fn stream_get_with_headers(
     let resp = client
         .request(req)
         .await
-        .map_err(|e| format!("HTTP 请求失败: {}", e))?;
+        .map_err(|e| format!("HTTP 请求失败: {}", describe_error(&e)))?;
     let status = resp.status().as_u16();
     let headers = resp.headers().clone();
     Ok((status, headers, resp.into_body()))
@@ -652,6 +672,36 @@ mod tests {
         assert_eq!(target("example.com", 8000).authority(), "example.com:8000");
         assert_eq!(target("::1", 443).authority(), "[::1]");
         assert_eq!(target("::1", 8000).authority(), "[::1]:8000");
+    }
+
+    #[test]
+    fn describe_error_walks_sources() {
+        #[derive(Debug)]
+        struct Cause;
+        impl std::fmt::Display for Cause {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "由于目标计算机积极拒绝，无法连接。")
+            }
+        }
+        impl std::error::Error for Cause {}
+
+        #[derive(Debug)]
+        struct Wrapper(Cause);
+        impl std::fmt::Display for Wrapper {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "client error (Connect)")
+            }
+        }
+        impl std::error::Error for Wrapper {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        assert_eq!(
+            describe_error(&Wrapper(Cause)),
+            "client error (Connect): 由于目标计算机积极拒绝，无法连接。"
+        );
     }
 
     #[test]
