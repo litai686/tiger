@@ -76,7 +76,7 @@
 
 ## 项目管理视图（`#/projects`）
 
-- **视图结构**：左栏顶部工作目录下拉选择器（Rust `get_workdirs` ∪ `GET /v1/workspaces`，按路径去重；`GET /v1/workspaces` 里 `exists:false` 的条目——目录已在服务端删除、工作区还没随 SSE 断开销毁——直接丢弃，否则删完项目根目录切页回来会重现成打不开的项目；默认选中默认工作目录，即服务端 `work_directories` 的 `is_default`／当前工作目录）+ 下方懒加载文件树（默认全部收起，只显示项目根节点）；右侧 TAB 为 `预览 / 差异`，默认显示源文件内容，差异 TAB 仅在选中文件有 Git 变更时出现（双击变更文件可直接打开差异），差异内可切工作区/暂存。Git 命令面板已移除，项目管理只保留文件浏览与差异查看。目录一次只拉一层（`GET /v1/workspaces/{id}/files`，服务端固定隐藏 `.git` 与 `.tigerAgent`），Git 状态由服务端 `git status --porcelain=v1 -z` 解析，目录颜色由前端按子树最高优先级聚合。
+- **视图结构**：左栏顶部工作目录下拉选择器（Rust `get_workdirs` ∪ `GET /v1/workspaces`，按路径去重；`GET /v1/workspaces` 里 `exists:false` 的条目——目录已在服务端删除、工作区还没随 SSE 断开销毁——直接丢弃，否则删完项目根目录切页回来会重现成打不开的项目；服务端 cwd 占位 `.`（`isServerCwdPath`，老服务端没有默认工作目录时 `start_agent_server` 用它建工作区）不是可浏览的项目目录，workdir 与 workspace 两侧都过滤掉、不展示；默认选中默认工作目录，即服务端 `work_directories` 的 `is_default`／当前工作目录）+ 下方懒加载文件树（默认全部收起，只显示项目根节点）；右侧 TAB 为 `预览 / 差异`，默认显示源文件内容，差异 TAB 仅在选中文件有 Git 变更时出现（双击变更文件可直接打开差异），差异内可切工作区/暂存。Git 命令面板已移除，项目管理只保留文件浏览与差异查看。目录一次只拉一层（`GET /v1/workspaces/{id}/files`，服务端固定隐藏 `.git` 与 `.tigerAgent`），Git 状态由服务端 `git status --porcelain=v1 -z` 解析，目录颜色由前端按子树最高优先级聚合。
 - **workspace 存活依赖 SSE**：服务端在最后一条 SSE 流断开且无 hold 时会 teardown workspace。项目页每次选中项目都调用 `create_workspace({path, clientId})`（服务端按 path 幂等、Rust 复用已有 SSE 任务），返回的 `workspace_id` 作为后续所有请求的 id；不调用 `switch_workspace`（会改 Agent 页的激活 workspace）。
 - **嵌套仓库**：主目录不是仓库但子目录是仓库时，服务端聚合子仓库状态（`nested_repos`），树与差异照常着色；状态栏显示「子目录 Git 仓库: N 个」。
 - **能力门禁**：进入页面先 `GET /v1/version`；缺 `workspace_files` 整页提示升级，缺 `workspace_files_write` 隐藏「编辑 / 重命名」入口，缺 `workspace_files_delete` 隐藏「删除」入口、缺 `workspace_files_create` 隐藏「新建 / 上传」入口（仍可浏览/下载），缺 `workspace_git` 隐藏颜色/差异，只保留文件浏览。

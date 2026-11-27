@@ -194,6 +194,11 @@ export function reset() {
   }
 }
 
+/** "."（及 "./"）是服务端自身 cwd 的占位路径，不是服务端主机上的真实项目目录。 */
+export function isServerCwdPath(path) {
+  return normalizePath(path) === ".";
+}
+
 export async function loadProjects() {
   state.projectsLoading = true;
   state.projectsError = "";
@@ -213,7 +218,7 @@ export async function loadProjects() {
     const list = [];
     for (const d of dirs || []) {
       const path = String(d.path || "");
-      if (!path) continue;
+      if (!path || isServerCwdPath(path)) continue;
       const key = normalizePath(path);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -230,6 +235,9 @@ export async function loadProjects() {
     for (const w of workspaces || []) {
       const path = String(w.path || "");
       if (!path) continue;
+      // 服务端 cwd 占位（老服务端没有默认工作目录时 start_agent_server 用它建工作区）
+      // 不是可选择的项目目录，项目管理页不展示。
+      if (isServerCwdPath(path)) continue;
       // 目录已在服务端被删除、但工作区仍存活（最后一条 SSE 流断开前不会销毁）：
       // 并进列表只会得到一个打不开的项目（删完项目根目录后切页重现）。
       // 老服务端没有 exists 字段时为 undefined，按存在处理。
